@@ -1,0 +1,103 @@
+# Every push to main becomes the release the installed browser updates to:
+# built by build.sh, signed with the fork's release key (Updater.signer), and
+# published as the repository's latest GitHub release. The browser reads
+# releases/latest/download/appcast.json.zip at launch and every hour, and
+# Search › Check for Updates… reads it at once.
+#
+# Two repository secrets hold the key:
+#   SIGNING_P12           the key and its certificate, as a base64 .p12
+#   SIGNING_P12_PASSWORD  the .p12's password
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One release at a time, in the order they were pushed: a later build must
+# never be published before an earlier one, or `latest` would go backwards.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # macOS 27 with Xcode 27: the sources use the macOS 27 SDK.
+    runs-on: xcode-27
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.1.app
+          xcodebuild -version
+          swift --version
+
+      # A keychain of its own, gone with the runner: build.sh finds the key
+      # in it by name, as it does in the login keychain on a Mac.
+      - name: Release key
+        env:
+          SIGNING_P12: ${{ secrets.SIGNING_P12 }}
+          SIGNING_P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+        run: |
+          [ -n "$SIGNING_P12" ] || { echo "the SIGNING_P12 secret is missing" >&2; exit 1; }
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          PASSWORD="$(openssl rand -hex 24)"
+          security create-keychain -p "$PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASSWORD" "$KEYCHAIN"
+          printf '%s' "$SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/release.p12"
+          security import "$RUNNER_TEMP/release.p12" -k "$KEYCHAIN" -f pkcs12 \
+            -P "$SIGNING_P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/release.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          security find-identity -p codesigning "$KEYCHAIN"
+
+      # The build number and the tag first, so the appcast can name the
+      # release's own addresses.
+      - name: Build
+        run: |
+          BUILD="$(date -u +%Y%m%d%H%M)"
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          TAG="v$VERSION-$BUILD"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          SEARCH_BUILD="$BUILD" \
+          SEARCH_DOWNLOAD_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" \
+            ./build.sh release dmg
+
+      # What the installed browser will check, checked here first: a feed or
+      # an app it would refuse would stop every update without a word.
+      - name: Check
+        run: |
+          SIGNER="$(sed -n 's/.*static let signer = "\([0-9a-f]*\)".*/\1/p' Sources/Search/Updater.swift)"
+          [ ${#SIGNER} -eq 40 ] || { echo "no signer in Updater.swift" >&2; exit 1; }
+          codesign --verify --strict --deep \
+            -R="identifier \"com.officecommun.search\" and certificate leaf = H\"$SIGNER\"" build/Search.app
+          CHECK="$(mktemp -d)"
+          ditto -x -k build/appcast.json.zip "$CHECK"
+          codesign --verify \
+            -R="identifier \"com.officecommun.search.appcast\" and certificate leaf = H\"$SIGNER\"" "$CHECK/appcast.json"
+          cmp build/appcast.json "$CHECK/appcast.json"
+          cat build/appcast.json
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Built from ${GITHUB_SHA::7} on main."
+            echo
+            git log -1 --format=%B
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" \
+            build/Search.zip build/Search.dmg build/appcast.json build/appcast.json.zip \
+            --title "Search $VERSION ($TAG)" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --target "$GITHUB_SHA" \
+            --latest

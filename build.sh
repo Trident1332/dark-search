@@ -10,8 +10,10 @@
 #   SEARCH_DEV=1 SEARCH_FEATURE=name ./build.sh
 #                              the same, named Search-name
 #   ./build.sh release dmg     + build/Search.dmg, build/Search.zip and
-#                                build/appcast.json, signed with Developer ID
-#                                if there is one in the keychain
+#                                build/appcast.json, signed with the release
+#                                key (or a Developer ID) if one is in the
+#                                keychain — what .github/workflows/release.yml
+#                                publishes on every push to main
 #   ./build.sh release ship    + both notarised, the DMG stapled
 #
 #   SEARCH_ARCH=x86_64 ./build.sh release ship
@@ -93,8 +95,12 @@ if [ "$DEV" = 1 ]; then
 fi
 VERSION="$(tr -d '[:space:]' < VERSION)"
 # A build number that only ever goes up, so the updater can tell newer from
-# older without parsing version strings.
-BUILD="$(date +%Y%m%d%H%M)"
+# older without parsing version strings. In UTC, so a build made on this Mac
+# and one made by the release workflow on GitHub's are on the same clock;
+# SEARCH_BUILD hands one in, which the workflow does so it can name the
+# release's tag, and the addresses in the appcast, before building.
+BUILD="${SEARCH_BUILD:-$(date -u +%Y%m%d%H%M)}"
+[[ "$BUILD" =~ ^[0-9]{12}$ ]] || { echo "SEARCH_BUILD is twelve digits, YYYYMMDDHHMM, not “$BUILD”" >&2; exit 1; }
 # The oldest macOS this runs on — in the plist, and in the appcast so an
 # older Mac is not handed a build it can't open.
 MINIMUM="14.0"
@@ -136,7 +142,10 @@ cp Search.sdef "$APP/Contents/Resources/"
 if [ "$CONFIG" = "release" ]; then
   rm -rf "$APP.dSYM"
   dsymutil "$BINARY" -o "$APP.dSYM" 2>/dev/null || echo "no dSYM this time" >&2
-  strip -x "$APP/Contents/MacOS/$NAME"
+  # Xcode's strip, not whichever is first on the PATH: Homebrew's binutils
+  # puts GNU strip there, which leaves a Mach-O the kernel won't load, and
+  # the app is killed the moment it opens.
+  xcrun strip -x "$APP/Contents/MacOS/$NAME"
 fi
 
 # The icon, drawn fresh each time — it is thirty lines of Swift, not an asset
@@ -271,12 +280,20 @@ if [ "$DEV" = 1 ]; then
   /usr/libexec/PlistBuddy -c "Add :LSHasLocalizedDisplayName bool true" "$APP/Contents/Info.plist"
 fi
 
-# Signing. A Developer ID certificate, when there is one, with the hardened
-# runtime Gatekeeper insists on for anything notarised; otherwise ad-hoc,
-# which is enough for the app to run on the machine that built it — and
-# which the updater refuses to swap anything in under.
-IDENTITY="${SEARCH_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
-  | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"' || true)}"
+# Signing. This fork's release key, "Dark Search Release Signing", when it is
+# in a keychain here — the one certificate Updater.signer trusts, so a build
+# signed with it updates itself from the repository's releases, and keeps
+# its keychain items and permissions from one build to the next. It signs
+# itself rather than coming from Apple, so find-identity lists it as not
+# trusted, and it is named by its hash. Otherwise a Developer ID certificate,
+# when there is one, with the hardened runtime Gatekeeper insists on for
+# anything notarised; otherwise ad-hoc, which is enough for the app to run
+# on the machine that built it — and which the updater refuses to swap
+# anything in under.
+IDENTITY="${SEARCH_SIGN_IDENTITY:-$(security find-identity -p codesigning 2>/dev/null \
+  | awk '/"Dark Search Release Signing"/ { print $2; exit }' || true)}"
+[ -z "$IDENTITY" ] && IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+  | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"' || true)"
 # Passkeys need an entitlement Apple grants to browsers on request, and a
 # Developer ID provisioning profile that carries it. With the profile next to
 # this script, both go in; without it, the app is signed as before, because

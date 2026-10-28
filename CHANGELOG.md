@@ -22,6 +22,7 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Fixed
 
+- `build.sh` strips the app with Xcode's `strip`, not whichever is first on the PATH: Homebrew's binutils puts GNU strip there, which left a binary the kernel wouldn't load, and the app was killed as soon as it opened.
 - Settings' switches slide smoothly: the knob moves first and the setting follows once it has arrived, where changing the setting mid-slide redrew the page under it and made the knob stutter.
 - Find a setting lets go of the keys when a section or anywhere on the page is clicked; its caret stayed until something else took them.
 - With tabs across the top, a Split View pair is as tall as the tabs beside it (it stood 40 points high beside 28), and its close button stays under the pointer: moving onto it no longer took the hover from the half under it, so it no longer faded out or changed which page it closes on the way. Reported on X
@@ -49,6 +50,7 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Changed
 
+- This fork updates itself from its own GitHub releases (Trident1332/dark-search): every push to main is built, signed with the fork's release key and published as the latest release by `.github/workflows/release.yml`, and the installed browser takes it at launch, every hour, or at Search › Check for Updates…. Updates are trusted by that key's certificate, pinned in `Updater.signer`, instead of Office Commun's Developer ID; build numbers are now in UTC so a build made on a Mac and one made on GitHub's runner compare.
 - Settings says less and sits flatter: no line of explanation under each group's heading, every row of a card at the same level (Darken pages that stay light, Hide the column and The page as a card no longer indented under the row they depend on), and the hairlines between rows run from one edge of the card to the other. Every setting is still there, and still found by its words.
 - ⌘W on a tab in a group puts it away rather than closing it, as Arc keeps a folder's tabs: its page is let go, its row stays in the group, and a click opens it again at the page it was on. Its cross shows a minus while the page is open; on a row already put away, the cross or Close Tab closes it for good, and ⇧⌘T brings it back into its group. A page of a Split View pair in a group is put away out of its pair. Close Other Tabs, Close Tabs Below, Clear and Close Group close as before (idea 398). Asked for by email
 - Settings' buttons say just what they do, in a word or two: Change, New Profile, Open and Choose lose their trailing dots, Bring Things Over is Transfer, Bring them over is Import, Forget choices is Forget, and Sign out of everything is Sign Out. The File menu keeps Bring Things Over….

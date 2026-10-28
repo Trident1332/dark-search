@@ -23,7 +23,9 @@ import Security
 // `.old` bundle it set aside.
 //
 // build.sh writes the file (build/appcast.json) at the same time as the DMG
-// and the ZIP; publish.sh puts all three where `feed` points.
+// and the ZIP. In this fork, .github/workflows/release.yml runs it on every
+// push to main and publishes all of them as the repository's latest GitHub
+// release, which is where `feed` points.
 
 @MainActor
 final class Updater: ObservableObject {
@@ -33,21 +35,26 @@ final class Updater: ObservableObject {
     /// else — and is the only way plain http is accepted, so a build that
     /// was not handed the variable only ever listens to the real site.
     /// SEARCH_FEED points a test run at a feed of its own. Only a test run:
-    /// the browser people use reads Office Commun's feed whatever the
+    /// the browser people use reads this repository's releases whatever the
     /// environment it was started with says.
     static let feed: URL = {
         if overridden, let set = ProcessInfo.processInfo.environment["SEARCH_FEED"], let url = URL(string: set) {
             return url
         }
-        // An Intel Mac has a download of its own from 1.0.5 (build.sh,
-        // SEARCH_ARCH=x86_64) and a feed beside it naming only Intel builds,
-        // so neither kind of Mac is ever offered the other's.
+        // GitHub answers `latest/download/<file>` with that file from the
+        // newest release, so the address never changes. An Intel Mac reads a
+        // feed of its own, so neither kind of Mac is ever offered the other's;
+        // the workflow only builds for Apple Silicon so far, so no release
+        // carries one yet.
         #if arch(x86_64)
-        return URL(string: "https://officecommun.com/search/intel/appcast.json")!
+        return URL(string: "https://github.com/\(repository)/releases/latest/download/appcast-intel.json")!
         #else
-        return URL(string: "https://officecommun.com/search/appcast.json")!
+        return URL(string: "https://github.com/\(repository)/releases/latest/download/appcast.json")!
         #endif
     }()
+
+    /// The GitHub repository whose releases this build updates from.
+    static let repository = "Trident1332/dark-search"
 
     private static var overridden: Bool {
         Store.testing && ProcessInfo.processInfo.environment["SEARCH_FEED"] != nil
@@ -228,7 +235,7 @@ final class Updater: ObservableObject {
                     if Store.testing { Updater.diskVerdict = "verified" } else { NSWorkspace.shared.open(dmg) }
                 case .failure(let error):
                     Updater.diskVerdict = "refused: \(error)"
-                    say?("That download didn't check out — get Search from searchbrowser.app")
+                    say?("That download didn't check out — get Search from github.com/\(Updater.repository)/releases")
                 }
             }
         }
@@ -353,15 +360,25 @@ final class Updater: ObservableObject {
         return data
     }
 
-    /// The team that signs Search's releases, and with them its feed.
+    /// Office Commun's team, which signs their AI engine (AIEngine). This
+    /// fork's releases aren't theirs: see `signer`.
     nonisolated static let team = "7BYKA895MC"
     nonisolated static let feedIdentifier = "com.officecommun.search.appcast"
 
-    /// The feed inside `packed`, if it is Office Commun's: appcast.json with
-    /// a code signature (codesign keeps it in the file's extended attributes,
-    /// and ditto carries those in the ZIP) that holds up and meets the
-    /// Developer ID requirement for the team and the feed's own identifier.
-    /// No new key to keep: the one that signs the app signs its feed.
+    /// The certificate that signs this fork's releases, and with them its
+    /// feed: "Dark Search Release Signing", a key of the fork's own rather
+    /// than a Developer ID, pinned by the SHA-1 of its certificate (what
+    /// `codesign -d -r-` prints after `certificate root = H`). The key lives
+    /// in the login keychain of the Mac that made it and in the repository's
+    /// secrets, for the release workflow. A build signed with anything else
+    /// is never swapped in, and a feed signed with anything else is no feed.
+    nonisolated static let signer = "e8826800d320861f7e9cd952cbf69e195c620d63"
+
+    /// The feed inside `packed`, if it is this fork's: appcast.json with a
+    /// code signature (codesign keeps it in the file's extended attributes,
+    /// and ditto carries those in the ZIP) that holds up and was made with
+    /// the release key, under the feed's own identifier. No new key to keep:
+    /// the one that signs the app signs its feed.
     nonisolated static func opened(_ packed: Data) -> Data? {
         let files = FileManager.default
         let folder = files.temporaryDirectory.appendingPathComponent("search-feed-\(UUID().uuidString)", isDirectory: true)
@@ -378,14 +395,15 @@ final class Updater: ObservableObject {
         else { return nil }
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(file as CFURL, [], &code) == errSecSuccess, let code,
-              let requirement = Swap.developerID(team: team, identifier: feedIdentifier),
+              let requirement = Swap.signedBy(signer, identifier: feedIdentifier),
               SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess
         else { return nil }
         return data
     }
 
     /// An address from the feed: https, unless the feed itself was pointed
-    /// at a test server, and on the feed's own host. The ZIP is checked
+    /// at a test server, on the feed's own host and, since github.com is
+    /// everybody's, among this repository's releases. The ZIP is checked
     /// again by hash and signature before it is ever run, but the DMG is
     /// only ever offered, under the app's own "is out" line - so a feed
     /// that a compromised host or a hijacked DNS answer could redirect must
@@ -394,6 +412,7 @@ final class Updater: ObservableObject {
         guard let url = (value as? String).flatMap(URL.init(string:)) else { return nil }
         guard url.scheme == "https" || (overridden && url.scheme == "http") else { return nil }
         guard url.host == feed.host else { return nil }
+        guard overridden || url.path.hasPrefix("/\(repository)/releases/download/") else { return nil }
         return url
     }
 }
@@ -403,7 +422,7 @@ final class Updater: ObservableObject {
 /// scratch folder it made and the `.old` bundle it set aside.
 private enum Swap {
     enum Refused: Error {
-        case unsignedHere, readOnly, download, hash, archive, plist, wrongApp, notNewer, unsigned, wrongTeam, move
+        case unsignedHere, readOnly, download, hash, archive, plist, wrongApp, notNewer, unsigned, move
     }
 
     /// Where the bundle lives, and so where the new one goes.
@@ -417,10 +436,10 @@ private enum Swap {
 
     static func install(_ release: Updater.Release) async throws {
         let files = FileManager.default
-        // No Team ID on this build means it was signed ad hoc — a development
-        // build. Nothing is ever swapped in under an app that could not be
-        // told apart from anything else.
-        guard let team = teamID(of: target) else { throw Refused.unsignedHere }
+        // A build not signed with the release key was signed ad hoc, or with
+        // somebody else's — a development build. Nothing is ever swapped in
+        // under an app that could not be told apart from anything else.
+        guard signer(of: target) == Updater.signer else { throw Refused.unsignedHere }
         // The folder the app is in has to take a rename, or nothing here can
         // be done: /Applications owned by another account, a disk image.
         guard files.isWritableFile(atPath: target.deletingLastPathComponent().path) else {
@@ -445,7 +464,7 @@ private enum Swap {
         guard let fresh = try files.contentsOfDirectory(at: unpacked, includingPropertiesForKeys: nil)
             .first(where: { $0.pathExtension == "app" })
         else { throw Refused.archive }
-        try verify(fresh, team: team)
+        try verify(fresh)
         try swap(fresh)
     }
 
@@ -492,12 +511,11 @@ private enum Swap {
 
     /// A bundle is not trusted because it arrived. It is trusted because it
     /// is this app, newer, with a signature that holds up under the strict
-    /// check for every architecture and meets Developer ID's requirement:
-    /// a certificate chain that ends at Apple's root, through Apple's
-    /// Developer ID authority, issued to the same team as the one running.
-    /// A Team ID read from the signature alone is only what the certificate
+    /// check for every architecture and was made with the release key: its
+    /// certificate is the one pinned in `Updater.signer`, byte for byte. A
+    /// name read from the certificate would be only what the certificate
     /// says, and anyone can make a certificate that says it.
-    private static func verify(_ bundle: URL, team: String) throws {
+    private static func verify(_ bundle: URL) throws {
         let plist = bundle.appendingPathComponent("Contents/Info.plist")
         guard let data = try? Data(contentsOf: plist),
               let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
@@ -512,19 +530,15 @@ private enum Swap {
         guard SecStaticCodeCreateWithPath(bundle as CFURL, [], &code) == errSecSuccess, let code else {
             throw Refused.unsigned
         }
-        guard let identifier = Bundle.main.bundleIdentifier, let requirement = developerID(team: team, identifier: identifier)
+        guard let identifier = Bundle.main.bundleIdentifier,
+              let requirement = signedBy(Updater.signer, identifier: identifier)
         else { throw Refused.unsigned }
         let strict = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode)
         guard SecStaticCodeCheckValidity(code, strict, requirement) == errSecSuccess else { throw Refused.unsigned }
-        guard teamID(of: bundle) == team else { throw Refused.wrongTeam }
     }
 
-    /// The requirement every Developer ID app from this team meets, the one
-    /// `codesign -d -r-` prints for a shipped Search: Apple's anchor, the
-    /// Developer ID intermediate (…6.2.6) and a Developer ID Application
-    /// leaf (…6.1.13), with this team in it, for this bundle id.
     /// The disk image, fetched, checked against the signed feed's hash and
-    /// against Developer ID for the team. Its name is the build's own.
+    /// against the release key. Its name is the build's own.
     static func disk(_ release: Updater.Release) async throws -> URL {
         guard let expected = release.dmgSha256 else { throw Refused.hash }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("search-disk-\(UUID().uuidString)", isDirectory: true)
@@ -534,12 +548,28 @@ private enum Swap {
         guard try digest(of: dmg) == expected else { throw Refused.hash }
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(dmg as CFURL, [], &code) == errSecSuccess, let code,
-              let requirement = developerID(team: Updater.team, identifier: nil),
+              let requirement = signedBy(Updater.signer, identifier: nil),
               SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess
         else { throw Refused.unsigned }
         return dmg
     }
 
+    /// What this fork's releases meet: made with the certificate pinned by
+    /// `signer` and, when given, under this identifier. Nothing is asked of
+    /// the chain above it — the key signs itself, and the pin is what
+    /// vouches for it.
+    static func signedBy(_ signer: String, identifier: String?) -> SecRequirement? {
+        let text = "certificate leaf = H\"\(signer)\"" + (identifier.map { " and identifier \"\($0)\"" } ?? "")
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess else { return nil }
+        return requirement
+    }
+
+    /// The requirement every Developer ID app from this team meets, the one
+    /// `codesign -d -r-` prints for a shipped Search: Apple's anchor, the
+    /// Developer ID intermediate (…6.2.6) and a Developer ID Application
+    /// leaf (…6.1.13), with this team in it, for this bundle id. Only the
+    /// AI engine, which is Office Commun's, is still checked against it.
     static func developerID(team: String, identifier: String?) -> SecRequirement? {
         let text = "anchor apple generic" + (identifier.map { " and identifier \"\($0)\"" } ?? "")
             + " and certificate 1[field.1.2.840.113635.100.6.2.6]"
@@ -550,9 +580,9 @@ private enum Swap {
         return requirement
     }
 
-    /// The team that signed a bundle, as the system reads it — nil for an
-    /// ad-hoc signature, or none.
-    private static func teamID(of bundle: URL) -> String? {
+    /// The certificate a bundle was signed with, as `signer` spells it: the
+    /// SHA-1 of the leaf, in hex — nil for an ad-hoc signature, or none.
+    private static func signer(of bundle: URL) -> String? {
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(bundle as CFURL, [], &code) == errSecSuccess, let code else {
             return nil
@@ -560,9 +590,11 @@ private enum Swap {
         var info: CFDictionary?
         guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info)
                 == errSecSuccess,
-              let signing = info as? [String: Any]
+              let signing = info as? [String: Any],
+              let leaf = (signing[kSecCodeInfoCertificates as String] as? [SecCertificate])?.first
         else { return nil }
-        return signing[kSecCodeInfoTeamIdentifier as String] as? String
+        let der = SecCertificateCopyData(leaf) as Data
+        return Insecure.SHA1.hash(data: der).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Two renames, and the first one undone if the second fails. The app
