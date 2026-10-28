@@ -269,6 +269,20 @@ enum Motion {
         reduced ? nil : .easeOut(duration: 0.14)
     }
 
+    /// A tab taking a new place in the row: the neighbour sliding over, and
+    /// any tab the row moves. Slower than settle, so the move reads as a
+    /// move and not a blink, and damped a little more, so it arrives
+    /// without a bounce.
+    static var carry: Animation? {
+        reduced ? nil : light ? .easeOut(duration: 0.2) : .spring(response: 0.45, dampingFraction: 0.9)
+    }
+
+    /// A carried tab let go, easing into its place: no spring, which
+    /// overshot and read as the tab going somewhere else first.
+    static var carryHome: Animation? {
+        reduced ? nil : .easeOut(duration: 0.3)
+    }
+
     /// How far a tab gives while it is pressed (see Give): enough to feel
     /// under the pointer, about 3 points on a pill and 7 on a column row.
     static let give: CGFloat = 0.97

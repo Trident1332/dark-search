@@ -213,7 +213,7 @@ struct TabBar: View {
         // else. Without this the widths changed between one frame and the next
         // and the tabs appeared to jump aside.
         .animation(Motion.glide, value: browser.editingTab)
-        .animation(Motion.settle, value: browser.tabs.map(\.id))
+        .animation(Motion.carry, value: browser.tabs.map(\.id))
     }
 
     // MARK: - the spaces, one above the other
@@ -1099,7 +1099,7 @@ struct Carried: ViewModifier {
                         if target != index {
                             reordered = true
                             lastSwap = at
-                            withAnimation(Motion.settle) { move(target) }
+                            withAnimation(Motion.carry) { move(target) }
                         }
                     }
                     .onEnded { value in
@@ -1134,11 +1134,10 @@ struct Carried: ViewModifier {
                             if let onDropTab, let tab { onDropTab(tab, value.location) }
                             else { onDrop?(value.location) }
                         }
-                        // Let go, it eases into its place: a fifth of a
-                        // second, straight there, as Chromium's does. A
-                        // spring here overshot, and read as the tab going
+                        // Let go, it eases into its place, straight there:
+                        // a spring here overshot, and read as the tab going
                         // somewhere else first.
-                        withAnimation(Motion.reduced ? nil : .easeOut(duration: 0.2)) {
+                        withAnimation(Motion.carryHome) {
                             held = false
                             travel = 0
                             reordered = false
