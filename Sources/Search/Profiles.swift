@@ -293,7 +293,7 @@ struct ProfileList: View {
     }
 }
 
-/// Profiles in a card of its own: New Profile…, and once there is more
+/// Profiles in a card of its own: New Profile, and once there is more
 /// than one, each with its spaces, Rename… and Delete….
 struct ProfilesSettings: View {
     @ObservedObject var browser: Browser
@@ -302,7 +302,7 @@ struct ProfilesSettings: View {
     var body: some View {
         Card {
             Line("Profiles", "Separate sets of spaces, each with its own sign-ins, history and bookmarks, in windows of their own. Extensions, passwords and settings are shared.") {
-                Pill("New Profile…") { ProfileMenu.askNew() }
+                Pill("New Profile") { ProfileMenu.askNew() }
             }
             if profiles.several {
                 ForEach(profiles.list) { profile in

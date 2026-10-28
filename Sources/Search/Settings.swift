@@ -478,9 +478,9 @@ struct SettingsPanel: View {
         case "general.import":
             // Coming from another browser, now or any time later: the same
             // page as File › Bring Things Over… and the Welcome's.
-            Pill("Bring Things Over…") { browser.lead(to: InternalPage(.importing)) }
+            Pill("Transfer") { browser.lead(to: InternalPage(.importing)) }
         case "quit.confirm": Switch(on: $prefs.confirmsQuit)
-        case "downloads.folder": Pill("Change…") { chooseFolder() }
+        case "downloads.folder": Pill("Change") { chooseFolder() }
         case "downloads.ask": Switch(on: $prefs.asksWhereToSave)
         case "downloads.button": Switch(on: $prefs.alwaysShowsDownloads)
         default: EmptyView()
@@ -633,7 +633,7 @@ struct SettingsPanel: View {
                 .disabled(!arcHere)
                 .opacity(arcHere ? 1 : 0.4)
         case "spaces": Switch(on: $prefs.usesSpaces)
-        case "profiles": Pill("New Profile…") { ProfileMenu.askNew() }
+        case "profiles": Pill("New Profile") { ProfileMenu.askNew() }
         case "pins.keep": Switch(on: $prefs.pinsKeepSite)
         case "pins.list": Switch(on: $prefs.listsPins)
         case "newtab.floating": Switch(on: $prefs.floatingNewTab)
@@ -647,7 +647,7 @@ struct SettingsPanel: View {
     @ViewBuilder
     private func keptControl(_ id: String) -> some View {
         switch id {
-        case "passwords.open": Pill("Open…") { browser.lead(to: InternalPage(.passwords)) }
+        case "passwords.open": Pill("Open") { browser.lead(to: InternalPage(.passwords)) }
         case "passwords.save": Switch(on: $prefs.savesPasswords)
         case "passwords.fill": Switch(on: $prefs.fillsPasswords)
         case "passkeys": Switch(on: $prefs.passkeys)
