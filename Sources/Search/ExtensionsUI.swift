@@ -67,7 +67,7 @@ struct ExtensionsPage: View {
 
                 Card {
                     Line("From another browser", "What Chrome, Arc, Brave and the others added from the Chrome Web Store — installed fresh from the store, you say yes to each one") {
-                        Pill("Bring them over…") {
+                        Pill("Import") {
                             browser.bringingExtensions = true
                             browser.lead(to: InternalPage(.importing))
                         }
@@ -93,7 +93,7 @@ struct ExtensionsPage: View {
 
                 Card {
                     Line("Load an unpacked extension", "A folder with a manifest.json — your own, or one exported from another browser. Reload picks up what you've changed in it since.") {
-                        Pill("Choose…") { extensions.installFolder() }
+                        Pill("Choose") { extensions.installFolder() }
                     }
                 }
             }

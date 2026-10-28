@@ -171,6 +171,7 @@ struct SettingsPanel: View {
                             count: searching ? counts[item] ?? 0 : nil) {
                         query = ""
                         page = item
+                        finding = false
                     }
                 }
             }
@@ -314,6 +315,10 @@ struct SettingsPanel: View {
         .padding(.top, 18)
         .padding(.bottom, 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Plain buttons and empty space don't take the keys on the Mac, so
+        // Find a setting would keep its caret after a click anywhere else.
+        .contentShape(Rectangle())
+        .onTapGesture { finding = false }
     }
 
     @ViewBuilder
@@ -478,9 +483,9 @@ struct SettingsPanel: View {
         case "general.import":
             // Coming from another browser, now or any time later: the same
             // page as File › Bring Things Over… and the Welcome's.
-            Pill("Bring Things Over…") { browser.lead(to: InternalPage(.importing)) }
+            Pill("Transfer") { browser.lead(to: InternalPage(.importing)) }
         case "quit.confirm": Switch(on: $prefs.confirmsQuit)
-        case "downloads.folder": Pill("Change…") { chooseFolder() }
+        case "downloads.folder": Pill("Change") { chooseFolder() }
         case "downloads.ask": Switch(on: $prefs.asksWhereToSave)
         case "downloads.button": Switch(on: $prefs.alwaysShowsDownloads)
         default: EmptyView()
@@ -633,7 +638,7 @@ struct SettingsPanel: View {
                 .disabled(!arcHere)
                 .opacity(arcHere ? 1 : 0.4)
         case "spaces": Switch(on: $prefs.usesSpaces)
-        case "profiles": Pill("New Profile…") { ProfileMenu.askNew() }
+        case "profiles": Pill("New Profile") { ProfileMenu.askNew() }
         case "pins.keep": Switch(on: $prefs.pinsKeepSite)
         case "pins.list": Switch(on: $prefs.listsPins)
         case "newtab.floating": Switch(on: $prefs.floatingNewTab)
@@ -647,7 +652,7 @@ struct SettingsPanel: View {
     @ViewBuilder
     private func keptControl(_ id: String) -> some View {
         switch id {
-        case "passwords.open": Pill("Open…") { browser.lead(to: InternalPage(.passwords)) }
+        case "passwords.open": Pill("Open") { browser.lead(to: InternalPage(.passwords)) }
         case "passwords.save": Switch(on: $prefs.savesPasswords)
         case "passwords.fill": Switch(on: $prefs.fillsPasswords)
         case "passkeys": Switch(on: $prefs.passkeys)
@@ -657,9 +662,9 @@ struct SettingsPanel: View {
         case "privacy.clickIDs": Switch(on: $prefs.removesClickIDs)
         case "privacy.gpc": Switch(on: $prefs.sendsPrivacySignal)
         case "notifications.ask": Switch(on: $prefs.siteNotifications)
-        case "privacy.forget": Pill("Forget choices") { browser.forgetCaptureChoices() }
+        case "privacy.forget": Pill("Forget") { browser.forgetCaptureChoices() }
         case "clear.history": Pill("Clear") { browser.clearHistory() }
-        case "clear.cookies": Pill("Sign out of everything") { browser.clearSites() }
+        case "clear.cookies": Pill("Sign Out") { browser.clearSites() }
         case "clear.cache": Pill("Clear") { browser.clearCache() }
         default: EmptyView()
         }
@@ -1325,22 +1330,56 @@ struct Segmented<Option: Hashable>: View {
 }
 
 /// On or off, in ink rather than in blue.
+///
+/// The knob moves on a state of its own, and the setting follows once it
+/// has arrived. Flipped inside the animation, the setting redrew the whole
+/// page, and often the browser behind it, frame by frame on the main thread
+/// while the knob was meant to be gliding: the switch stuttered. Moved by an
+/// offset rather than by changing the overlay's alignment, the knob is
+/// only drawn again, never laid out.
 struct Switch: View {
     @Binding var on: Bool
+    @State private var lit: Bool
+    /// Flips still on their way to the setting: until they land, a change
+    /// to it is one of ours coming back, not news.
+    @State private var pending = 0
+
+    /// About as long as Motion.settle takes to look done.
+    private static let lag: TimeInterval = 0.24
+
+    init(on: Binding<Bool>) {
+        _on = on
+        _lit = State(initialValue: on.wrappedValue)
+    }
 
     var body: some View {
         Capsule()
-            .fill(on ? Palette.ink : Palette.faint)
+            .fill(lit ? Palette.ink : Palette.faint)
             .frame(width: 30, height: 18)
-            .overlay(alignment: on ? .trailing : .leading) {
+            .overlay(alignment: .leading) {
                 Circle()
                     .fill(Palette.ground)
                     .shadow(color: .black.opacity(0.18), radius: 1.5, y: 1)
-                    .padding(2)
+                    .frame(width: 14, height: 14)
+                    .offset(x: lit ? 14 : 2)
             }
             .contentShape(Capsule())
-            .onTapGesture { withAnimation(Motion.settle) { on.toggle() } }
-            .animation(Motion.settle, value: on)
+            .onTapGesture { flip() }
+            .onChange(of: on) { _, now in
+                guard pending == 0, now != lit else { return }
+                withAnimation(Motion.settle) { lit = now }
+            }
+    }
+
+    private func flip() {
+        let next = !lit
+        withAnimation(Motion.settle) { lit = next }
+        pending += 1
+        let setting = $on
+        DispatchQueue.main.asyncAfter(deadline: .now() + (Motion.reduced ? 0 : Self.lag)) {
+            setting.wrappedValue = next
+            pending -= 1
+        }
     }
 }
 

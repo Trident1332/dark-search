@@ -140,7 +140,7 @@ struct HistoryPanel: View {
                 }
                 Rule()
                 Line("Cookies and sign-ins", "Signs you out of every site") {
-                    Pill("Sign out of everything") { browser.clearSites() }
+                    Pill("Sign Out") { browser.clearSites() }
                 }
                 Rule()
                 Line("Cache", "Only what was fetched to draw pages") {
