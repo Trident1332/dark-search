@@ -997,15 +997,6 @@ struct Carried: ViewModifier {
     @State private var anchor: CGFloat = 0
     @State private var travel: CGFloat = 0
     @State private var reordered = false
-    /// Where the tab was along the row the last time it took a new place,
-    /// for the hysteresis below.
-    @State private var lastMove: CGFloat = 0
-
-    /// How far the hand goes, from where the tab last took a place, before
-    /// another place is considered: Chromium's 16, so the row never
-    /// flickers with a tab held at a line.
-    private static let threshold: CGFloat = 16
-
     /// The row as laid out: each item's length, pins and tabs told apart.
     private var slots: [Slot] {
         run ?? Array(repeating: Slot(length: step), count: count)
@@ -1053,7 +1044,6 @@ struct Carried: ViewModifier {
                             held = true
                             from = index
                             anchor = starts[index]
-                            lastMove = anchor
                         }
                         let kind = row[index].pinned
                         guard let first = row.firstIndex(where: { $0.pinned == kind }),
@@ -1075,31 +1065,28 @@ struct Carried: ViewModifier {
                         // than moving along the row as it goes.
                         if let browser, let tab, browser.prefs.usesTabGroups, tab.pin == nil,
                            browser.group(of: tab) != nil || groupDestination?(tab, value.location) != nil { return }
-                        // Its place is the one whose start is nearest its own
-                        // leading edge, among the places its kind can take —
-                        // Chromium's rule: each place's start is where the
-                        // tab would begin with the others closed up before
-                        // it, and the nearest wins, the earlier on a tie. So
-                        // it takes the next place halfway there, and only
-                        // once the hand has gone the threshold since the
-                        // last place it took.
-                        guard abs(at - lastMove) > Self.threshold else { return }
-                        var ideal = starts[first]
-                        var target = first
-                        var nearest = abs(at - ideal)
-                        var candidate = first
-                        for position in first...last where position != index {
-                            ideal += row[position].length + gap
-                            candidate += 1
-                            let distance = abs(at - ideal)
-                            if distance < nearest {
-                                nearest = distance
-                                target = candidate
-                            }
+                        // It takes a neighbour's place the moment it has
+                        // cleared that neighbour: carried right, once its
+                        // leading edge is past the neighbour's far edge;
+                        // carried left, once its trailing edge is before the
+                        // neighbour's near one. Lying over a neighbour, it
+                        // takes nothing. The neighbour then slides into the
+                        // place left behind, and the tab stays under the
+                        // hand. Once swapped, the two are a whole place
+                        // apart, so nothing flickers at the edge.
+                        var target = index
+                        var next = index + 1
+                        while next <= last, at >= starts[next] + row[next].length {
+                            target = next
+                            next += 1
+                        }
+                        var previous = index - 1
+                        while previous >= first, at + row[index].length <= starts[previous] {
+                            target = previous
+                            previous -= 1
                         }
                         if target != index {
                             reordered = true
-                            lastMove = at
                             withAnimation(Motion.settle) { move(target) }
                         }
                     }
