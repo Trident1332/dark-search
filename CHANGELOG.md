@@ -22,9 +22,8 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Fixed
 
-- A tab carried along the row across the top stays under the pointer as it passes the others, instead of jumping back a place and racing forward at each one: the shadow and fade added to a carried tab were outside what holds its place still.
-- A tab carried right stops at the last place in the row, instead of sliding under the + and being cut off by the row's edge.
-- A click on an empty tab beside the address field lets go of the keys; the field's caret kept blinking whatever was clicked.
+- Carrying a tab along the row across the top works as Chromium's strip does: the tab stays under the pointer, takes the place of a tab once its middle has passed that tab's middle (and only changes its mind once it has come all the way back, so nothing flickers at the line), measured against the tabs' real widths rather than a fixed step — a pinned square, a split pair and the pin line all count for what they are — and can't be carried past the last tab, under the + and out of the row's edge. Before, it jumped back a place and raced forward at each tab it passed.
+- A click anywhere that isn't a text field lets go of the keys: a search field in Settings, the address field and Find a setting kept their caret, and the keys, after a click on the page or on a card beside them.
 - `build.sh` strips the app with Xcode's `strip`, not whichever is first on the PATH: Homebrew's binutils puts GNU strip there, which left a binary the kernel wouldn't load, and the app was killed as soon as it opened.
 - Settings' switches slide smoothly: the knob moves first and the setting follows once it has arrived, where changing the setting mid-slide redrew the page under it and made the knob stutter.
 - Find a setting lets go of the keys when a section or anywhere on the page is clicked; its caret stayed until something else took them.

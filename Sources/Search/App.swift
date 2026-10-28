@@ -1125,6 +1125,27 @@ struct ContentView: View {
 
     // MARK: - keys
 
+    /// A click lets go of the field that has the keys, unless it is in one.
+    /// AppKit only ever moves the keys to what is clicked, and a click on
+    /// nothing in particular — the page's empty ground, a card in Settings,
+    /// the row of tabs — moves them nowhere, so a search field kept its
+    /// caret, and the keys, however far from it the click was. A page still
+    /// takes them itself on its own click, and so does another field.
+    static func letGo(in window: NSWindow, at point: NSPoint) {
+        guard let current = window.firstResponder as? NSView, isText(current),
+              let root = window.contentView?.superview ?? window.contentView else { return }
+        var hit = root.hitTest(root.convert(point, from: nil))
+        while let view = hit {
+            if isText(view) { return }
+            hit = view.superview
+        }
+        window.makeFirstResponder(nil)
+    }
+
+    private static func isText(_ view: NSView) -> Bool {
+        view is NSTextView || view is NSTextField
+    }
+
     /// A web view takes first responder and keeps most of the keyboard, so the
     /// shortcuts are caught before the event ever reaches it. The menu carries
     /// the same commands for anyone looking for them, and never sees these
@@ -1140,6 +1161,7 @@ struct ContentView: View {
                 guard let window, event.window === window, let height = window.contentView?.bounds.height
                 else { return event }
                 let at = event.locationInWindow
+                ContentView.letGo(in: window, at: at)
                 return browser.clickTabSwitcher(at: CGPoint(x: at.x, y: height - at.y)) ? nil : event
             }
             // Every window has a monitor, and every monitor hears every key:
