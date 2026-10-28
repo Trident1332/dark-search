@@ -56,14 +56,14 @@ struct PasswordsPanel: View {
                         .font(.system(size: 12))
                         .foregroundStyle(Palette.muted)
                     // Which browser, which profile and what of it: the sheet.
-                    Pill("Bring in…") { browser.lead(to: InternalPage(.importing)) }
-                    Pill("File…") { browser.importFile() }
+                    Pill("Bring in") { browser.lead(to: InternalPage(.importing)) }
+                    Pill("File") { browser.importFile() }
                     Spacer(minLength: 0)
                     // What the list shows, all of it or what the search
                     // leaves: never more than can be seen (Browser.forgetShown).
                     let shown = browser.shownSites.reduce(0) { $0 + $1.logins.count }
                     if shown > 0 {
-                        Pill(browser.hunting.trimmingCharacters(in: .whitespaces).isEmpty ? "Remove All…" : "Remove \(shown)…") {
+                        Pill(browser.hunting.trimmingCharacters(in: .whitespaces).isEmpty ? "Remove All" : "Remove \(shown)") {
                             browser.forgetShown()
                         }
                         .disabled(browser.forgetting)

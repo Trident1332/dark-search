@@ -60,7 +60,7 @@ struct SearchApp: App {
                             }
                         }
                         Divider()
-                        Button("New Profile…") { ProfileMenu.askNew() }
+                        Button("New Profile") { ProfileMenu.askNew() }
                     }
                 }
                 Button("New Tab") { browser.launch() }
@@ -71,13 +71,13 @@ struct SearchApp: App {
                     .shortcut("file.reopen")
                     .disabled(browser.ghosts.isEmpty && Browsers.lastClosedAt == nil)
                 Divider()
-                Button("Open Address…") { browser.edit() }
+                Button("Open Address") { browser.edit() }
                     .shortcut("file.openAddress")
                 Divider()
                 // Another browser's bookmarks, history, passwords and the
                 // rest, as Safari's File › Import From: the one sheet every
                 // other way in opens too.
-                Button("Bring Things Over…") { browser.bringingIn = "" }
+                Button("Bring Things Over") { browser.bringingIn = "" }
                     .shortcut("file.import")
                 Divider()
                 Button("Close Tab") { browser.closeFront() }
@@ -86,16 +86,16 @@ struct SearchApp: App {
                     .shortcut("file.closeWindow")
             }
             CommandGroup(replacing: .printItem) {
-                Button("Share…") { browser.share() }
+                Button("Share") { browser.share() }
                     .shortcut("file.share")
                     .disabled(!(browser.active?.isWeb ?? false))
-                Button("Save Page As…") { browser.savePage() }
+                Button("Save Page As") { browser.savePage() }
                     .shortcut("file.savePage")
                     .disabled(!(browser.active?.isWeb ?? false))
-                Button("Export as PDF…") { browser.exportPDF() }
+                Button("Export as PDF") { browser.exportPDF() }
                     .shortcut("file.exportPDF")
                     .disabled(!(browser.active?.isWeb ?? false))
-                Button("Print…") { browser.printPage() }
+                Button("Print") { browser.printPage() }
                     .shortcut("file.print")
                     .disabled(!(browser.active?.isWeb ?? false))
             }
@@ -104,7 +104,7 @@ struct SearchApp: App {
                     .shortcut("edit.copyCleanLink")
                     .disabled(browser.active?.isBlank ?? true)
                 Divider()
-                Button("Find on Page…") { browser.openFind() }
+                Button("Find on Page") { browser.openFind() }
                     .shortcut("edit.find")
                     // On the Settings tab, ⌘F finds a setting.
                     .disabled(!(browser.active?.isWeb ?? false) && browser.active?.page?.kind != .settings)
@@ -208,14 +208,14 @@ struct SearchApp: App {
                     Button("Summarize Page") { browser.summarizePage() }
                         .shortcut("view.summarize")
                         .disabled(!(browser.active?.isWeb ?? false))
-                    Button("Ask About This Page…") { browser.askAboutPage() }
+                    Button("Ask About This Page") { browser.askAboutPage() }
                         .shortcut("view.ask")
                         .disabled(!(browser.active?.isWeb ?? false))
                 }
                 Divider()
-                Button("Hide Elements…") { browser.toggleHiding() }
+                Button("Hide Elements") { browser.toggleHiding() }
                     .shortcut("view.hide")
-                Button("Hidden on This Site…") { browser.reviewing.toggle() }
+                Button("Hidden on This Site") { browser.reviewing.toggle() }
                     .shortcut("view.hidden")
                 Divider()
                 Button("Zoom In") { browser.zoom(by: 1.1) }
@@ -245,7 +245,7 @@ struct SearchApp: App {
                     .shortcut("tabs.next")
                 Button("Previous Tab") { browser.step(-1) }
                     .shortcut("tabs.previous")
-                Button("Search Tabs…") { browser.summon() }
+                Button("Search Tabs") { browser.summon() }
                     .shortcut("tabs.search")
                 Divider()
                 if browser.prefs.splitView {
@@ -311,10 +311,10 @@ struct SearchApp: App {
                     .shortcut("tabs.mute")
             }
             CommandMenu("Bookmarks") {
-                Button(browser.pageKept ? "Edit Bookmark\u{2026}" : "Add This Page") { browser.bookmarkCurrent() }
+                Button(browser.pageKept ? "Edit Bookmark" : "Add This Page") { browser.bookmarkCurrent() }
                     .shortcut("bookmarks.add")
                     .disabled(!(browser.active?.isWeb ?? false))
-                Button("Show Bookmarks…") { browser.bookmarking = true }
+                Button("Show Bookmarks") { browser.bookmarking = true }
                     .shortcut("bookmarks.show")
                 Toggle("Show Bookmarks Bar", isOn: Binding(
                     get: { browser.prefs.bookmarksBar },
@@ -346,12 +346,12 @@ struct SearchApp: App {
                     }
                 }
                 Divider()
-                Button("Show History…") { browser.recalling = true }
+                Button("Show History") { browser.recalling = true }
                     .shortcut("history.show")
-                Button("Downloads…") { browser.hoarding = true }
+                Button("Downloads") { browser.hoarding = true }
                     .shortcut("history.downloads")
                 Divider()
-                Button("Clear Browsing Data…") { browser.clearBrowsingData() }
+                Button("Clear Browsing Data") { browser.clearBrowsingData() }
                     .shortcut("history.clearData")
                 Button("Clear History") { browser.clearHistory() }
                     .shortcut("history.clear")
@@ -359,11 +359,11 @@ struct SearchApp: App {
             // Search › Check for Updates…, under About, as in any Mac app.
             CommandGroup(after: .appInfo) { UpdateMenuItem() }
             CommandGroup(after: .appSettings) {
-                Button("Settings…") { browser.tuning = true }
+                Button("Settings") { browser.tuning = true }
                     .shortcut("app.settings")
-                Button("Welcome…") { browser.welcoming = true }
+                Button("Welcome") { browser.welcoming = true }
                     .shortcut("app.welcome")
-                Button("Passwords…") { browser.managing = true }
+                Button("Passwords") { browser.managing = true }
                     .shortcut("app.passwords")
             }
             QuitAndHelp()
@@ -382,7 +382,7 @@ private struct QuitAndHelp: Commands {
             .keyboardShortcut("q", modifiers: .command)
         }
         CommandGroup(replacing: .help) {
-            Button("Send Feedback…") { Links.writeFeedback() }
+            Button("Send Feedback") { Links.writeFeedback() }
         }
     }
 }
@@ -1726,17 +1726,17 @@ private struct UpdateMenuItem: View {
     var body: some View {
         switch updater.stage {
         case .none:
-            Button(updater.checking ? "Checking for Updates…" : "Check for Updates…") { updater.checkByHand() }
+            Button(updater.checking ? "Checking for Updates" : "Check for Updates") { updater.checkByHand() }
                 .disabled(updater.checking)
         case .waiting:
             Button("Install Update") { updater.install() }
         case .fetching:
-            Button("Downloading Update…") {}
+            Button("Downloading Update") {}
                 .disabled(true)
         case .ready:
             Button("Restart to Update") { updater.relaunch() }
         case .offered:
-            Button(updater.fetchingDisk ? "Downloading Update…" : "Download Update…") { updater.openDisk() }
+            Button(updater.fetchingDisk ? "Downloading Update" : "Download Update") { updater.openDisk() }
                 .disabled(updater.fetchingDisk)
         }
     }
@@ -1812,7 +1812,7 @@ private struct ImportProgress: View {
             }
             Spacer(minLength: 0)
             Button { browser.cancelFileImport() } label: {
-                Text(job.cancelling ? "Cancelling…" : "Cancel")
+                Text(job.cancelling ? "Cancelling" : "Cancel")
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.ink)
                     .padding(.horizontal, 10)

@@ -243,7 +243,7 @@ struct SiteCard: View {
             }
             Row("Copy Address", keys: "⇧⌘C") { after { browser.copyAddress() } }
             Separator()
-            Row("Print…", keys: "⌘P") { after { browser.printPage() } }
+            Row("Print", keys: "⌘P") { after { browser.printPage() } }
             zoom
             sound
             grounded
@@ -436,7 +436,7 @@ struct SiteCard: View {
                 .padding(.bottom, 6)
             Separator()
             if let trust = safety.trust {
-                Row(certified == false ? "Show Certificate (Not Valid)…" : "Show Certificate…") {
+                Row(certified == false ? "Show Certificate (Not Valid)" : "Show Certificate") {
                     after { SiteCard.show(trust) }
                 }
             }

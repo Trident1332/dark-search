@@ -31,7 +31,7 @@ struct AccountList: View {
                     name: login.user.isEmpty ? "No name" : login.user, detail: "Apple Passwords") { browser.choose(login) }
             }
             if asked.appleConnect {
-                Row(mark: .symbol("key.icloud"), name: "Connect Apple Passwords…",
+                Row(mark: .symbol("key.icloud"), name: "Connect Apple Passwords",
                     detail: "Pair once with a code from your Mac") { browser.connectApplePasswords() }
             }
             if asked.appleOffer != nil {

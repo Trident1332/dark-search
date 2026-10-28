@@ -169,12 +169,12 @@ final class Updater: ObservableObject {
             say?("Search \(next.version) is ready — relaunch to use it")
             return
         case .fetching(let next):
-            say?("Search \(next.version) is downloading…")
+            say?("Search \(next.version) is downloading")
             return
         default: break
         }
         guard !checking else { return }
-        say?("Checking for updates…")
+        say?("Checking for updates")
         check { [weak self] found in
             guard let self else { return }
             if found == nil { self.say?("Search is up to date"); return }
@@ -223,7 +223,7 @@ final class Updater: ObservableObject {
     func openDisk() {
         guard case .offered(let release) = stage, !fetchingDisk else { return }
         fetchingDisk = true
-        say?("Downloading Search \(release.version)…")
+        say?("Downloading Search \(release.version)")
         Task.detached(priority: .utility) {
             let result: Result<URL, Error>
             do { result = .success(try await Swap.disk(release)) } catch { result = .failure(error) }
@@ -258,7 +258,7 @@ final class Updater: ObservableObject {
         case .none, .offered, .waiting: break
         }
         stage = .fetching(release)
-        say?("Search \(release.version) is downloading…")
+        say?("Search \(release.version) is downloading")
         Task.detached(priority: .utility) {
             let worked: Bool
             do {

@@ -114,7 +114,7 @@ struct HistoryPanel: View {
                         .font(.system(size: 12))
                         .foregroundStyle(Palette.muted)
                     Spacer()
-                    Pill("Clear…") { withAnimation(Motion.settle) { browser.recallMode = .clearing } }
+                    Pill("Clear") { withAnimation(Motion.settle) { browser.recallMode = .clearing } }
                 }
             }
         }
@@ -334,9 +334,9 @@ struct DownloadsPanel: View {
         private var stateLabel: String {
             switch entry.state {
             case .downloading: return "Downloading"
-            case .pausing: return "Pausing…"
+            case .pausing: return "Pausing"
             case .paused: return "Paused"
-            case .resuming: return "Resuming…"
+            case .resuming: return "Resuming"
             case .failed: return "Failed"
             }
         }
@@ -406,7 +406,7 @@ struct DownloadsPanel: View {
                 }
             case .pausing:
                 HStack(spacing: 4) {
-                    Quick("Pausing…", act: {})
+                    Quick("Pausing", act: {})
                         .disabled(true)
                     Quick("Cancel", act: cancel)
                 }
@@ -422,7 +422,7 @@ struct DownloadsPanel: View {
                 }
             case .resuming:
                 HStack(spacing: 4) {
-                    Quick("Resuming…", act: {})
+                    Quick("Resuming", act: {})
                         .disabled(true)
                     Quick("Cancel", act: cancel)
                 }

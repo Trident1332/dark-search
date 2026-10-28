@@ -187,7 +187,7 @@ final class ImportFileTests: XCTestCase {
         let result = Vault.take(csv: safeToSkip, control: vaultControl)
         XCTAssertEqual(result.kept, 0)
         XCTAssertEqual(result.skipped, 1)
-        XCTAssertTrue(updates.contains { $0.message == "Reading password CSV…" })
+        XCTAssertTrue(updates.contains { $0.message == "Reading password CSV" })
         XCTAssertTrue(updates.allSatisfy { !$0.message.contains(secret) })
     }
 

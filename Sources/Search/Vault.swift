@@ -326,7 +326,7 @@ enum Vault {
     /// writes; cancellation between writes preserves an exact partial count.
     static func take(csv text: String, control: ImportFile.Control) -> (kept: Int, skipped: Int) {
         guard !control.isCancelled else { return (0, 0) }
-        control.report(.init(message: "Reading password CSV…", completed: 0))
+        control.report(.init(message: "Reading password CSV", completed: 0))
         var rows = parse(csv: text, control: control)
         guard !rows.isEmpty, !control.isCancelled else { return (0, 0) }
         let header = rows.removeFirst().map { $0.lowercased() }
@@ -336,12 +336,12 @@ enum Vault {
               let passAt = column(["password", "login_password"])
         else { return (0, rows.count) }
         var kept = 0, skipped = 0
-        control.report(.init(message: "Saving passwords…", completed: 0, total: rows.count))
+        control.report(.init(message: "Saving passwords", completed: 0, total: rows.count))
         for (index, row) in rows.enumerated() {
             if control.isCancelled { break }
             defer {
                 if (index + 1) % 25 == 0 || index + 1 == rows.count {
-                    control.report(.init(message: "Saving passwords…", completed: index + 1, total: rows.count))
+                    control.report(.init(message: "Saving passwords", completed: index + 1, total: rows.count))
                 }
             }
             guard row.count > max(urlAt, max(userAt, passAt)) else { skipped += 1; continue }
@@ -368,7 +368,7 @@ enum Vault {
             scanned += 1
             if scanned % 8192 == 0, let control {
                 if control.isCancelled { return [] }
-                control.report(.init(message: "Reading password CSV…", completed: scanned))
+                control.report(.init(message: "Reading password CSV", completed: scanned))
             }
             let c = text[index]
             if quoted {
@@ -401,7 +401,7 @@ enum Vault {
         if row.contains(where: { !$0.isEmpty }) { rows.append(row) }
         if let control {
             if control.isCancelled { return [] }
-            control.report(.init(message: "Reading password CSV…", completed: scanned))
+            control.report(.init(message: "Reading password CSV", completed: scanned))
         }
         return rows
     }

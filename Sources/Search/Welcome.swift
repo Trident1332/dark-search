@@ -114,7 +114,7 @@ struct WelcomePanel: View {
                 }
 
                 HStack(spacing: 12) {
-                    Big(bringing ? "Bringing…" : "Bring them in", filled: true) { bringAll() }
+                    Big(bringing ? "Bringing" : "Bring them in", filled: true) { bringAll() }
                         .disabled(bringing || brought != nil || !((importsPasswords && wantsPasswords) || wantsHistory || wantsBookmarks))
                     if bringing { Ring(size: 10) }
                     if let brought {
@@ -136,7 +136,7 @@ struct WelcomePanel: View {
 
             // Safari, a browser on another Mac, one Search can't read: what
             // it exported, bookmarks, passwords or Safari's own ZIP.
-            Pill("From a file another browser exported…") { browser.importFile() }
+            Pill("From a file another browser exported") { browser.importFile() }
         }
     }
 

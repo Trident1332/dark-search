@@ -21,6 +21,7 @@ struct TabBar: View {
     /// The plus only comes out when the pointer is in the row.
     @State private var nearby = false
     @State private var plussed = false
+    @State private var carrying = false
     /// The helm's width when it stands before the tabs rather than after them.
     private var leading: CGFloat { browser.prefs.navigationLeft ? Metrics.helm - 8 + Metrics.tabGap : 0 }
     /// How wide the doors at the far end are, extension buttons included.
@@ -213,7 +214,7 @@ struct TabBar: View {
         // else. Without this the widths changed between one frame and the next
         // and the tabs appeared to jump aside.
         .animation(Motion.glide, value: browser.editingTab)
-        .animation(Motion.settle, value: browser.tabs.map(\.id))
+        .animation(carrying ? nil : Motion.settle, value: browser.tabs.map(\.id))
     }
 
     // MARK: - the spaces, one above the other
@@ -329,19 +330,20 @@ struct TabBar: View {
                     SplitDropZone(browser: browser, tab: tab, kind: .strip)
                 }
             }
+            .id(tab.id)
             .modifier(Carried(index: index, count: count, step: step, vertical: false,
                               space: "strip", onDropTab: { source, point in drop(source, at: point) },
                               groupDestination: { source, point in destination(source, at: point) },
                               outside: { browser.dragOut(tab) }, browser: browser, tab: tab,
                               run: run, gap: Metrics.tabGap, divider: divider,
-                              bounded: !browser.prefs.usesTabGroups) {
+                              bounded: !browser.prefs.usesTabGroups,
+                              onCarry: { carrying = $0 }) {
                 if browser.prefs.usesTabGroups && tab.pin == nil {
                     browser.move(tab, within: group, to: $0)
                 } else {
                     browser.moveDisplayedTab(tab, to: $0)
                 }
             })
-            .id(tab.id)
     }
 
     @ViewBuilder
@@ -380,7 +382,11 @@ struct TabBar: View {
     }
 
     private func drop(_ tab: Tab, at point: CGPoint) {
-        if let target = destination(tab, at: point) { browser.move(tab, toGroup: target) }
+        // Peers have already made room during the drag. Only a different
+        // group takes the tab on release; its own heading must not append it.
+        if let target = destination(tab, at: point), target.group != browser.group(of: tab) {
+            browser.move(tab, toGroup: target)
+        }
     }
 
     /// How wide the run of tabs is: as wide as the tabs while they fit, as
@@ -992,6 +998,7 @@ struct Carried: ViewModifier {
     /// out of the pins. Off where a tab is carried somewhere else on
     /// purpose: over the pins in the column, onto a group.
     var bounded = false
+    var onCarry: ((Bool) -> Void)? = nil
     let move: (Int) -> Void
 
     @State private var held = false
@@ -1000,9 +1007,6 @@ struct Carried: ViewModifier {
     @State private var anchor: CGFloat = 0
     @State private var travel: CGFloat = 0
     @State private var reordered = false
-    /// Where the tab was along the row when it last took a place, for the
-    /// dead band below.
-    @State private var lastSwap: CGFloat?
 
     /// The row as laid out: each item's length, pins and tabs told apart.
     private var slots: [Slot] {
@@ -1026,9 +1030,11 @@ struct Carried: ViewModifier {
         // gone, less the ground its new place has already given it.
         let row = slots
         let starts = origins(of: row)
-        let shift = held && starts.indices.contains(index) ? anchor + travel - starts[index] : 0
+        let origin = starts.indices.contains(index) ? starts[index] : 0
         return content
-            .offset(x: vertical ? 0 : shift, y: vertical ? shift : 0)
+            .modifier(CarriedPosition(position: vertical ? 0 : held ? anchor + travel : origin,
+                                      origin: vertical ? 0 : origin))
+            .offset(y: vertical && held ? anchor + travel - origin : 0)
             .background {
                 if let browser, let tab, browser.prefs.usesTabGroups, let group = browser.group(of: tab) {
                     GeometryReader { geometry in
@@ -1049,9 +1055,9 @@ struct Carried: ViewModifier {
                         guard row.indices.contains(index) else { return }
                         if !held {
                             held = true
+                            onCarry?(true)
                             from = index
                             anchor = starts[index]
-                            lastSwap = nil
                         }
                         let kind = row[index].pinned
                         guard let first = row.firstIndex(where: { $0.pinned == kind }),
@@ -1068,41 +1074,30 @@ struct Carried: ViewModifier {
                            TabDrag.shared.update(browser: browser, tab: tab,
                                                  translation: value.translation) { return }
                         if crossed { return }
-                        // A tab of a group, or one over a group, lands where
-                        // it is let go (see GroupDropFrames.resolve) rather
-                        // than moving along the row as it goes.
-                        if let browser, let tab, browser.prefs.usesTabGroups, tab.pin == nil,
-                           browser.group(of: tab) != nil || groupDestination?(tab, value.location) != nil { return }
-                        // It takes a neighbour's place once its leading
-                        // corner is past that neighbour's middle: carried
-                        // right, its right edge past the middle of the tab
-                        // after it; carried left, its left edge before the
-                        // middle of the tab before it. The neighbour then
-                        // slides into the place left behind, and the tab
-                        // stays under the hand.
-                        //
-                        // Swapped, the neighbour's new middle lies only a
-                        // gap from the tab's other corner, so the next few
-                        // points back would swap them again, and the two
-                        // went back and forth under a hand at rest. After a
-                        // swap, nothing is considered until the hand has
-                        // gone half a tab from where the swap happened.
-                        if let lastSwap, abs(at - lastSwap) <= row[index].length / 2 { return }
-                        var target = index
-                        var next = index + 1
-                        while next <= last, at + row[index].length >= starts[next] + row[next].length / 2 {
-                            target = next
-                            next += 1
+                        // Within a group, the strip's peers make room now.
+                        // Entering another group still waits for the drop;
+                        // the column keeps its existing group drop behavior.
+                        if let browser, let tab, browser.prefs.usesTabGroups, tab.pin == nil {
+                            let group = browser.group(of: tab)
+                            if vertical && group != nil { return }
+                            if let destination = groupDestination?(tab, value.location), destination.group != group { return }
                         }
-                        var previous = index - 1
-                        while previous >= first, at <= starts[previous] + row[previous].length / 2 {
-                            target = previous
-                            previous -= 1
+                        // Remove the carried tab from the run, then find its
+                        // nearest insertion place. The other tabs retain their
+                        // order, so these places stay fixed after a swap, even
+                        // with a wider Split View item. Crossing back uses the
+                        // same boundary rather than a half-tab dead band.
+                        var target = first
+                        var origin = starts[first]
+                        for peer in first...last where peer != index {
+                            let next = origin + row[peer].length + gap
+                            if at < (origin + next) / 2 { break }
+                            target += 1
+                            origin = next
                         }
                         if target != index {
                             reordered = true
-                            lastSwap = at
-                            withAnimation(Motion.settle) { move(target) }
+                            withAnimation(vertical ? Motion.settle : nil) { move(target) }
                         }
                     }
                     .onEnded { value in
@@ -1146,6 +1141,7 @@ struct Carried: ViewModifier {
                             travel = 0
                             reordered = false
                         }
+                        onCarry?(false)
                     }
             )
             .onReceive(TabDrag.shared.$cancelledID) { id in
@@ -1155,13 +1151,40 @@ struct Carried: ViewModifier {
                 held = false
                 travel = 0
                 reordered = false
+                onCarry?(false)
+            }
+            .onDisappear {
+                if held { onCarry?(false) }
             }
             // Under the hand exactly: nothing about the carried tab animates,
             // not its offset, its place in the row, its shadow nor its fade.
-            // Outermost, so it covers all of them — the row places the tab
-            // by its outer layer, and with this inside them the place still
-            // sprang while the offset jumped. Only the others glide.
-            .transaction { if held { $0.animation = nil } }
+            // Peers animate their positions after a swap; this one stays
+            // exactly where the hand puts it until release.
+            .transaction {
+                if held {
+                    $0.animation = nil
+                    $0.disablesAnimations = true
+                }
+            }
+            .animation(held ? nil : Motion.settle, value: index)
+    }
+}
+
+/// The strip rebases layout immediately after a swap. Animate each neighbor's
+/// absolute position, subtracting its new layout origin without animating that
+/// subtraction. Otherwise the carried tab jumps while its parent catches up.
+private struct CarriedPosition: GeometryEffect {
+    var position: CGFloat
+    let origin: CGFloat
+
+    var animatableData: CGFloat {
+        get { position }
+        set { position = newValue }
+    }
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        let shift = position - origin
+        return ProjectionTransform(CGAffineTransform(translationX: shift, y: 0))
     }
 }
 
@@ -1558,7 +1581,7 @@ struct Pressing: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if enabled {
-            content.onLongPressGesture(minimumDuration: .infinity, maximumDistance: .infinity,
+            content.onLongPressGesture(minimumDuration: .infinity, maximumDistance: TabPress.travel,
                                        pressing: { down = $0 }, perform: {})
         } else {
             content

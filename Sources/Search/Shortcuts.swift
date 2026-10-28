@@ -150,33 +150,32 @@ struct Command: Identifiable {
         self.run = run
     }
 
-    /// The title as Settings lists it: without the "…" a menu ends it with,
-    /// which says a window comes next and means nothing in a list of keys.
-    var name: String { title.hasSuffix("…") ? String(title.dropLast()) : title }
+    /// The title as Settings lists it: the same as the menu's.
+    var name: String { title }
 
     static func named(_ id: String) -> Command? { byID[id] }
     private static let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
 
     /// The same commands, keys and order as the menus (see App.swift).
     static let all: [Command] = [
-        Command("app.settings", "Settings…", .app, KeyCombo(",")) { $0.tuning = true },
-        Command("app.welcome", "Welcome…", .app, nil) { $0.welcoming = true },
-        Command("app.passwords", "Passwords…", .app, KeyCombo("l", option: true)) { $0.managing = true },
+        Command("app.settings", "Settings", .app, KeyCombo(",")) { $0.tuning = true },
+        Command("app.welcome", "Welcome", .app, nil) { $0.welcoming = true },
+        Command("app.passwords", "Passwords", .app, KeyCombo("l", option: true)) { $0.managing = true },
 
         Command("file.newWindow", "New Window", .file, KeyCombo("n")) { _ in Browsers.newWindow() },
         Command("file.newTab", "New Tab", .file, KeyCombo("t")) { $0.launch() },
         Command("file.newPrivateTab", "New Private Tab", .file, KeyCombo("n", shift: true)) { $0.newShyTab() },
         Command("file.reopen", "Reopen Closed Tab", .file, KeyCombo("t", shift: true)) { $0.reopen() },
-        Command("file.openAddress", "Open Address…", .file, KeyCombo("l")) { $0.edit() },
+        Command("file.openAddress", "Open Address", .file, KeyCombo("l")) { $0.edit() },
         Command("file.closeTab", "Close Tab", .file, KeyCombo("w")) { $0.closeFront() },
         Command("file.closeWindow", "Close Window", .file, KeyCombo("w", shift: true)) { $0.closeWindow() },
-        Command("file.import", "Bring Things Over…", .file, nil) { $0.bringingIn = "" },
-        Command("file.share", "Share…", .file, nil) { $0.share() },
-        Command("file.savePage", "Save Page As…", .file, nil) { $0.savePage() },
-        Command("file.exportPDF", "Export as PDF…", .file, nil) { $0.exportPDF() },
-        Command("file.print", "Print…", .file, KeyCombo("p")) { $0.printPage() },
+        Command("file.import", "Bring Things Over", .file, nil) { $0.bringingIn = "" },
+        Command("file.share", "Share", .file, nil) { $0.share() },
+        Command("file.savePage", "Save Page As", .file, nil) { $0.savePage() },
+        Command("file.exportPDF", "Export as PDF", .file, nil) { $0.exportPDF() },
+        Command("file.print", "Print", .file, KeyCombo("p")) { $0.printPage() },
 
-        Command("edit.find", "Find on Page…", .edit, KeyCombo("f")) { $0.openFind() },
+        Command("edit.find", "Find on Page", .edit, KeyCombo("f")) { $0.openFind() },
         Command("edit.findNext", "Find Next", .edit, KeyCombo("g")) { $0.look(forward: true) },
         Command("edit.findPrevious", "Find Previous", .edit, KeyCombo("g", shift: true)) { $0.look(forward: false) },
         Command("edit.copyCleanLink", "Copy Clean Link", .edit, KeyCombo("c", shift: true, option: true)) { $0.copyCleanLink() },
@@ -195,9 +194,9 @@ struct Command: Identifiable {
         Command("view.dusk", "Darken This Site", .view, KeyCombo("d", shift: true)) { $0.toggleDusk() },
         Command("view.duskPause", "Pause Darkening", .view, KeyCombo("d", shift: true, option: true)) { $0.pauseDusk() },
         Command("view.summarize", "Summarize Page", .view, nil) { $0.summarizePage() },
-        Command("view.ask", "Ask About This Page…", .view, nil) { $0.askAboutPage() },
-        Command("view.hide", "Hide Elements…", .view, KeyCombo("h", shift: true)) { $0.toggleHiding() },
-        Command("view.hidden", "Hidden on This Site…", .view, KeyCombo("u", shift: true)) { $0.reviewing.toggle() },
+        Command("view.ask", "Ask About This Page", .view, nil) { $0.askAboutPage() },
+        Command("view.hide", "Hide Elements", .view, KeyCombo("h", shift: true)) { $0.toggleHiding() },
+        Command("view.hidden", "Hidden on This Site", .view, KeyCombo("u", shift: true)) { $0.reviewing.toggle() },
         Command("view.zoomIn", "Zoom In", .view, KeyCombo("+")) { $0.zoom(by: 1.1) },
         Command("view.zoomOut", "Zoom Out", .view, KeyCombo("-")) { $0.zoom(by: 1 / 1.1) },
         Command("view.actualSize", "Actual Size", .view, KeyCombo("0")) { $0.resetZoom() },
@@ -216,7 +215,7 @@ struct Command: Identifiable {
             $0.switchTabs(backwards: false)
         },
         Command("tabs.previous", "Previous Tab", .tabs, KeyCombo("[", shift: true)) { $0.step(-1) },
-        Command("tabs.search", "Search Tabs…", .tabs, KeyCombo("k")) { browser in
+        Command("tabs.search", "Search Tabs", .tabs, KeyCombo("k")) { browser in
             if browser.editing, !browser.offers.isEmpty { browser.stepSummon() } else { browser.summon() }
         },
         // ⌥⌘N, Chrome's on the Mac: ⌃⌘S is the Mac's own Show Sidebar, and
@@ -258,14 +257,14 @@ struct Command: Identifiable {
         Command("tabs.mute", "Stop Sound in Tab", .tabs, KeyCombo("m", shift: true)) { $0.pauseMedia() },
 
         Command("bookmarks.add", "Add This Page", .bookmarks, KeyCombo("b", shift: true)) { $0.bookmarkCurrent() },
-        Command("bookmarks.show", "Show Bookmarks…", .bookmarks, nil) { $0.bookmarking = true },
+        Command("bookmarks.show", "Show Bookmarks", .bookmarks, nil) { $0.bookmarking = true },
         Command("bookmarks.bar", "Show Bookmarks Bar", .bookmarks, nil) { browser in
             withAnimation(Motion.glide) { browser.prefs.bookmarksBar.toggle() }
         },
 
-        Command("history.show", "Show History…", .history, KeyCombo("y")) { $0.recalling = true },
-        Command("history.downloads", "Downloads…", .history, KeyCombo("j", shift: true)) { $0.hoarding = true },
-        Command("history.clearData", "Clear Browsing Data…", .history, KeyCombo("delete", shift: true)) { $0.clearBrowsingData() },
+        Command("history.show", "Show History", .history, KeyCombo("y")) { $0.recalling = true },
+        Command("history.downloads", "Downloads", .history, KeyCombo("j", shift: true)) { $0.hoarding = true },
+        Command("history.clearData", "Clear Browsing Data", .history, KeyCombo("delete", shift: true)) { $0.clearBrowsingData() },
         Command("history.clear", "Clear History", .history, nil) { $0.clearHistory() },
     ] + (1...9).map { number in
         Command("spaces.\(number)", "Space \(number)", .spaces,

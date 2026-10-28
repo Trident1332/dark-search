@@ -270,9 +270,9 @@ struct AssistantPanel: View {
             Rectangle().fill(Palette.hairline).frame(height: 1)
             HStack(spacing: 8) {
                 if drawn {
-                    Text("Ask about this page…").font(.system(size: 12.5)).foregroundStyle(Palette.faint)
+                    Text("Ask about this page").font(.system(size: 12.5)).foregroundStyle(Palette.faint)
                 } else {
-                    TextField("", text: $assistant.draft, prompt: Text("Ask about this page…").foregroundStyle(Palette.faint))
+                    TextField("", text: $assistant.draft, prompt: Text("Ask about this page").foregroundStyle(Palette.faint))
                         .textFieldStyle(.plain)
                         .font(.system(size: 12.5))
                         .foregroundStyle(Palette.ink)
@@ -304,7 +304,7 @@ struct AssistantPanel: View {
             } else if let trouble = assistant.trouble {
                 Text(trouble).font(.system(size: 12.5)).foregroundStyle(Palette.muted)
             } else if assistant.reading {
-                Text("Reading the page…").font(.system(size: 12.5)).foregroundStyle(Palette.muted)
+                Text("Reading the page").font(.system(size: 12.5)).foregroundStyle(Palette.muted)
             }
             if assistant.addressed, assistant.notice == nil {
                 caution("This page has text written for an AI to follow. The answer may have been steered by it.")
@@ -369,7 +369,7 @@ struct AssistantPanel: View {
                         .foregroundStyle(Palette.muted)
                 }
                 if turn.answer.isEmpty, !turn.done {
-                    Text("…").font(.system(size: 13)).foregroundStyle(Palette.faint)
+                    Text("Thinking").font(.system(size: 13)).foregroundStyle(Palette.faint)
                 }
                 // As written, and never as markdown: no link to follow, no
                 // picture to fetch.

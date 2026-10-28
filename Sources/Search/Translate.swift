@@ -994,7 +994,7 @@ struct TranslateMenu: View {
     static func heading(_ mark: TranslationMark) -> String {
         let from = mark.from.map(PageTranslator.name)
         switch mark.phase {
-        case .working: return from.map { "Translating from \($0)…" } ?? "Translating…"
+        case .working: return from.map { "Translating from \($0)" } ?? "Translating"
         case .done: return from.map { "Translated from \($0)" } ?? "Translated"
         case .failed(let message): return message
         }

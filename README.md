@@ -93,7 +93,7 @@ A build you make yourself won't be notarized or carry Office Commun's Developer 
 
 ### Releases and updates in this fork
 
-Every push to `main` runs `.github/workflows/release.yml`: it builds with `./build.sh release dmg`, signs the app and its feed with the fork's release key, and publishes them as the latest [GitHub release](https://github.com/Trident1332/dark-search/releases). An installed Search reads `releases/latest/download/appcast.json.zip` at launch, every hour and at Search › Check for Updates…, and swaps in anything newer for the next launch.
+Every push to `main` runs `.github/workflows/release.yml`: it builds with `./build.sh release dmg`, signs the app and its feed with the fork's release key, and publishes them as the latest [GitHub release](https://github.com/Trident1332/dark-search/releases). An installed Search reads `releases/latest/download/appcast.json.zip` at launch, every hour and at Search › Check for Updates, and swaps in anything newer for the next launch.
 
 It only accepts builds signed with that key: a self-signed certificate named "Dark Search Release Signing", pinned by hash in `Updater.signer`. The key is in the login keychain of the Mac that made it, where `./build.sh` finds and uses it, and in the repository's `SIGNING_P12` / `SIGNING_P12_PASSWORD` secrets for the workflow. A build signed any other way (ad hoc, or on a Mac without the key) runs, but never updates itself.
 

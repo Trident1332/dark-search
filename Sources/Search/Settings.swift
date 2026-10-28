@@ -366,8 +366,10 @@ struct SettingsPanel: View {
 
     private func groups(of page: Page) -> some View {
         ForEach(SettingsIndex.groups(of: page)) { group in
-            GroupBlock(title: group.title, icon: group.icon) {
-                Card { rows(SettingsIndex.items(in: group.id).filter(shown), searched: false) }
+            if page != .proxy || group.id == "proxy" || prefs.proxyOn {
+                GroupBlock(title: group.title, icon: group.icon) {
+                    Card { rows(SettingsIndex.items(in: group.id).filter(shown), searched: false) }
+                }
             }
         }
     }
@@ -476,7 +478,7 @@ struct SettingsPanel: View {
     private var proxyCheckDetail: String {
         switch proxy.check {
         case .untried: return proxy.refused ? "The proxy didn't accept the name or password" : "Not tested yet"
-        case .testing: return "Testing…"
+        case .testing: return "Testing"
         case .reached(let ms, _, _): return "Connected in \(ms) ms"
         case .failed(let why): return why
         }

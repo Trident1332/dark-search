@@ -261,28 +261,120 @@ final class SidebarPressTests: XCTestCase {
     func testStripPillStillSelectsOnClick() async throws {
         let browser = makeBrowser()
         browser.prefs.sidebar = false
+        browser.prefs.tabsGive = true
+        let before = browser.tabs.map(\.id)
         let second = browser.tabs[1]
         let window = makeStripWindow(browser)
         try await settle()
         try await send(.leftMouseDown, at: pillPoint(1), in: window)
-        try await send(.leftMouseUp, at: pillPoint(1), in: window)
+        let release = NSPoint(x: pillPoint(1).x + 3, y: pillPoint(1).y)
+        try await send(.leftMouseDragged, at: release, in: window)
+        try await send(.leftMouseUp, at: release, in: window)
         XCTAssertEqual(browser.activeID, second.id, "Watching the press for the pill to give must leave its click alone")
+        XCTAssertEqual(browser.tabs.map(\.id), before, "A click with a little pointer movement must not reorder tabs")
     }
 
     func testStripPillPressThenDragStillReorders() async throws {
         let browser = makeBrowser()
         browser.prefs.sidebar = false
-        let first = browser.tabs[0]
+        browser.prefs.tabsGive = true
+        let tabs = browser.tabs
+        let window = makeStripWindow(browser)
+        try await settle()
+        let start = pillPoint(0)
+        try snapshotStrip("before", in: window)
+        try await send(.leftMouseDown, at: start, in: window)
+        for distance in [8.0, 40, 60] {
+            try await send(.leftMouseDragged, at: NSPoint(x: start.x + distance, y: start.y), in: window)
+        }
+        XCTAssertEqual(browser.tabs.map(\.id), tabs.map(\.id), "Before the boundary only the carried tab moves")
+        try snapshotStrip("following-pointer", in: window)
+        try await send(.leftMouseDragged, at: NSPoint(x: start.x + 200, y: start.y), in: window)
+        XCTAssertEqual(browser.tabs.map(\.id), [tabs[1], tabs[0], tabs[2]].map(\.id), "The next pill makes room while the button is held, even with the press effect on")
+        try snapshotStrip("neighbor-moved", in: window)
+        try await send(.leftMouseDragged, at: NSPoint(x: start.x + 360, y: start.y), in: window)
+        let expected = [tabs[1], tabs[2], tabs[0]].map(\.id)
+        XCTAssertEqual(browser.tabs.map(\.id), expected, "The drag continues across the next neighbor")
+        try await send(.leftMouseUp, at: NSPoint(x: start.x + 360, y: start.y), in: window)
+        try await settle()
+        XCTAssertEqual(browser.tabs.map(\.id), expected, "Release keeps the previewed order")
+        XCTAssertNil(browser.editingTab, "Releasing a drag must not edit the tab")
+        try snapshotStrip("released", in: window)
+    }
+
+    func testStripPillReversesWhileHeld() async throws {
+        let browser = makeBrowser()
+        browser.prefs.sidebar = false
+        let tabs = browser.tabs
         let window = makeStripWindow(browser)
         try await settle()
         let start = pillPoint(0)
         try await send(.leftMouseDown, at: start, in: window)
+        for distance in [8.0, 40, 120] {
+            try await send(.leftMouseDragged, at: NSPoint(x: start.x + distance, y: start.y), in: window)
+        }
+        XCTAssertEqual(browser.tabs.map(\.id), [tabs[1], tabs[0], tabs[2]].map(\.id))
+        let back = NSPoint(x: start.x + 70, y: start.y)
+        try await send(.leftMouseDragged, at: back, in: window)
+        XCTAssertEqual(browser.tabs.map(\.id), tabs.map(\.id), "Crossing back returns the neighbor without another half-tab of travel")
+        // A stationary hand, or small movements on this side of the same
+        // boundary, must not make the two tabs swap back and forth.
+        for distance in [70.0, 72, 68, 70] {
+            try await send(.leftMouseDragged, at: NSPoint(x: start.x + distance, y: start.y), in: window)
+            XCTAssertEqual(browser.tabs.map(\.id), tabs.map(\.id))
+        }
+        try await send(.leftMouseUp, at: back, in: window)
+        try await settle()
+        XCTAssertEqual(browser.tabs.map(\.id), tabs.map(\.id))
+    }
+
+    func testStripGroupReordersWhileHeld() async throws {
+        let browser = makeBrowser()
+        browser.prefs.sidebar = false
+        browser.prefs.usesTabGroups = true
+        let tabs = browser.tabs
+        let group = browser.addTabGroup(containing: tabs[0])
+        browser.move(tabs[1], toGroup: group)
+        browser.move(tabs[2], toGroup: group)
+        browser.editingGroupID = nil
+        let window = makeStripWindow(browser)
+        try await settle()
+        let start = NSPoint(x: pillPoint(0).x + GroupHeading.width(for: "Group 1") + Metrics.tabGap,
+                            y: Metrics.strip / 2)
+        try await send(.leftMouseDown, at: start, in: window)
         for distance in [8.0, 40, 120, 200] {
             try await send(.leftMouseDragged, at: NSPoint(x: start.x + distance, y: start.y), in: window)
         }
+        let expected = [tabs[1], tabs[0], tabs[2]].map(\.id)
+        XCTAssertEqual(browser.tabs.map(\.id), expected, "Group members reorder before release")
         try await send(.leftMouseUp, at: NSPoint(x: start.x + 200, y: start.y), in: window)
         try await settle()
-        XCTAssertNotEqual(browser.tabs.first?.id, first.id, "A pill carried past the next one still moves")
+        XCTAssertEqual(browser.tabs.map(\.id), expected)
+        XCTAssertTrue(browser.tabs.allSatisfy { $0.groupID == group })
+    }
+
+    func testStripGroupDropOnOwnHeadingKeepsLiveOrder() async throws {
+        let browser = makeBrowser()
+        browser.prefs.sidebar = false
+        browser.prefs.usesTabGroups = true
+        let tabs = browser.tabs
+        let group = browser.addTabGroup(containing: tabs[0])
+        browser.move(tabs[1], toGroup: group)
+        browser.move(tabs[2], toGroup: group)
+        browser.editingGroupID = nil
+        let window = makeStripWindow(browser)
+        try await settle()
+        let heading = GroupHeading.width(for: "Group 1") + Metrics.tabGap
+        let start = NSPoint(x: pillPoint(2).x + heading, y: Metrics.strip / 2)
+        try await send(.leftMouseDown, at: start, in: window)
+        for distance in [8.0, 120, 260, 380, 480] {
+            try await send(.leftMouseDragged, at: NSPoint(x: start.x - distance, y: start.y), in: window)
+        }
+        let expected = [tabs[2], tabs[0], tabs[1]].map(\.id)
+        XCTAssertEqual(browser.tabs.map(\.id), expected)
+        try await send(.leftMouseUp, at: NSPoint(x: start.x - 480, y: start.y), in: window)
+        try await settle()
+        XCTAssertEqual(browser.tabs.map(\.id), expected, "Its own heading must not append a tab whose peers already moved aside")
     }
 
     private func makeBrowser() -> Browser {
@@ -290,9 +382,9 @@ final class SidebarPressTests: XCTestCase {
         activationPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.prohibited)
         let prefs = Shared.prefs
-        let previous = (prefs.sidebar, prefs.usesTabGroups, prefs.splitView, prefs.listsPins, prefs.roomyTabs)
+        let previous = (prefs.sidebar, prefs.usesTabGroups, prefs.splitView, prefs.listsPins, prefs.roomyTabs, prefs.tabsGive)
         restorePreferences = {
-            (prefs.sidebar, prefs.usesTabGroups, prefs.splitView, prefs.listsPins, prefs.roomyTabs) = previous
+            (prefs.sidebar, prefs.usesTabGroups, prefs.splitView, prefs.listsPins, prefs.roomyTabs, prefs.tabsGive) = previous
         }
         let browser = Browser(record: WindowRecord())
         browsers.append(browser)
@@ -301,6 +393,7 @@ final class SidebarPressTests: XCTestCase {
         browser.prefs.splitView = false
         browser.prefs.listsPins = false
         browser.prefs.roomyTabs = false
+        browser.prefs.tabsGive = false
         for word in ["one", "two", "three"] {
             if browser.tabs.last?.isBlank == false { browser.newTab() }
             browser.tabs.last?.restore(url: URL(string: "about:blank#\(word)")!, title: word)
@@ -338,6 +431,17 @@ final class SidebarPressTests: XCTestCase {
 
     private func settle() async throws {
         try await Task.sleep(for: .milliseconds(250))
+    }
+
+    /// Inspect the same hosting view while its gesture is held, rather than
+    /// rebuilding a row and losing the carried tab's view-local state.
+    private func snapshotStrip(_ name: String, in window: NSWindow) throws {
+        guard let folder = ProcessInfo.processInfo.environment["TAB_DRAG_SHOTS"],
+              let view = window.contentView,
+              let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(folder)/\(name).png"))
     }
 
     private func send(_ type: NSEvent.EventType, at point: NSPoint, in window: NSWindow, clicks: Int = 1) async throws {

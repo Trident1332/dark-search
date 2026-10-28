@@ -49,9 +49,9 @@ struct BookmarksBar: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .contextMenu {
-            Button("New Folder…") { bookmarks.askNewFolder(in: nil) }
+            Button("New Folder") { bookmarks.askNewFolder(in: nil) }
             Divider()
-            Button("Show Bookmarks…") { browser.bookmarking = true }
+            Button("Show Bookmarks") { browser.bookmarking = true }
             Button("Hide Bookmarks Bar") {
                 withAnimation(Motion.glide) { browser.prefs.bookmarksBar = false }
             }
@@ -71,8 +71,8 @@ struct BookmarksBar: View {
         }
         Button("Open in Private Tab") { browser.openShy(url) }
         Divider()
-        Button("Rename…") { bookmarks.askRename(node) }
-        Button("Edit Address…") { bookmarks.askAddress(node) }
+        Button("Rename") { bookmarks.askRename(node) }
+        Button("Edit Address") { bookmarks.askAddress(node) }
         Button("Copy Link") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(url.absoluteString, forType: .string)
@@ -96,8 +96,8 @@ struct BookmarksBar: View {
                 .disabled(urls.isEmpty)
         }
         Divider()
-        Button("Rename…") { bookmarks.askRename(node) }
-        Button("New Folder Inside…") { bookmarks.askNewFolder(in: node.id) }
+        Button("Rename") { bookmarks.askRename(node) }
+        Button("New Folder Inside") { bookmarks.askNewFolder(in: node.id) }
         Divider()
         moveMenu(node)
         Button("Remove", role: .destructive) { bookmarks.askRemove(node) }

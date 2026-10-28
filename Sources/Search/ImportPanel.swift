@@ -60,7 +60,7 @@ struct ImportPanel: View {
             if looking {
                 HStack(spacing: 8) {
                     Ring(size: 10)
-                    Text("Looking on this Mac…").font(.system(size: 12)).foregroundStyle(Palette.muted)
+                    Text("Looking on this Mac").font(.system(size: 12)).foregroundStyle(Palette.muted)
                 }
             } else if sources.isEmpty {
                 Card { Nothing(unreadable.isEmpty ? "No other browser found on this Mac." : "Choose a browser's data folder below to allow Search to read it.") }
@@ -130,13 +130,13 @@ struct ImportPanel: View {
                         }
                         Pill("Show passwords") { browser.lead(to: InternalPage(.passwords)) }
                     } else if let source = pick {
-                        Pill(bringing ? "Bringing…" : "Bring them in", filled: true) { bring(from: source) }
+                        Pill(bringing ? "Bringing" : "Bring them in", filled: true) { bring(from: source) }
                             .disabled(bringing || !(wantsPasswords || wantsBookmarks || wantsHistory || (wantsExtensions && !fresh(source).isEmpty)
                                                      || (wantsArc && arcCounts[key(source, profile(of: source))] != nil)))
                         if bringing { Ring(size: 10) }
                     }
                     Spacer(minLength: 8)
-                    Pill("File…") { browser.importFile() }
+                    Pill("File") { browser.importFile() }
                         .disabled(bringing)
                 }
             }
@@ -195,7 +195,7 @@ struct ImportPanel: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(missing.message)
                         Spacer(minLength: 4)
-                        Pill("Choose folder…") { chooseFolder(for: missing.source) }
+                        Pill("Choose folder") { chooseFolder(for: missing.source) }
                     }
                 }
                 if let folderError {
@@ -354,7 +354,7 @@ struct ImportPanel: View {
     }
 
     private func detail(of source: ImportSource) -> String {
-        guard let preview = previews[key(source, profile(of: source))] else { return "Counting…" }
+        guard let preview = previews[key(source, profile(of: source))] else { return "Counting" }
         func count(_ n: Int, _ one: String) -> String { n == 1 ? "1 \(one)" : "\(n.formatted()) \(one)s" }
         var parts: [String] = []
         if let choices = profiles[source.id], choices.count > 1 { parts.append("\(choices.count) profiles") }

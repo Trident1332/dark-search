@@ -1006,9 +1006,9 @@ struct BookmarkOutline: View {
                     Button("Open", action: open)
                     Divider()
                 }
-                Button("Rename…", action: rename)
+                Button("Rename", action: rename)
                 if let newFolder {
-                    Button("New Folder Inside…", action: newFolder)
+                    Button("New Folder Inside", action: newFolder)
                 }
                 Menu("Move to") {
                     Button("Top Level", action: { moveTo(nil) })
@@ -1147,7 +1147,7 @@ struct BookmarkCard: View {
                 }
             }
             Divider()
-            Button("New Folder\u{2026}") {
+            Button("New Folder") {
                 Ask.name("New Folder", placeholder: "Name", confirm: "Create") { name in
                     let made = bookmarks.insert(.folder(name, []), into: nil)
                     bookmarks.move(id, into: made.id)
@@ -1247,10 +1247,10 @@ struct BookmarksDropdown: View {
             }
             Divider().overlay(Palette.hairline)
             VStack(spacing: 1) {
-                Foot(browser.pageKept ? "bookmark.fill" : "bookmark", browser.pageKept ? "Edit This Bookmark\u{2026}" : "Add This Page") {
+                Foot(browser.pageKept ? "bookmark.fill" : "bookmark", browser.pageKept ? "Edit This Bookmark" : "Add This Page") {
                     browser.bookmarkCurrent()
                 }
-                Foot(nil, "Manage Bookmarks…") { browser.bookmarking = true }
+                Foot(nil, "Manage Bookmarks") { browser.bookmarking = true }
             }
             .padding(6)
         }
@@ -1371,10 +1371,10 @@ struct BookmarksPanel: View {
                 Text("Bring in from")
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.muted)
-                Pill("Bring in…") { browser.lead(to: InternalPage(.importing)) }
-                Pill("File…") { browser.importFile() }
+                Pill("Bring in") { browser.lead(to: InternalPage(.importing)) }
+                Pill("File") { browser.importFile() }
                 Spacer()
-                Pill("New Folder…") { bookmarks.askNewFolder(in: nil) }
+                Pill("New Folder") { bookmarks.askNewFolder(in: nil) }
                 Text(bookmarks.count == 1 ? "1 bookmark" : "\(bookmarks.count) bookmarks")
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.muted)

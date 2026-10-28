@@ -383,7 +383,7 @@ struct WhatsNewCard: View {
         } foot: {
             HStack {
                 Button(action: notes) {
-                    Text("Everything that's new…")
+                    Text("Everything that's new")
                         .font(.system(size: 12))
                         .foregroundStyle(Palette.muted)
                 }
