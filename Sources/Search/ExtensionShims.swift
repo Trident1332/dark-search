@@ -1856,15 +1856,15 @@ enum ExtensionShims {
         IPHandlingPolicy: { DEFAULT: "default", DEFAULT_PUBLIC_AND_PRIVATE_INTERFACES: "default_public_and_private_interfaces",
           DEFAULT_PUBLIC_INTERFACE_ONLY: "default_public_interface_only", DISABLE_NON_PROXIED_UDP: "disable_non_proxied_udp" },
       });
-      const contentSetting = () => ({
-        get: (details, cb) => { const v = { setting: "allow" }; if (cb) cb(v); else return Promise.resolve(v); },
-        set: (details, cb) => { if (cb) cb(); else return Promise.resolve(); },
-        clear: (details, cb) => { if (cb) cb(); else return Promise.resolve(); },
-        getResourceIdentifiers: (cb) => { if (cb) cb([]); else return Promise.resolve([]); },
+      const contentSetting = (name) => ({
+        get: refuse("contentSettings." + name + ".get"),
+        set: refuse("contentSettings." + name + ".set"),
+        clear: refuse("contentSettings." + name + ".clear"),
+        getResourceIdentifiers: refuse("contentSettings." + name + ".getResourceIdentifiers"),
       });
       put2("contentSettings", Object.fromEntries(["automaticDownloads", "autoVerify", "camera", "clipboard", "cookies",
         "images", "javascript", "location", "microphone", "notifications", "plugins", "popups", "sound"]
-        .map((n) => [n, contentSetting()])));
+        .map((n) => [n, contentSetting(n)])));
       put2("proxy", { settings: setting("proxy.settings"), onProxyError: event() });
       put2("omnibox", { setDefaultSuggestion: () => {}, onInputStarted: event(), onInputChanged: event(),
         onInputEntered: event(), onInputCancelled: event(), onDeleteSuggestion: event() });
@@ -2890,15 +2890,14 @@ enum ExtensionShims {
       // ones are asked for.
       if (chrome.permissions) {
         const webkit = new Set(["activeTab", "alarms", "clipboardWrite", "contextMenus", "cookies", "declarativeNetRequest",
-          "declarativeNetRequestFeedback", "declarativeNetRequestWithHostAccess", "menus", "nativeMessaging", "scripting",
+          "declarativeNetRequestFeedback", "declarativeNetRequestWithHostAccess", "menus", "scripting",
           "storage", "tabs", "unlimitedStorage", "webNavigation", "webRequest"]);
         const ours = new Set(["bookmarks", "history", "downloads", "downloads.open", "downloads.shelf", "downloads.ui",
           "tabGroups", "sidePanel", "offscreen", "notifications", "tts", "fontSettings", "management", "identity",
           "identity.email", "idle", "power", "privacy", "browsingData", "sessions", "topSites", "search", "system.cpu",
           "system.memory", "system.storage", "system.display", "readingList", "contentSettings", "proxy", "favicon",
-          "clipboardRead", "geolocation", "userScripts"]);
+          "clipboardRead", "geolocation", "userScripts", "nativeMessaging"]);
         const manifest = (() => { try { return runtime.getManifest() || {}; } catch (e) { return {}; } })();
-        const declared = new Set(manifest.permissions || []);
         // A permission the manifest names that neither WebKit nor Search
         // knows (pageCapture…) used to fail the whole request with no
         // question asked. Chrome would grant it with the rest, so it is
@@ -2913,7 +2912,10 @@ enum ExtensionShims {
         });
         const p = chrome.permissions;
         const contains = p.contains.bind(p), request = p.request.bind(p), getAll = p.getAll.bind(p), remove = p.remove.bind(p);
-        const granted = () => native("permissions.granted", []).then((list) => new Set([...declared, ...(list || [])]));
+        // Native messaging is pregranted only for Search's internal bridge.
+        // The browser returns the original manifest's grants, not that
+        // implementation permission, plus optional access the user allowed.
+        const granted = () => native("permissions.granted", []).then((list) => new Set(list || []));
         const withCb = (f) => (arg, callback) => {
           const pr = f(arg || {});
           if (typeof callback !== "function") return pr;
@@ -2954,7 +2956,7 @@ enum ExtensionShims {
           const pr = (async () => {
             const all = await getAll();
             const have = await granted();
-            return { ...all, permissions: [...new Set([...(all.permissions || []), ...[...have].filter((m) => ours.has(m))])] };
+            return { ...all, permissions: [...new Set([...(all.permissions || []).filter((m) => m !== "nativeMessaging"), ...[...have].filter((m) => ours.has(m))])] };
           })();
           if (typeof callback !== "function") return pr;
           pr.then((v) => callback(v), (e) => withLastError(e, callback));
@@ -3949,8 +3951,11 @@ enum ExtensionShims {
     }
 
     static func allowed(_ id: String, context: WKWebExtensionContext) -> Set<String> {
-        let asked = (context.webExtension.manifest["permissions"] as? [Any] ?? []).compactMap { $0 as? String }
-        return Set(asked + (Store.settings.stringArray(forKey: "extensions.granted.\(id)") ?? []))
+        let asked = Extensions.requiredPermissionNames(context)
+        let optional = (context.webExtension.manifest["optional_permissions"] as? [String]) ?? []
+        let extra = (Store.settings.stringArray(forKey: "extensions.granted.\(id)") ?? [])
+            .filter { $0 != "nativeMessaging" || optional.contains($0) }
+        return Set(asked + extra)
     }
 
     private static func run(_ api: String, _ args: [Any], context: WKWebExtensionContext, owner: Extensions) async throws -> Any? {
@@ -3967,7 +3972,7 @@ enum ExtensionShims {
             guard !family.isEmpty, allowed(id, context: context).contains(family) else {
                 throw Unsupported(what: "The extension never asked for \u{201C}\(family)\u{201D}")
             }
-            return setting(api, first as? [String: Any] ?? [:], extension: id, owner: owner)
+            return try setting(api, first as? [String: Any] ?? [:], extension: id, owner: owner)
         }
 
         // What leaves this app is answered here, not in the injected script:
@@ -4459,14 +4464,14 @@ enum ExtensionShims {
 
         // MARK: permissions Search grants itself
         case "permissions.granted":
-            return Store.settings.stringArray(forKey: "extensions.granted.\(id)") ?? []
+            return allowed(id, context: context).sorted()
         case "permissions.request":
             let wanted = (first as? [String]) ?? []
             // As in Chrome: only what the manifest named, as a permission or
             // an optional one. What was agreed to at install still describes
             // the extension; it can't ask later for something it never named.
             let manifest = context.webExtension.manifest
-            let named = Set(((manifest["permissions"] as? [Any] ?? []) + (manifest["optional_permissions"] as? [Any] ?? [])).compactMap { $0 as? String })
+            let named = Set(Extensions.requiredPermissionNames(context) + (manifest["optional_permissions"] as? [Any] ?? []).compactMap { $0 as? String })
             guard wanted.allSatisfy(named.contains) else {
                 throw Unsupported(what: "Only permissions specified in the manifest may be requested.")
             }
@@ -4499,14 +4504,17 @@ enum ExtensionShims {
             let wanted = ((first as? [String]) ?? []).map { WKWebExtension.Permission(rawValue: $0) }
             let origins = ((args.dropFirst().first as? [String]) ?? []).compactMap { try? WKWebExtension.MatchPattern(string: $0) }
                 .filter { !Extensions.withheld($0) }
-            let named = found.requestedPermissions.union(found.optionalPermissions)
+            let optional = (found.manifest["optional_permissions"] as? [String]) ?? []
+            let named = Set((Extensions.requiredPermissionNames(context) + optional).map { WKWebExtension.Permission(rawValue: $0) })
             // Sites as the manifest names them, optional ones included —
             // which allRequestedMatchPatterns leaves out.
             let places = Set(found.allRequestedMatchPatterns.union(found.optionalPermissionMatchPatterns).map(\.string))
             guard wanted.allSatisfy(named.contains), origins.allSatisfy({ places.contains($0.string) }) else {
                 throw Unsupported(what: "Only permissions specified in the manifest may be requested.")
             }
-            let missing = wanted.filter { context.permissionStatus(for: $0) != .grantedExplicitly }
+            let missing = wanted.filter {
+                $0 == .nativeMessaging ? !Extensions.asksForNative(context) : context.permissionStatus(for: $0) != .grantedExplicitly
+            }
             let unreached = origins.filter { pattern in
                 let status = context.permissionStatus(for: pattern)
                 if status == .grantedExplicitly || status == .grantedImplicitly { return false }
@@ -4524,6 +4532,10 @@ enum ExtensionShims {
             let detail = missing.isEmpty ? "Until you remove the extension." : missing.map(\.rawValue).sorted().joined(separator: ", ")
             guard await owner.ask(question, detail: detail, context: context) else { return false }
             for permission in missing { context.setPermissionStatus(.grantedExplicitly, for: permission) }
+            if missing.contains(.nativeMessaging) {
+                let had = Store.settings.stringArray(forKey: "extensions.granted.\(id)") ?? []
+                Store.settings.set(Array(Set(had + ["nativeMessaging"])).sorted(), forKey: "extensions.granted.\(id)")
+            }
             for pattern in unreached { context.setPermissionStatus(.grantedExplicitly, for: pattern) }
             Extensions.fence(context)
             return true
@@ -4541,6 +4553,7 @@ enum ExtensionShims {
             let gone = Set((first as? [String]) ?? [])
             let had = Store.settings.stringArray(forKey: "extensions.granted.\(id)") ?? []
             Store.settings.set(had.filter { !gone.contains($0) }, forKey: "extensions.granted.\(id)")
+            if gone.contains("nativeMessaging") { owner.nativePermissionRemoved(for: context) }
             return true
 
         // MARK: tabs, by where they are in the row
@@ -4881,18 +4894,29 @@ enum ExtensionShims {
     /// Keep-awake assertions, one per extension that asked.
     static var awake: [String: IOPMAssertionID] = [:]
 
-    /// chrome.privacy and chrome.proxy: what each extension set, kept across
-    /// launches as Chrome keeps it. Search acts on one of them — an
-    /// extension turning the browser's own offer to save passwords off,
-    /// which is how every password manager asks Chrome to step aside.
-    private static func setting(_ api: String, _ details: [String: Any], extension id: String, owner: Extensions) -> Any? {
+    /// Only a setting with an actual browser consumer may claim control.
+    /// Unsupported controls must never make a proxy/privacy extension say
+    /// it protected traffic when it only wrote a value to defaults.
+    private static func setting(_ api: String, _ details: [String: Any], extension id: String, owner: Extensions) throws -> Any? {
         let parts = api.split(separator: ":", maxSplits: 1).map(String.init)
         guard parts.count == 2 else { return nil }
         let name = parts[1]
+        guard name == "privacy.services.passwordSavingEnabled" else {
+            if parts[0] == "setting.get" {
+                return ["value": NSNull(), "levelOfControl": "not_controllable"]
+            }
+            throw Unsupported(what: "\(name) isn't available in Search")
+        }
+        if let scope = details["scope"] as? String, scope != "regular" {
+            throw Unsupported(what: "\(name) doesn't support this scope in Search")
+        }
         var mine = Extensions.settings(for: id)
         switch parts[0] {
         case "setting.set":
-            mine[name] = details["value"]
+            guard let value = details["value"] as? Bool else {
+                throw Unsupported(what: "\(name) requires a Boolean value")
+            }
+            mine[name] = value
         case "setting.clear":
             mine[name] = nil
         default:
@@ -4905,15 +4929,7 @@ enum ExtensionShims {
     }
 
     private static func defaultSetting(_ name: String, owner: Extensions) -> Any? {
-        switch name {
-        case "privacy.services.passwordSavingEnabled": return owner.browser?.prefs.savesPasswords ?? true
-        case "privacy.network.webRTCIPHandlingPolicy": return "default"
-        case "privacy.websites.doNotTrackEnabled", "privacy.websites.adMeasurementEnabled",
-             "privacy.websites.fledgeEnabled", "privacy.websites.topicsEnabled",
-             "privacy.services.safeBrowsingExtendedReportingEnabled": return false
-        case "proxy.settings": return ["mode": "system"]
-        default: return true
-        }
+        name == "privacy.services.passwordSavingEnabled" ? owner.browser?.prefs.savesPasswords ?? true : nil
     }
 
     /// chrome.browsingData, from what WebKit and Search keep.

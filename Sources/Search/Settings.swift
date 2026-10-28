@@ -1023,6 +1023,7 @@ struct SettingsPanel: View {
     private var versionDetail: String {
         switch updater.stage {
         case .none:
+            if let why = updater.lastCheckFailure { return "Couldn't check for updates. \(why)" }
             return updater.lastChecked.map { "Checked \($0.formatted(.relative(presentation: .named))), every hour on its own" }
                 ?? "Checked every hour on its own"
         case .fetching(let next):
@@ -1041,8 +1042,8 @@ struct SettingsPanel: View {
         switch updater.stage {
         case .none:
             Pill(updater.checking ? "Checking" : "Check now") {
-                updater.check { found in
-                    if found == nil { browser.announce("This is the latest one") }
+                updater.check { result in
+                    if let message = result.message { browser.announce(message) }
                 }
             }
             .disabled(updater.checking)

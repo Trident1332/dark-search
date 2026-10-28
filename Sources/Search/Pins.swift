@@ -27,6 +27,30 @@ struct PinDef: Codable, Equatable {
     var listed: Bool? = nil
 }
 
+extension PinDef {
+    private enum Keys: String, CodingKey { case id, letter, home, title, name, listed }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        letter = try c.decode(String.self, forKey: .letter)
+        home = Session.savedAddress(try c.decode(String.self, forKey: .home))
+        title = try c.decode(String.self, forKey: .title)
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        listed = try c.decodeIfPresent(Bool.self, forKey: .listed)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Keys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(letter, forKey: .letter)
+        try c.encode(Session.savedAddress(home), forKey: .home)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(name, forKey: .name)
+        try c.encodeIfPresent(listed, forKey: .listed)
+    }
+}
+
 @MainActor
 enum Pins {
     /// Pins by space, in their order.

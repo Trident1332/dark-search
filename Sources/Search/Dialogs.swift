@@ -260,7 +260,8 @@ extension Browser {
     /// it holds up. When it doesn't: this Mac itself — localhost and its
     /// loopback addresses, which nothing on the network can stand in for —
     /// is taken on trust; anything else, a .local name or a private address
-    /// on the same Wi-Fi included, is asked about, once per site per launch,
+    /// on the same Wi-Fi included, is asked about, once per certificate and
+    /// origin in that profile or private store for this launch,
     /// and only for the page itself, never for something a page pulled in.
     private func trust(
         _ webView: WKWebView,
@@ -276,7 +277,8 @@ extension Browser {
             return
         }
         let host = challenge.protectionSpace.host.lowercased()
-        if Dialogs.isLoopback(host) || Dialogs.excused.contains(host) {
+        let store = webView.configuration.websiteDataStore
+        if Dialogs.isLoopback(host) || Dialogs.excused.contains(trust, for: challenge.protectionSpace, in: store) {
             completionHandler(.useCredential, URLCredential(trust: trust))
             return
         }
@@ -301,7 +303,7 @@ extension Browser {
                     completionHandler(.cancelAuthenticationChallenge, nil)
                     return
                 }
-                Dialogs.excused.insert(host)
+                Dialogs.excused.accept(trust, for: challenge.protectionSpace, in: store)
                 completionHandler(.useCredential, URLCredential(trust: trust))
             }
         }, drop: { completionHandler(.cancelAuthenticationChallenge, nil) })
@@ -385,8 +387,8 @@ extension Browser {
 }
 
 enum Dialogs {
-    /// Sites with bad certificates that were accepted, for this launch only.
-    static var excused = Set<String>()
+    /// Certificate exceptions scoped to the origin and its website data store.
+    @MainActor static let excused = CertificateExceptions()
 
     static func alert(from frame: WKFrameInfo, saying message: String) -> NSAlert {
         let alert = NSAlert()

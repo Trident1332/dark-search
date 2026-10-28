@@ -1301,17 +1301,37 @@ final class Extensions: NSObject, ObservableObject {
         actionsChanged += 1
     }
 
-    /// Its manifest asks to talk to apps on this Mac ("nativeMessaging"),
-    /// required or optional, which WebKit's own grant — given to all, see
-    /// `load` — doesn't say. Nor does the manifest WebKit reads: Search
-    /// writes nativeMessaging into every one for its own line
-    /// (ExtensionShims.prepare), and notes it in .search-added, so what it
-    /// added there doesn't count as asked.
-    static func asksForNative(_ context: WKWebExtensionContext) -> Bool {
+    /// The required permissions before Search added its implementation
+    /// bridge. Those additions are not consent to use the corresponding API.
+    static func requiredPermissionNames(_ context: WKWebExtensionContext) -> [String] {
         let folder = Extensions.folder(for: context.uniqueIdentifier)
         let added = Set((try? JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent(".search-added")))) as? [String] ?? [])
-        let required = context.webExtension.requestedPermissions.contains(.nativeMessaging) && !added.contains("nativeMessaging")
-        return required || context.webExtension.optionalPermissions.contains(.nativeMessaging)
+        return (context.webExtension.manifest["permissions"] as? [Any] ?? []).compactMap { $0 as? String }
+            .filter { !added.contains($0) }
+    }
+
+    /// WebKit grants nativeMessaging to every extension for Search's own
+    /// bridge. A real native host instead requires the original manifest's
+    /// required permission or an optional permission the user has allowed.
+    static func asksForNative(_ context: WKWebExtensionContext) -> Bool {
+        if requiredPermissionNames(context).contains("nativeMessaging") { return true }
+        guard ((context.webExtension.manifest["optional_permissions"] as? [String]) ?? []).contains("nativeMessaging") else { return false }
+        return (Store.settings.stringArray(forKey: "extensions.granted.\(context.uniqueIdentifier)") ?? []).contains("nativeMessaging")
+    }
+
+    /// Giving back optional access closes its native-host channels as well.
+    /// Internal shim and WebSocket ports keep the implementation grant.
+    func nativePermissionRemoved(for context: WKWebExtensionContext) {
+        guard !Extensions.asksForNative(context) else { return }
+        for port in nativePorts[context.uniqueIdentifier]?.allObjects ?? [] {
+            guard let application = port.applicationIdentifier,
+                  application != ExtensionShims.application, application != ExtensionSocket.name else { continue }
+            let cleanup = port.disconnectHandler
+            port.disconnectHandler = nil
+            cleanup?(nil)
+            if !port.isDisconnected { port.disconnect() }
+        }
+        ExtensionNative.stopOrphans()
     }
 
     /// Whether this address is a page of an extension other than the one

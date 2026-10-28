@@ -23,6 +23,10 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Fixed
 
+- Extension proxy, privacy and content-setting controls now report an error when Search cannot enforce them, instead of claiming protection. Optional access to native apps requires consent and can be revoked; the browser's internal extension bridge grants no such access.
+- Accepting an untrusted certificate applies only to that certificate and origin in the same profile or private store. A changed certificate, another port or another browsing store asks again.
+- Session, window and pinned-tab files leave usernames and passwords out of saved URLs, including old entries when restored. Deleting a space or profile invalidates queued session saves so they cannot recreate its deleted file.
+- A failed update check reports that it failed instead of saying Search is up to date. A known update and the last successful-check time survive an unsuccessful retry.
 - Proxy settings stay in force while the server address is being replaced. AI requests and downloads follow the route, old connection tests cannot overwrite new settings, and Test always goes through the proxy despite bypass rules. Failed tabs reload after either a successful test or automatic recovery; a cached or bypassed page cannot cancel recovery. Deleting a profile also clears its proxy restriction.
 - Proxy's Exceptions, Options and Privacy sections stay hidden until Use a proxy is turned on.
 - Carrying a tab along the row across the top works as Chromium's strip does: the tab stays under the pointer, takes a neighbour's place once its leading corner is past that neighbour's middle, and the neighbour slides into the place left behind, measured against the tabs' real widths rather than a fixed step, and eases straight into its place when let go instead of springing — a pinned square, a split pair and the pin line all count for what they are — and can't be carried past the last tab, under the + and out of the row's edge. Before, it jumped back a place and raced forward at each tab it passed.

@@ -5,6 +5,14 @@ import Foundation
 // page or in the history file next door.
 
 enum Session {
+    /// A saved destination never carries authentication. The same boundary
+    /// is used by session entries (including windows.json) and pinned homes.
+    /// Invalid addresses cannot be restored and are not kept as raw text.
+    static func savedAddress(_ text: String) -> String {
+        guard let url = URL(string: text), let clean = History.kept(url) else { return "" }
+        return url.user == nil && url.password == nil ? text : clean.absoluteString
+    }
+
     struct Entry: Codable {
         var url: String
         var title: String
@@ -100,7 +108,7 @@ enum Session {
 
     static func erase(space: UUID) {
         guard space != Space.firstID else { return }
-        try? FileManager.default.removeItem(at: file(space))
+        Disk.remove(file(space))
     }
 
     static func read(space: UUID = Space.firstID) -> Shape {
@@ -137,17 +145,32 @@ extension Session.Entry {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
-        url = try c.decode(String.self, forKey: .url)
+        url = Session.savedAddress(try c.decode(String.self, forKey: .url))
         title = try c.decode(String.self, forKey: .title)
         pin = try c.decodeIfPresent(String.self, forKey: .pin)
         name = try c.decodeIfPresent(String.self, forKey: .name)
-        home = try c.decodeIfPresent(String.self, forKey: .home)
+        home = try c.decodeIfPresent(String.self, forKey: .home).map(Session.savedAddress)
         groupID = try? c.decodeIfPresent(UUID.self, forKey: .groupID)
         pinID = try? c.decodeIfPresent(UUID.self, forKey: .pinID)
         touched = try? c.decodeIfPresent(Date.self, forKey: .touched)
         letGo = try? c.decodeIfPresent(Date.self, forKey: .letGo)
         listed = try? c.decodeIfPresent(Bool.self, forKey: .listed)
         muted = (try? c.decodeIfPresent(Bool.self, forKey: .muted)) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Keys.self)
+        try c.encode(Session.savedAddress(url), forKey: .url)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(pin, forKey: .pin)
+        try c.encodeIfPresent(name, forKey: .name)
+        try c.encodeIfPresent(home.map(Session.savedAddress), forKey: .home)
+        try c.encodeIfPresent(groupID, forKey: .groupID)
+        try c.encodeIfPresent(pinID, forKey: .pinID)
+        try c.encodeIfPresent(touched, forKey: .touched)
+        try c.encodeIfPresent(letGo, forKey: .letGo)
+        try c.encodeIfPresent(listed, forKey: .listed)
+        try c.encode(muted, forKey: .muted)
     }
 }
 
