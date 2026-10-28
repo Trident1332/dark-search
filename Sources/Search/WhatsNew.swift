@@ -8,7 +8,7 @@ import SwiftUI
 // itself, and — so nothing gets lost — the switches from earlier versions
 // that are still off. Nothing else: few words (Drice). Closed, it
 // doesn't come back for that version. Not after a fresh install: the welcome
-// is for that. Every version's notes are in Settings › About › What's New…
+// is for that. Every version's notes are in Settings › About › What's new › Review
 //
 // A release edits `toggles` (its new switches, marked with its version),
 // `releases` (that it has a card) and `notes` (what it brought).
@@ -131,7 +131,7 @@ enum WhatsNew {
 
     // MARK: - every version's notes
 
-    /// What a version brought, for Settings › About › What's New…
+    /// What a version brought, for Settings › About › What's new › Review
     struct Notes {
         let version: String
         let date: String
@@ -423,7 +423,7 @@ struct WhatsNewCard: View {
     }
 }
 
-/// Every version's notes, newest first: Settings › About › What's New…
+/// Every version's notes, newest first: Settings › About › What's new › Review
 struct ReleaseNotesPanel: View {
     let close: () -> Void
 

@@ -172,7 +172,7 @@ final class Browser: NSObject, ObservableObject {
     @Published var welcoming = false
     /// What's new, once after an update (see WhatsNew.swift).
     @Published var newsShowing = false
-    /// Every version's notes: Settings › About › What's New…, in a tab.
+    /// Every version's notes: Settings › About › What's new › Review, in a tab.
     var notesShowing: Bool {
         get { pageTab(.notes) != nil }
         set { if newValue { show(InternalPage(.notes)) } else { putAway(.notes) } }

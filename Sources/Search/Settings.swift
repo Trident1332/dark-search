@@ -273,12 +273,9 @@ struct SettingsPanel: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // The title alone: the section's icon is already beside its name
+            // in the rail.
             HStack(spacing: 10) {
-                if !searching {
-                    Image(systemName: page.icon)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(Palette.ink)
-                }
                 Text(searching ? "Settings matching “\(query.trimmingCharacters(in: .whitespaces))”" : page.title)
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(Palette.ink)
@@ -688,7 +685,7 @@ struct SettingsPanel: View {
         case "updates.version": versionControl
         case "updates.auto": Switch(on: $prefs.installsUpdates)
         case "about.feedback": Pill("Send Feedback") { Links.writeFeedback() }
-        case "about.notes": Pill("What's New…") { browser.lead(to: InternalPage(.notes)) }
+        case "about.notes": Pill("Review") { browser.lead(to: InternalPage(.notes)) }
         case "bench": Switch(on: $prefs.bench)
         default: EmptyView()
         }
