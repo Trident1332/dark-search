@@ -29,6 +29,7 @@ struct SettingsPanel: View {
     /// A site the proxy is to be skipped for, being typed (Settings › Proxy).
     @State private var bypassDraft: String?
     @ObservedObject private var proxy = Proxy.shared
+    @ObservedObject private var onion = Onion.shared
     @State private var page: Page = Page.named(Store.settings.string(forKey: "settings.page") ?? "") ?? .general
     /// What is typed in Find a setting.
     @State private var query = ""
@@ -37,6 +38,9 @@ struct SettingsPanel: View {
     @State private var lit: String?
     /// What Set Up Like Arc changed, for Undo.
     @State private var arcBefore: Preferences.ArcSetup? = SettingsPanel.arcBefore
+    /// The rail's lit row slides from the section you were in to the one
+    /// you pick (see PageRow).
+    @Namespace private var slide
     @MainActor static var arcBefore: Preferences.ArcSetup?
 
     enum Page: String, CaseIterable, Identifiable {
@@ -194,7 +198,7 @@ struct SettingsPanel: View {
                 }
                 ForEach(block) { item in
                     PageRow(page: item, on: !searching && page == item,
-                            count: searching ? counts[item] ?? 0 : nil) {
+                            count: searching ? counts[item] ?? 0 : nil, slide: slide) {
                         query = ""
                         page = item
                         finding = false
@@ -207,6 +211,11 @@ struct SettingsPanel: View {
         .frame(width: SettingsPanel.rail, alignment: .leading)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Palette.wash.opacity(0.45), in: Rectangle())
+        // The lit row glides to the section picked; the counts beside the
+        // sections come and go with what is typed.
+        .animation(Motion.settle, value: page)
+        .animation(Motion.quick, value: searching)
+        .animation(Motion.quick, value: hits.map(\.id))
     }
 
     /// Find a setting: the wash, the glass, ⌘F beside it until something
@@ -257,6 +266,7 @@ struct SettingsPanel: View {
         let on: Bool
         /// While searching: how many rows of this section match.
         let count: Int?
+        let slide: Namespace.ID
         let act: () -> Void
         @State private var hovering = false
 
@@ -276,17 +286,27 @@ struct SettingsPanel: View {
                             .padding(.horizontal, 6)
                             .frame(height: 17)
                             .background(Palette.ground, in: Capsule())
+                            .contentTransition(.numericText())
+                            .transition(.scale(scale: 0.6).combined(with: .opacity))
                     }
                 }
                 .foregroundStyle(on ? Palette.ink : (hovering ? Palette.ink.opacity(0.75) : Palette.muted))
                 .opacity(count == 0 ? 0.4 : 1)
                 .padding(.horizontal, 10)
                 .frame(height: 30)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(on ? Palette.ground : (hovering ? Palette.hover : .clear))
-                        .shadow(color: .black.opacity(on ? 0.06 : 0), radius: 3, y: 1)
-                )
+                .background {
+                    // One lit plate for the whole rail, matched between the
+                    // rows so it slides rather than jumps.
+                    if on {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Palette.ground)
+                            .shadow(color: .black.opacity(0.06), radius: 3, y: 1)
+                            .matchedGeometryEffect(id: "lit", in: slide)
+                    } else if hovering {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Palette.hover)
+                    }
+                }
                 .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
@@ -306,6 +326,8 @@ struct SettingsPanel: View {
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
+                    .contentTransition(.opacity)
+                    .animation(Motion.quick, value: shownID)
                 Spacer()
                 if !asTab {
                     Door(icon: "xmark", help: "Done   esc") { browser.tuning = false }
@@ -316,24 +338,36 @@ struct SettingsPanel: View {
             .frame(maxWidth: asTab ? SettingsPanel.column : .infinity)
             .frame(maxWidth: .infinity)
 
-            ScrollViewReader { reader in
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 22) {
-                        if searching { results } else { section(page) }
+            // Each section in a scroll view of its own, so a page opens at
+            // its top (one scroll view kept for them all opened Tabs as far
+            // down as General had been read), and the one you leave fades
+            // out under the one you come to, which rises a touch into place.
+            ZStack {
+                ScrollViewReader { reader in
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 22) {
+                            if searching { results } else { section(page) }
+                        }
+                        .environment(\.ruleInset, 0)
+                        // Rows and groups that only count while another
+                        // setting is on come and go with a glide rather
+                        // than appear in place; so does what a control
+                        // swaps to, and what is drawn under a row.
+                        .animation(Motion.glide, value: motion)
+                        .animation(Motion.quick, value: hits.map(\.id))
+                        .padding(.bottom, 24)
+                        // Keep the rows narrow, not the scroll view: the empty
+                        // space beside them must receive scrolling too.
+                        .padding(.horizontal, 24)
+                        .frame(maxWidth: asTab ? SettingsPanel.column : .infinity)
+                        .frame(maxWidth: .infinity)
                     }
-                    .environment(\.ruleInset, 0)
-                    .padding(.bottom, 24)
-                    // Keep the rows narrow, not the scroll view: the empty
-                    // space beside them must receive scrolling too.
-                    .padding(.horizontal, 24)
-                    .frame(maxWidth: asTab ? SettingsPanel.column : .infinity)
-                    .frame(maxWidth: .infinity)
+                    .onAppear { if let lit { reader.scrollTo(lit, anchor: .center) } }
                 }
-                .onAppear { if let lit { reader.scrollTo(lit, anchor: .center) } }
+                .id(shownID)
+                .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 10)), removal: .opacity))
             }
-            // A page of its own opens at its top. One scroll view kept for
-            // them all opened Tabs as far down as General had been read.
-            .id(searching ? "found" : page.rawValue)
+            .animation(Motion.glide, value: shownID)
         }
         .padding(.top, 18)
         .padding(.bottom, 0)
@@ -366,10 +400,12 @@ struct SettingsPanel: View {
 
     private func groups(of page: Page) -> some View {
         ForEach(SettingsIndex.groups(of: page)) { group in
-            if page != .proxy || group.id == "proxy" || prefs.proxyOn {
+            let visible = SettingsIndex.items(in: group.id).filter(shown)
+            if page != .proxy || ((group.id == "proxy" || group.id == "tor" || prefs.proxyOn) && !visible.isEmpty) {
                 GroupBlock(title: group.title, icon: group.icon) {
-                    Card { rows(SettingsIndex.items(in: group.id).filter(shown), searched: false) }
+                    Card { rows(visible, searched: false) }
                 }
+                .transition(SettingsPanel.unfolding)
             }
         }
     }
@@ -379,21 +415,25 @@ struct SettingsPanel: View {
 
     private func rows(_ items: [SettingsItem], searched: Bool) -> some View {
         ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-            if index > 0 { Rule() }
-            row(item)
-            after(item, searched: searched)
+            Group {
+                if index > 0 { Rule() }
+                row(item)
+                after(item, searched: searched)
+            }
+            .transition(SettingsPanel.unfolding)
         }
     }
 
     private func row(_ item: SettingsItem) -> some View {
         let counts = SettingsIndex.applies(item, prefs)
         return SettingRow(
-            icon: item.icon,
+            icon: icon(of: item),
             title: title(of: item),
             detail: counts ? detail(of: item) : SettingsIndex.needs(item),
             more: counts ? item.more : nil,
             wide: item.kind == .wide,
-            lit: lit == item.id
+            lit: lit == item.id,
+            tint: tint(of: item)
         ) {
             control(item)
         }
@@ -435,6 +475,7 @@ struct SettingsPanel: View {
                 .help("Open \(group.page.title) at \(group.title)")
                 Card { rows(byGroup[group.id] ?? [], searched: true) }
             }
+            .transition(SettingsPanel.unfolding)
         }
     }
 
@@ -444,6 +485,29 @@ struct SettingsPanel: View {
         switch item.id {
         case "updates.version": return versionTitle
         default: return item.title
+        }
+    }
+
+    /// Settings › Proxy › Status wears how the connection is: a tick once
+    /// reached, a mark when it failed, dots while nothing is known.
+    private func icon(of item: SettingsItem) -> String {
+        guard item.id == "proxy.test" else { return item.icon }
+        if proxy.refused || proxy.dropped { return "exclamationmark.circle.fill" }
+        switch proxy.check {
+        case .untried: return item.icon
+        case .testing: return "ellipsis.circle"
+        case .reached: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.circle.fill"
+        }
+    }
+
+    private func tint(of item: SettingsItem) -> Color? {
+        guard item.id == "proxy.test" else { return nil }
+        if proxy.refused || proxy.dropped { return Palette.unsafe }
+        switch proxy.check {
+        case .reached: return Palette.safe
+        case .failed: return Palette.unsafe
+        case .untried, .testing: return nil
         }
     }
 
@@ -467,6 +531,9 @@ struct SettingsPanel: View {
         case "updates.version": return versionDetail
         case "arc.import": return arcHere ? item.detail : "Arc isn't on this Mac. Bring Things Over can read an export"
         case "proxy.test": return proxyCheckDetail
+        case "onion.connection": return onion.status
+        case "proxy.calls":
+            return prefs.proxyBlocks ? "Required by Persistent connection to prevent direct peer connections" : item.detail
         case "proxy.profiles":
             return prefs.proxyProfiles.isEmpty ? item.detail
                 : "Only \(Profiles.shared.profile(browser.profileID).name) takes the route; the others stay on the Mac's settings"
@@ -474,15 +541,46 @@ struct SettingsPanel: View {
         }
     }
 
-    /// Settings › Proxy › Connection: how the last test went.
+    /// Settings › Proxy › Status: how the last test went.
     private var proxyCheckDetail: String {
         switch proxy.check {
-        case .untried: return proxy.refused ? "The proxy didn't accept the name or password" : "Not tested yet"
-        case .testing: return "Testing"
-        case .reached(let ms, _, _): return "Connected in \(ms) ms"
+        case .untried:
+            if proxy.refused { return "The proxy didn't accept the name or password" }
+            if proxy.dropped { return "The proxy isn't answering. Search tries it again every 15 seconds" }
+            return proxy.setup.complete ? "Not tested yet" : "Enter the proxy's address first"
+        case .testing: return "Reaching the proxy…"
+        case .reached(let ms, _, _):
+            return ms < 1000 ? "Connected in \(ms) ms" : String(format: "Connected in %.1f s", Double(ms) / 1000)
         case .failed(let why): return why
         }
     }
+
+    /// What is on the page, or found: the scroll view and the title are
+    /// keyed by it, and change with a cross-fade when it changes.
+    private var shownID: String { searching ? "found" : page.rawValue }
+
+    /// What a section glides on: which rows are there, every merged value
+    /// (a switch that swaps another row's control, or shows a group), and
+    /// everything that shows or hides something drawn under a row.
+    private var motion: [AnyHashable] {
+        var key: [AnyHashable] = SettingsIndex.groups(of: page).flatMap { group in
+            SettingsIndex.items(in: group.id).filter(shown).map(\.id)
+        }
+        let values = SettingsIndex.values(prefs)
+        key += values.keys.sorted().map { "\($0)=\(values[$0] ?? "")" }
+        key += [prefs.engine == .custom, draft == nil, bypassDraft == nil, isDefault, shield.trouble ?? "",
+                prefs.proxySignsIn, prefs.proxyBypass, proxy.check == .testing, proxyCheckDetail,
+                proxy.place ?? "", proxy.timeZoneID ?? "", prefs.translateAlways.count, Vault.never.count,
+                Profiles.shared.several, lit ?? ""]
+        return key
+    }
+
+    /// How a row or a group comes and goes: it fades in from a touch
+    /// above, and fades out where it is.
+    static let unfolding = AnyTransition.asymmetric(
+        insertion: .opacity.combined(with: .offset(y: -8)),
+        removal: .opacity
+    )
 
     private var arcHere: Bool { FileManager.default.fileExists(atPath: Arc.file.path) }
 
@@ -713,13 +811,22 @@ struct SettingsPanel: View {
     @ViewBuilder
     private func proxyControl(_ id: String) -> some View {
         switch id {
+        case "onion.on": Switch(on: $prefs.onionEnabled)
+        case "onion.connection": TorConnection()
         case "proxy.on": Switch(on: $prefs.proxyOn)
         case "proxy.kind": Segmented(options: ProxyKind.allCases.map { ($0, $0.title) }, selection: $prefs.proxyKind)
         case "proxy.signIn": Switch(on: $prefs.proxySignsIn)
         case "proxy.test":
-            Pill("Test") { proxy.test() }
-                .disabled(proxy.check == .testing)
-                .opacity(proxy.check == .testing ? 0.5 : 1)
+            HStack(spacing: 10) {
+                if proxy.check == .testing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .transition(.opacity)
+                }
+                Pill(proxy.check == .testing ? "Poking" : "Poke") { proxy.test() }
+                    .disabled(proxy.check == .testing || !proxy.setup.complete)
+                    .opacity(proxy.check == .testing || !proxy.setup.complete ? 0.5 : 1)
+            }
         case "proxy.bypass":
             if bypassDraft == nil {
                 Pill("Add") { bypassDraft = "" }
@@ -743,7 +850,10 @@ struct SettingsPanel: View {
             ))
         case "proxy.blocks": Switch(on: $prefs.proxyBlocks)
         case "proxy.shows": Switch(on: $prefs.proxyShows)
-        case "proxy.calls": Switch(on: $prefs.proxyHidesCalls)
+        case "proxy.calls":
+            if prefs.proxyBlocks { Always(text: "Required") }
+            else { Switch(on: $prefs.proxyHidesCalls) }
+        case "proxy.timeZone": Switch(on: $prefs.proxyMatchesTimeZone)
         default: EmptyView()
         }
     }
@@ -835,14 +945,23 @@ struct SettingsPanel: View {
                 ProfileList(browser: browser)
                     .under()
             }
+        case "proxy.on":
+            if !searched, !prefs.proxyOn {
+                ProxyHint()
+                    .transition(SettingsPanel.unfolding)
+            }
         case "proxy.server":
             ProxyServerFields(prefs: prefs)
         case "proxy.signIn":
-            if prefs.proxySignsIn { ProxySignInFields(prefs: prefs) }
+            if prefs.proxySignsIn {
+                ProxySignInFields(prefs: prefs)
+                    .transition(SettingsPanel.unfolding)
+            }
         case "proxy.test":
             if !searched {
                 ProxyLocationLine()
                     .under()
+                    .transition(SettingsPanel.unfolding)
             }
         case "proxy.bypass":
             if !searched {
@@ -1118,6 +1237,9 @@ struct SettingRow<Control: View>: View {
     var more: String? = nil
     var wide = false
     var lit = false
+    /// The icon's colour when it says how something is (Palette.safe,
+    /// Palette.unsafe); ink otherwise.
+    var tint: Color? = nil
     @ViewBuilder let control: () -> Control
 
     @State private var open = false
@@ -1127,9 +1249,11 @@ struct SettingRow<Control: View>: View {
             HStack(alignment: .center, spacing: 12) {
                 Image(systemName: icon)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Palette.ink.opacity(0.78))
+                    .foregroundStyle(tint ?? Palette.ink.opacity(0.78))
                     .frame(width: 26, height: 26)
                     .background(Palette.wash, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .contentTransition(.symbolEffect(.replace))
+                    .animation(Motion.settle, value: icon)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
                         Text(title)
@@ -1137,11 +1261,12 @@ struct SettingRow<Control: View>: View {
                             .foregroundStyle(Palette.ink)
                             .fixedSize(horizontal: false, vertical: true)
                         if more != nil {
-                            Button { withAnimation(Motion.quick) { open.toggle() } } label: {
+                            Button { withAnimation(Motion.settle) { open.toggle() } } label: {
                                 Image(systemName: open ? "info.circle.fill" : "info.circle")
                                     .font(.system(size: 10.5))
                                     .foregroundStyle(Palette.muted.opacity(0.8))
                                     .contentShape(Rectangle())
+                                    .contentTransition(.symbolEffect(.replace))
                             }
                             .buttonStyle(.plain)
                             .help(more ?? "")
@@ -1161,7 +1286,7 @@ struct SettingRow<Control: View>: View {
                             .foregroundStyle(Palette.muted)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.top, 3)
-                            .transition(.opacity)
+                            .transition(SettingsPanel.unfolding)
                     }
                 }
                 Spacer(minLength: 8)

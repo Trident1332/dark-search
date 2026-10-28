@@ -261,6 +261,32 @@ final class SidePanelPages: NSObject {
     private var pages: [ObjectIdentifier: Page] = [:]
     private var bound: [ObjectIdentifier: [Tab.ID: SidePanelContent]] = [:]
 
+    private override init() {
+        super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(proxyChanged), name: Proxy.contentChanged, object: nil)
+    }
+
+    /// A proxy transition closes old page processes, including panels.
+    /// Recreate their views only after the new route and clock are ready.
+    @objc private func proxyChanged() {
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return }
+        for browser in Browsers.all {
+            guard let content = browser.sidePanel else { continue }
+            switch content {
+            case .site(let first, let space):
+                let url = siteArrived(in: browser) ?? first
+                loadSite(url, space: space, in: browser)
+                browser.sidePanel = .site(url: url, space: space)
+            case .page(let id, let url, _):
+                drop(in: browser)
+                if #available(macOS 15.4, *), let context = Extensions.shared.contexts[id] {
+                    _ = load(url, from: context, in: browser)
+                }
+            }
+            browser.objectWillChange.send()
+        }
+    }
+
     /// The page up in this window's panel, for SidePanelView and the bench.
     func web(in browser: Browser) -> WKWebView? { pages[ObjectIdentifier(browser)]?.web }
 
@@ -293,13 +319,16 @@ final class SidePanelPages: NSObject {
     @available(macOS 15.4, *)
     func load(_ url: URL, from context: WKWebExtensionContext, in browser: Browser) -> Bool {
         let key = ObjectIdentifier(browser)
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { drop(in: browser); return true }
         // The same page already up: left as it is.
         if let page = pages[key], page.web.url == url { return true }
         drop(in: browser)
         guard let configuration = context.webViewConfiguration else { return false }
         // No window opens from the panel without a click.
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        Proxy.shared.prepare(configuration)
         let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 380, height: 600), configuration: configuration)
+        Proxy.shared.track(web)
         let delegate = PanelDelegate(browser: browser, base: context.baseURL, first: url)
         web.navigationDelegate = delegate
         web.uiDelegate = delegate
@@ -314,12 +343,16 @@ final class SidePanelPages: NSObject {
     /// its store, its user agent, extensions where tabs have them. Never a
     /// private tab's store. No window opens from it without a click.
     func loadSite(_ url: URL, space: UUID, in browser: Browser) {
+        if OnionAddress.isOnion(url) { browser.sidePanel = nil; browser.open(url, foreground: true); return }
         drop(in: browser)
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return }
         // The window's profile's store for that space: signed in where
         // this window's tabs are, never another profile's.
         let configuration = Web.configuration(space: space, store: browser.panelStore(space))
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        Proxy.shared.prepare(configuration)
         let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 380, height: 600), configuration: configuration)
+        Proxy.shared.track(web)
         let delegate = SitePanelDelegate(browser: browser)
         delegate.watch(web)
         web.navigationDelegate = delegate
@@ -373,6 +406,19 @@ private final class SitePanelDelegate: NSObject, ObservableObject, WKNavigationD
     weak var browser: Browser?
     init(browser: Browser) { self.browser = browser }
 
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if !Proxy.authenticate(challenge, completionHandler: completionHandler) { completionHandler(.performDefaultHandling, nil) }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        Proxy.shared.failed(error, profile: Proxy.shared.profile(of: webView.configuration.websiteDataStore) ?? Profile.personalID, tab: nil)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        Proxy.shared.failed(error, profile: Proxy.shared.profile(of: webView.configuration.websiteDataStore) ?? Profile.personalID, tab: nil)
+    }
+
     /// The page that arrived: set when a main-frame navigation commits, and
     /// as the address moves inside the same site (a link the page handles
     /// itself, history.pushState). A page only asked for, or on its way,
@@ -407,6 +453,11 @@ private final class SitePanelDelegate: NSObject, ObservableObject, WKNavigationD
         if navigationAction.shouldPerformDownload { return decisionHandler(.cancel) }
         guard navigationAction.targetFrame?.isMainFrame == true else { return decisionHandler(.allow) }
         let url = navigationAction.request.url
+        if let url, OnionAddress.isOnion(url) {
+            decisionHandler(.cancel)
+            browser?.open(url, foreground: true).openOnion(navigationAction.request)
+            return
+        }
         if PanelSites.allowed(url) || url?.scheme?.lowercased() == "about" { return decisionHandler(.allow) }
         decisionHandler(.cancel)
     }
@@ -436,6 +487,7 @@ private final class SitePanelDelegate: NSObject, ObservableObject, WKNavigationD
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return }
         let now = Date()
         crashes = crashes.filter { now.timeIntervalSince($0) < 60 } + [now]
         guard crashes.count <= 2 else { return }
@@ -465,19 +517,27 @@ private final class PanelDelegate: NSObject, WKNavigationDelegate, WKUIDelegate 
     private var loaded = false
     init(browser: Browser, base: URL, first: URL) { self.browser = browser; self.base = base; self.first = first }
 
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if !Proxy.authenticate(challenge, completionHandler: completionHandler) { completionHandler(.performDefaultHandling, nil) }
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loaded = true }
 
     /// The panel's page never came up (a missing file, a page WebKit
     /// refuses): it opens as a tab instead, as it did before the panel.
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        Proxy.shared.failed(error, profile: Proxy.shared.profile(of: webView.configuration.websiteDataStore) ?? Profile.personalID, tab: nil)
         fellThrough(error)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        Proxy.shared.failed(error, profile: Proxy.shared.profile(of: webView.configuration.websiteDataStore) ?? Profile.personalID, tab: nil)
         fellThrough(error)
     }
 
     private func fellThrough(_ error: Error) {
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return }
         // Cancelled is the panel's own doing (a link sent to a tab, a
         // download refused), not a page that failed.
         guard !loaded, (error as NSError).code != NSURLErrorCancelled,

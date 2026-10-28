@@ -25,10 +25,13 @@ struct PinDef: Codable, Equatable {
     /// A row, not a square (see Tab.listed). Nil rather than false, so a
     /// pins file with no rows in it is written as it always was.
     var listed: Bool? = nil
+    /// A pin created from a Tor tab keeps that route even when its home is
+    /// an ordinary website reached from an onion page.
+    var tor: Bool = false
 }
 
 extension PinDef {
-    private enum Keys: String, CodingKey { case id, letter, home, title, name, listed }
+    private enum Keys: String, CodingKey { case id, letter, home, title, name, listed, tor }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -38,6 +41,7 @@ extension PinDef {
         title = try c.decode(String.self, forKey: .title)
         name = try c.decodeIfPresent(String.self, forKey: .name)
         listed = try c.decodeIfPresent(Bool.self, forKey: .listed)
+        tor = try c.decodeIfPresent(Bool.self, forKey: .tor) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -48,6 +52,7 @@ extension PinDef {
         try c.encode(title, forKey: .title)
         try c.encodeIfPresent(name, forKey: .name)
         try c.encodeIfPresent(listed, forKey: .listed)
+        if tor { try c.encode(true, forKey: .tor) }
     }
 }
 
@@ -93,7 +98,7 @@ enum Pins {
             let defs = Session.read(space: space.id).tabs.compactMap { entry -> PinDef? in
                 guard let letter = entry.pin else { return nil }
                 return PinDef(id: entry.pinID ?? UUID(), letter: letter, home: entry.home ?? entry.url,
-                              title: entry.title, name: entry.name)
+                              title: entry.title, name: entry.name, tor: entry.tor)
             }
             if !defs.isEmpty { bySpace[space.id] = defs }
         }

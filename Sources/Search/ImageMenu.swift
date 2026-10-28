@@ -91,7 +91,7 @@ extension Browser {
         configuration.urlCache = nil
         configuration.urlCredentialStorage = nil
         configuration.timeoutIntervalForRequest = 30
-        let made = URLSession(configuration: configuration)
+        let made = Proxy.makeSession(configuration: configuration)
         keptFetcher = (revision, made)
         return made
     }
@@ -156,8 +156,17 @@ extension Browser {
     /// the frame it was right-clicked in (idea 179).
     func imageData(at url: URL, in tab: Tab) async -> Data? {
         guard url.scheme?.lowercased() == "blob" else {
+            let throughTor = tab.usesTor || OnionAddress.isOnion(url)
+            let session: URLSession
+            if throughTor {
+                guard OnionNetwork.permits(url), let tor = OnionSession.make(for: tab.store) else { return nil }
+                session = tor
+            } else {
+                session = Browser.fetcher
+            }
+            defer { if throughTor { session.invalidateAndCancel() } }
             // Read as it comes, and let go past the limit.
-            guard let (bytes, response) = try? await Browser.fetcher.bytes(from: url),
+            guard let (bytes, response) = try? await session.proxyBytes(from: url),
                   (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
                   response.expectedContentLength <= Int64(Browser.largestImage)
             else { return nil }

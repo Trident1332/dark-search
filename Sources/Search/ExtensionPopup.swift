@@ -35,6 +35,26 @@ final class ExtensionPopup: NSObject, WKUIDelegate, WKNavigationDelegate, NSPopo
     /// would open it again.
     private var closedByButton: (id: String, at: Date)?
 
+    private override init() {
+        super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(proxyChanged), name: Proxy.contentChanged, object: nil)
+    }
+
+    @objc private func proxyChanged() { close() }
+
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if !Proxy.authenticate(challenge, completionHandler: completionHandler) { completionHandler(.performDefaultHandling, nil) }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        Proxy.shared.failed(error, profile: Proxy.shared.profile(of: webView.configuration.websiteDataStore) ?? Profile.personalID, tab: nil)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        Proxy.shared.failed(error, profile: Proxy.shared.profile(of: webView.configuration.websiteDataStore) ?? Profile.personalID, tab: nil)
+    }
+
     /// The popup's web view, while one is up — for the bench.
     var view: WKWebView? { web }
 
@@ -68,12 +88,15 @@ final class ExtensionPopup: NSObject, WKUIDelegate, WKNavigationDelegate, NSPopo
 
     func show(_ url: URL, for context: WKWebExtensionContext, from anchor: NSView?) {
         close()
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return }
         guard let configuration = context.webViewConfiguration else { return }
         // Sized the way Chrome sizes a popup (see preferred), unseen, while
         // the popover already stands at the size this popup had last time;
         // then shown. It has to be in the window meanwhile: WebKit suspends
         // a page that is in none.
+        Proxy.shared.prepare(configuration)
         let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 25, height: 25), configuration: configuration)
+        Proxy.shared.track(web)
         web.uiDelegate = self
         web.navigationDelegate = self
         // White behind the page, as Chrome paints a popup: many leave their

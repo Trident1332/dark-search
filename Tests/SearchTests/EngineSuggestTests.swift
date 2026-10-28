@@ -6,6 +6,14 @@ import XCTest
 /// Settings › General › Suggestions from your search engine (idea 347).
 @MainActor
 final class EngineSuggestTests: XCTestCase {
+    func testOnionNamesAndPhrasesAreNeverSentToAnEngine() {
+        let host = String(repeating: "a", count: 56) + ".onion"
+        for value in [host, "https://\(host)/", "short.onion words", "visit short.ONION now",
+                      "short.onion://", "short%2eonion words"] {
+            XCTAssertFalse(EngineSuggest.sendable(value), value)
+        }
+        XCTAssertTrue(EngineSuggest.sendable("onion soup recipes"))
+    }
     /// Shaped like a GitHub token, made up, and put together here so no
     /// secret scanner takes the file for one.
     private let fakeToken = "gh" + "p_" + "0000Fake1111Token2222Shape3333Only44"

@@ -301,10 +301,12 @@ final class Browser: NSObject, ObservableObject {
     }
 
     func searchURL(for text: String) -> URL? {
-        Engine.url(for: text, template: prefs.engine.template(custom: prefs.customEngine))
+        guard !OnionAddress.hasIntent(text) else { return nil }
+        return Engine.url(for: text, template: prefs.engine.template(custom: prefs.customEngine))
     }
 
     func destination(for typed: String) -> URL? {
+        if OnionAddress.hasIntent(typed) { return Address.url(from: typed) }
         if let site = siteChip { return site.url(for: typed) }
         if let url = Address.file(from: typed) ?? Address.url(from: typed) { return url }
         if let (keyword, rest) = Keyword.match(typed, in: prefs.keywords),
@@ -851,7 +853,7 @@ final class Browser: NSObject, ObservableObject {
         // join the list when the helper answers; not yet, a row offers to
         // connect.
         let appleHost = prefs.applePasswords && prefs.fillsPasswords && passwords
-            ? ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy) : nil
+            ? ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy || tab.usesTor) : nil
         let apple = applePasswords
         let connect = appleHost != nil && apple.state == .idle && applePairing?.tab != tab.id
         // Off, and nothing of Search's own for this site: the offer, once.
@@ -859,7 +861,7 @@ final class Browser: NSObject, ObservableObject {
         let offer: String? = {
             if let up = suggesting, up.tab == tab.id, let site = up.appleOffer, site == Vault.registrable(host) { return site }
             return applePasswordsOffer.site(
-                for: .init(page: tab.pageAddress, privateTab: tab.shy, frameHost: tab.fieldFrameHost,
+                for: .init(page: tab.pageAddress, privateTab: tab.shy || tab.usesTor, frameHost: tab.fieldFrameHost,
                            passwords: passwords, kept: known.count),
                 .init(appleOn: prefs.applePasswords, fills: prefs.fillsPasswords,
                       helper: ApplePasswordsOffer.benchHelper ?? ApplePasswordsOffer.helperHere,
@@ -897,7 +899,7 @@ final class Browser: NSObject, ObservableObject {
                 self?.appleAsk == ask
             }
             guard let self, ask == appleAsk, let field, field.tab == tab.id, tab.id == activeID,
-                  ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy) == appleHost
+                  ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy || tab.usesTor) == appleHost
             else { return }
             let mine = suggesting?.tab == tab.id ? suggesting?.logins ?? [] : []
             let apple = Array(found
@@ -927,7 +929,7 @@ final class Browser: NSObject, ObservableObject {
         guard let list = suggesting, let tab = tabs.first(where: { $0.id == list.tab }), let appleHost = list.appleHost else { return }
         guard Date().timeIntervalSince(list.shown) > 0.5 else { return }
         suggesting = nil
-        guard ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy) == appleHost,
+        guard ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy || tab.usesTor) == appleHost,
               ApplePasswords.belongs(apple.sites, to: appleHost)
         else { return }
         pickedInto = tab.id
@@ -948,7 +950,7 @@ final class Browser: NSObject, ObservableObject {
             // Touch ID can take a while: the page must still be the one
             // asked for, in front, and the account still this site's.
             guard tabs.contains(where: { $0 === tab }), tab.id == activeID,
-                  ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy) == appleHost,
+                  ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy || tab.usesTor) == appleHost,
                   ApplePasswords.belongs(found.sites, to: appleHost)
             else { return }
             tab.appleFill = AppleFill(host: appleHost, user: apple.user, password: found.password)
@@ -2014,6 +2016,7 @@ final class Browser: NSObject, ObservableObject {
         var front = false
         /// Silenced by hand when it closed, so it comes back the same way.
         var muted = false
+        var tor = false
 
         var label: String { title.isEmpty ? Address.pretty(url) : title }
     }
@@ -2605,7 +2608,7 @@ final class Browser: NSObject, ObservableObject {
             if tab.pinID == nil { tab.pinID = UUID() }
             return PinDef(id: tab.pinID ?? UUID(), letter: letter,
                           home: (tab.home ?? tab.pending ?? tab.address)?.absoluteString ?? "",
-                          title: tab.title, name: tab.name, listed: tab.listed ? true : nil)
+                          title: tab.title, name: tab.name, listed: tab.listed ? true : nil, tor: tab.usesTor)
         }
     }
 
@@ -2633,7 +2636,10 @@ final class Browser: NSObject, ObservableObject {
             } else {
                 tab = Tab(configuration: Web.configuration(space: space))
                 prepare(tab)
-                tab.restore(url: URL(string: def.home) ?? URL(string: "about:blank")!, title: def.title, name: def.name)
+                tab.restore(url: URL(string: def.home) ?? URL(string: "about:blank")!, title: def.title, name: def.name, tor: def.tor)
+            }
+            if def.tor, !tab.usesTor, let url = tab.address ?? URL(string: def.home) {
+                tab.restore(url: url, title: tab.title, name: tab.name, tor: true)
             }
             tab.pinID = def.id
             tab.everywhere = sharedIDs.contains(def.id)
@@ -3082,7 +3088,7 @@ final class Browser: NSObject, ObservableObject {
                 touched: visibleTabIDs.contains(tab.id) ? Date() : tab.touched,
                 letGo: tab.pin == nil ? tab.letGo : nil,
                 listed: tab.pin != nil && tab.listed ? true : nil,
-                muted: tab.muted
+                muted: tab.muted, tor: tab.usesTor
             ))
         }
         // The tab you were on isn't kept — a private one: the one kept just
@@ -3163,7 +3169,7 @@ final class Browser: NSObject, ObservableObject {
     /// does, as a new tab beside the other page. Anything else is itself.
     private func splittable(_ tab: Tab) -> Tab {
         guard tab.pin != nil, let url = tab.address ?? tab.home else { return tab }
-        let copy = Tab(configuration: Web.configuration(space: spaceID))
+        let copy = Tab(configuration: tab.usesTor ? Web.configuration(shy: true, store: tab.store) : Web.configuration(space: spaceID))
         prepare(copy)
         tabs.insert(copy, at: tabs.count)
         copy.go(to: url)
@@ -3205,7 +3211,7 @@ final class Browser: NSObject, ObservableObject {
         if floating == shown.id { land() }
         let current = splittable(shown)
         let right = Tab(shy: current.shy,
-                        configuration: current.shy ? Web.configuration(shy: true, store: current.store)
+                        configuration: current.shy || current.usesTor ? Web.configuration(shy: true, store: current.store)
                             : Web.configuration(space: spaceID))
         prepare(right)
         right.groupID = current.groupID
@@ -3922,7 +3928,7 @@ final class Browser: NSObject, ObservableObject {
             tab.groupID = group.id
             regrouped = regrouped || group.back
             tab.muted = ghost.muted
-            tab.restore(url: ghost.url, title: ghost.title)
+            tab.restore(url: ghost.url, title: ghost.title, tor: ghost.tor)
             tabs.insert(tab, at: safeInsertionIndex(ghost.index))
             if let was = ghost.was { back[was] = tab }
             if ghost.front { front = tab }
@@ -3965,7 +3971,10 @@ final class Browser: NSObject, ObservableObject {
         activeID = tab.id
         editing = false
         typed = ""
-        tab.go(to: ghost.url)
+        if ghost.tor {
+            tab.restore(url: ghost.url, title: ghost.title, tor: true)
+            tab.wake()
+        } else { tab.go(to: ghost.url) }
         // Back into its pair, if the page it was beside is still alone.
         if let id = ghost.partner, let partner = tabs.first(where: { $0.id == id }),
            split(for: partner) == nil, canSplit(tab, with: partner) {
@@ -3994,7 +4003,7 @@ final class Browser: NSObject, ObservableObject {
         guard !tab.shy, let url = tab.address else { return }
         ghosts.append(Ghost(url: url, title: tab.title, index: index, groupID: tab.groupID,
                             partner: partner, onLeft: onLeft, was: tab.id, batch: batching?.id,
-                            kind: batching?.kind ?? .clear, muted: tab.muted))
+                            kind: batching?.kind ?? .clear, muted: tab.muted, tor: tab.usesTor))
         // Twelve steps back, a Clear counting as one: its tabs come back
         // together or not at all, however many there were.
         var steps = Set<UUID>()
@@ -4703,8 +4712,8 @@ final class Browser: NSObject, ObservableObject {
         let page = Browser.extensionConfiguration(for: url)
         // A new tab is in this window's space, with its sign-ins — not the
         // space of whichever window is in front, when this one is behind it.
-        let tab = if let source, source.shy, page == nil {
-            Tab(shy: true, configuration: Web.configuration(shy: true, store: source.store))
+        let tab = if let source, source.shy || source.usesTor, page == nil {
+            Tab(shy: source.shy, configuration: Web.configuration(shy: true, store: source.store))
         } else {
             Tab(configuration: page ?? Web.configuration(space: spaceID))
         }
@@ -4741,8 +4750,8 @@ final class Browser: NSObject, ObservableObject {
         // had them; an extension's page it showed was in that extension's
         // store, so going back to the web takes a new private one.
         let page = Browser.extensionConfiguration(for: url)
-        let fresh = if tab.shy {
-            Tab(shy: true, bench: tab.bench, configuration: page
+        let fresh = if tab.shy || (tab.usesTor && page == nil) {
+            Tab(shy: tab.shy, bench: tab.bench, configuration: page
                 ?? Web.configuration(shy: true, store: tab.store.isPersistent ? nil : tab.store))
         } else {
             Tab(bench: tab.bench, configuration: page ?? Web.configuration(space: spaceID))
@@ -4877,7 +4886,7 @@ final class Browser: NSObject, ObservableObject {
         guard !urls.isEmpty else { return }
         let fresh = Browser(record: WindowRecord(space: spaceID))
         for (index, url) in urls.enumerated() {
-            fresh.open(url, foreground: index == 0, atEnd: true, mayWait: true)
+            fresh.open(url, foreground: index == 0, atEnd: true, from: active?.usesTor == true ? active : nil, mayWait: true)
         }
         for blank in fresh.tabs where blank.isBlank && !blank.bench { fresh.close(blank) }
         Browsers.open(fresh, frame: nil)
@@ -4912,7 +4921,7 @@ final class Browser: NSObject, ObservableObject {
     func openInTabGroup(_ urls: [URL], named name: String) {
         guard prefs.usesTabGroups, !urls.isEmpty else { return }
         let opened = urls.enumerated().map { index, url in
-            open(url, foreground: index == 0, atEnd: true, mayWait: true)
+            open(url, foreground: index == 0, atEnd: true, from: active?.usesTor == true ? active : nil, mayWait: true)
         }
         let id = addTabGroup(containing: opened[0])
         renameTabGroup(id, to: name)
@@ -5103,7 +5112,7 @@ final class Browser: NSObject, ObservableObject {
             let url = prefs.pinsGoHome ? home ?? saved : saved
             let tab = Tab(configuration: Web.configuration(space: space))
             prepare(tab)
-            tab.restore(url: url, title: url == saved ? entry.title : url.host ?? "", name: entry.name)
+            tab.restore(url: url, title: url == saved ? entry.title : url.host ?? "", name: entry.name, tor: entry.tor)
             // Never later than now: a clock set wrong once would keep the tab forever.
             if let touched = entry.touched { tab.touch(at: min(touched, Date())) }
             tab.letGo = entry.letGo.map { min($0, Date()) }
@@ -5700,7 +5709,7 @@ final class Browser: NSObject, ObservableObject {
     /// the switch off, a private tab, ⌘K, a site or a shortcut in charge,
     /// or words that look like anything but a search.
     func engineQuestion(for typed: String) -> URL? {
-        guard prefs.engineSuggests, !summoning, siteChip == nil, active?.shy != true,
+        guard prefs.engineSuggests, !summoning, siteChip == nil, active?.shy != true, !Onion.shared.hasTabs,
               EngineSuggest.sendable(typed),
               Keyword.match(typed, in: prefs.keywords) == nil
         else { return nil }
@@ -5768,7 +5777,7 @@ final class Browser: NSObject, ObservableObject {
         }
         visited.forEach(add)
         // Last in the list, and only when what was typed cannot be a place.
-        if !typed.isEmpty, Address.url(from: typed) == nil {
+        if !typed.isEmpty, !OnionAddress.hasIntent(typed), Address.url(from: typed) == nil {
             if let (keyword, rest) = Keyword.match(typed, in: prefs.keywords),
                let asked = Engine.url(for: rest, template: keyword.template) {
                 list.append(Suggestion(key: typed, title: keyword.name, url: asked, kind: .search))
@@ -6129,6 +6138,25 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         _ action: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
+        if let url = action.request.url {
+            let owner = anyTab(for: webView)
+            if owner?.usesTor == true, !OnionNetwork.permits(url), url.scheme?.lowercased() != "about" {
+                decisionHandler(.cancel)
+                owner?.failure = "This address is blocked in Tor tabs to protect the connection"
+                return
+            }
+            if OnionAddress.isOnion(url), owner?.usesTor != true {
+                decisionHandler(.cancel)
+                guard action.targetFrame?.isMainFrame ?? true else { return }
+                let request = action.request
+                DispatchQueue.main.async { [weak self, weak owner] in
+                    if let owner { owner.openOnion(request) }
+                    else if let self { self.open(url, foreground: true).openOnion(request) }
+                }
+                return
+            }
+        }
+
         // "Download Image" from the page's own context menu and a link with
         // the `download` attribute arrive as an ordinary-looking action with
         // this one flag set. ("Download Linked File" doesn't come this way:
@@ -7023,11 +7051,11 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // be turned on a moment later, and a tab that then has to wait for a
         // fetch looks broken.
         Favicons.shared.fetch(for: tab)
-        guard !tab.shy, !tab.bench else { return }
+        guard !tab.shy, !tab.bench, !tab.usesTor else { return }
         history.record(url, title: tab.title)
         // A site's home page that says where its search is (OpenSearch):
         // with Search a site on, it joins the list (see SiteSearch.learn).
-        if prefs.searchesSites, profileID == Profile.personalID, url.scheme == "https", url.path.isEmpty || url.path == "/" {
+        if !tab.usesTor, prefs.searchesSites, profileID == Profile.personalID, url.scheme == "https", url.path.isEmpty || url.path == "/" {
             webView.evaluateInSearch(SiteSearch.lookup) { value in
                 guard let text = value as? String, let description = URL(string: text) else { return }
                 MainActor.assumeIsolated { SiteSearch.learn(from: url, description: description) }
@@ -7057,7 +7085,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         tab?.failure = message(for: code)
         // When it was the proxy and not the site, the page says so instead,
         // and comes back on its own once the proxy answers (see Proxy.swift).
-        Proxy.shared.failed(error, profile: Spaces.profile(of: spaceID), tab: tab)
+        if tab?.usesTor != true { Proxy.shared.failed(error, profile: Spaces.profile(of: spaceID), tab: tab) }
     }
 
     private func message(for code: Int) -> String {

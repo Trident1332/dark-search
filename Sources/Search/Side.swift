@@ -1078,7 +1078,7 @@ private struct SideRow: View {
     private var peeking: Bool { !editing && tab.pin != nil && browser.peekFrom == tab.id && browser.peekTab != nil }
     /// Where the page is, said on the row you're on (Settings › Tabs › Show
     /// the address on the tab you're on).
-    private var rest: AtRest? { live && !editing ? AtRest.said(tab.restAddress, always: prefs.showsAddress) : nil }
+    private var rest: AtRest? { live && !editing ? AtRest.said(tab.restAddress, always: prefs.showsAddress, tor: tab.usesTor) : nil }
     private var atRest: Bool { rest != nil }
 
     var body: some View {
@@ -1115,9 +1115,9 @@ private struct SideRow: View {
                     // The page is translated (Translate.swift).
                     TranslateSign(tab: tab, colour: colour)
                     // Pages take Settings › Proxy's route (ProxySettings.swift).
-                    ProxySign(browser: browser, tab: tab, colour: colour)
+                    ConnectionSign(browser: browser, tab: tab, colour: colour)
                     TitleAtRest(label: tab.label, rest: rest, shown: atRest, hovering: hovering,
-                                size: prefs.sideTitle, colour: colour, roomy: true)
+                                size: prefs.sideTitle, colour: colour, roomy: true, connectionHandled: tab.usesTor)
                 }
                 Spacer(minLength: 0)
             }

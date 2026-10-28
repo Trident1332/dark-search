@@ -159,6 +159,7 @@ final class SiteLocation {
     func start(_ manager: UnsafeRawPointer) {
         if !waiting.contains(manager) { waiting.append(manager) }
         told = false
+        guard !Proxy.shared.protectsLocation else { return proxyChanged() }
         if locator == nil {
             locator = makeLocator()
             locator?.statusChanged = { [weak self] in self?.statusChanged() }
@@ -184,9 +185,17 @@ final class SiteLocation {
         locator?.precise = on
     }
 
+    /// Retire an already allowed position watch when proxy privacy turns on.
+    func proxyChanged() {
+        guard Proxy.shared.protectsLocation else { return }
+        locator?.stop()
+        fail()
+    }
+
     // MARK: - CoreLocation's answers
 
     private func statusChanged() {
+        guard !Proxy.shared.protectsLocation else { return proxyChanged() }
         guard !waiting.isEmpty, let locator else { return }
         switch locator.status {
         case .notDetermined: break
@@ -196,6 +205,7 @@ final class SiteLocation {
     }
 
     private func found(_ place: CLLocation) {
+        guard !Proxy.shared.protectsLocation else { return proxyChanged() }
         guard let c = GeolocationC.loaded, !waiting.isEmpty else { return }
         let altitude = place.verticalAccuracy >= 0
         let heading = place.course >= 0
@@ -209,6 +219,7 @@ final class SiteLocation {
     }
 
     private func failed(_ error: Error) {
+        guard !Proxy.shared.protectsLocation else { return proxyChanged() }
         // Not known yet is CoreLocation still looking: it keeps trying.
         if (error as? CLError)?.code == .locationUnknown { return }
         if (error as? CLError)?.code == .denied { return refuse() }

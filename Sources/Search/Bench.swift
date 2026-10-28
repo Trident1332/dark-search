@@ -1685,8 +1685,12 @@ final class Bench {
                     answer(["error": "settings set ID VALUE: unknown id or value"]); return
                 }
             }
+            // proxyTest: Settings › Proxy › Test pressed, for pictures of a
+            // proxy that answers (a test run never checks on its own).
+            if request["proxyTest"] as? Bool == true { Proxy.shared.test() }
             var reply: [String: Any] = ["values": SettingsIndex.values(browser.prefs),
-                                        "settingsPage": browser.settingsPage.rawValue]
+                                        "settingsPage": browser.settingsPage.rawValue,
+                                        "proxyCheck": "\(Proxy.shared.check)", "proxyPlace": Proxy.shared.place ?? ""]
             // picture PATH [page NAME]: one section, drawn off screen as a
             // tab of its own and tall enough to show every row, to a PNG.
             if let path = request["picture"] as? String {
@@ -4247,8 +4251,8 @@ final class Bench {
             // Where the page is, as its tab would say it at rest, and whether
             // it says it now: the setting on, the tab you're on, not edited
             // (see AtRest.swift).
-            "atRest": AtRest.of(tab.restAddress)?.text ?? "",
-            "atRestShown": browser.map { tab.id == $0.activeID && $0.editingTab != tab.id && AtRest.said(tab.restAddress, always: $0.prefs.showsAddress) != nil } ?? false,
+            "atRest": AtRest.of(tab.restAddress, tor: tab.usesTor)?.text ?? "",
+            "atRestShown": browser.map { tab.id == $0.activeID && $0.editingTab != tab.id && AtRest.said(tab.restAddress, always: $0.prefs.showsAddress, tor: tab.usesTor) != nil } ?? false,
             "asleep": tab.asleep,
             "shy": tab.shy,
             "noisy": tab.noisy,

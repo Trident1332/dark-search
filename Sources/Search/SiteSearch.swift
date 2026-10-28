@@ -171,16 +171,18 @@ enum SiteSearch {
     /// Nothing is ever fetched for a site not visited, in the background or
     /// from a private tab (see Browser, where this is called).
     static func learn(from page: URL, description: URL) {
-        guard page.scheme == "https", description.scheme == "https",
+        guard !OnionAddress.isOnion(page), !OnionAddress.isOnion(description),
+              page.scheme == "https", description.scheme == "https",
               let host = siteHost(page.absoluteString), sameSite(description.absoluteString, host),
               !builtIn.contains(where: { Vault.registrable(bare($0.host)) == Vault.registrable(host) }),
               !learned.contains(where: { $0.host == host }) else { return }
         var request = URLRequest(url: description, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
         request.httpShouldHandleCookies = false
         // Redirected only within the site: nothing is read from one not visited.
-        let session = URLSession(configuration: Proxy.session(.ephemeral), delegate: SameSiteRedirects(host: host), delegateQueue: .main)
-        session.dataTask(with: request) { data, response, _ in
+        let session = Proxy.makeSession(configuration: .ephemeral, delegate: SameSiteRedirects(host: host), delegateQueue: .main)
+        session.dataTask(with: request) { data, response, error in
             defer { session.finishTasksAndInvalidate() }
+            if let error { Proxy.authenticationError(error, in: session) }
             guard let data, data.count <= 64 * 1024, (response as? HTTPURLResponse)?.statusCode == 200,
                   let found = OpenSearch.parse(data) else { return }
             let template = found.template
@@ -283,8 +285,16 @@ enum OpenSearch {
 
 /// A description's fetch, redirected only within the site it was asked of.
 private final class SameSiteRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error { Proxy.authenticationError(error, in: session) }
+    }
     let host: String
     init(host: String) { self.host = host }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if !Proxy.authenticate(challenge, in: session, completionHandler: completionHandler) { completionHandler(.performDefaultHandling, nil) }
+    }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {

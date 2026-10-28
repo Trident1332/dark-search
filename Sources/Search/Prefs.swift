@@ -661,6 +661,8 @@ final class Preferences: ObservableObject {
     @Published var proxyProfiles: Set<UUID> {
         didSet { store.set(proxyProfiles.map(\.uuidString).sorted(), forKey: "proxy.profiles"); routeProxy() }
     }
+    /// Persistent connection: reconnect automatically and keep all Search
+    /// internet traffic blocked until the proxy is verified again.
     @Published var proxyBlocks: Bool {
         didSet { store.set(proxyBlocks, forKey: "proxy.blocks"); routeProxy() }
     }
@@ -669,6 +671,13 @@ final class Preferences: ObservableObject {
     }
     @Published var proxyHidesCalls: Bool {
         didSet { store.set(proxyHidesCalls, forKey: "proxy.calls"); routeProxy() }
+    }
+    @Published var proxyMatchesTimeZone: Bool {
+        didSet { store.set(proxyMatchesTimeZone, forKey: "proxy.timeZone"); routeProxy() }
+    }
+    /// Only onion tabs use Tor; ordinary tabs keep their configured route.
+    @Published var onionEnabled: Bool {
+        didSet { store.set(onionEnabled, forKey: "onion.on"); Onion.shared.take(enabled: onionEnabled) }
     }
 
     /// The port as a number: 1 to 65535, or nil for anything else typed.
@@ -682,7 +691,8 @@ final class Preferences: ObservableObject {
     var proxySetup: ProxySetup {
         ProxySetup(on: proxyOn, kind: proxyKind, host: proxyHost, port: proxyPortNumber,
                    signsIn: proxySignsIn, user: proxyUser, bypass: proxyBypass, profiles: proxyProfiles,
-                   blocks: proxyBlocks, shows: proxyShows, hidesCalls: proxyHidesCalls)
+                   blocks: proxyBlocks, shows: proxyShows, hidesCalls: proxyHidesCalls,
+                   matchesTimeZone: proxyMatchesTimeZone)
     }
 
     private func routeProxy() { Proxy.shared.take(proxySetup) }
@@ -876,10 +886,13 @@ final class Preferences: ObservableObject {
         proxyBlocks = store.object(forKey: "proxy.blocks") as? Bool ?? true
         proxyShows = store.object(forKey: "proxy.shows") as? Bool ?? true
         proxyHidesCalls = store.object(forKey: "proxy.calls") as? Bool ?? true
+        proxyMatchesTimeZone = store.object(forKey: "proxy.timeZone") as? Bool ?? true
+        onionEnabled = store.object(forKey: "onion.on") as? Bool ?? true
         // Before the first page is loaded: the shared store takes the route
         // now, and every other store as it is made (see Proxy.apply).
         Proxy.shared.take(proxySetup)
         Proxy.shared.apply(to: Store.websites, profile: Profile.personalID)
+        Onion.shared.take(enabled: onionEnabled)
     }
 
     /// WebKit's text checker takes its orders from the app's standard

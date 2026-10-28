@@ -11,6 +11,7 @@ import WebKit
 /// what turns that into a redraw.
 struct Page: View {
     @ObservedObject var tab: Tab
+    @ObservedObject private var proxy = Proxy.shared
     /// False where the page itself is held elsewhere (see PaneStage.swift)
     /// and only what goes over it is wanted here.
     var holdsPage = true
@@ -30,7 +31,7 @@ struct Page: View {
             // the stage was never told to take it back when it landed, and
             // the tab stayed empty. Nothing, then the page, is a change.
             if holdsPage {
-                WebStage(page: !tab.isWeb || tab.asleep || tab.floating ? nil : tab.web, corner: corner)
+                WebStage(page: !tab.isWeb || tab.asleep || tab.floating || tab.proxyPaused ? nil : tab.web, corner: corner)
             }
 
             if let page = tab.page, let browser {
@@ -81,6 +82,18 @@ struct Page: View {
                     .transition(.opacity)
             }
 
+            if tab.proxyPaused && tab.isWeb {
+                Trouble(message: proxy.dropped || proxy.refused
+                        ? "Search is offline until the proxy reconnects. See Settings › Proxy."
+                        : "Connecting to the proxy. Search stays offline until the connection is verified.") {
+                    proxy.test()
+                }
+            }
+
+            if tab.onionLoading && !tab.proxyPaused {
+                TorLoading()
+            }
+
             Swiping(pull: tab.pull)
         }
         // These fades are for one tab's page changing. Going to another tab
@@ -95,6 +108,18 @@ struct Page: View {
         .animation(Motion.quick, value: tab.reader)
         .animation(.easeOut(duration: 0.2), value: tab.cover == nil)
         .animation(.easeOut(duration: 0.16), value: tab.pull == nil)
+    }
+}
+
+struct TorLoading: View {
+    @ObservedObject private var onion = Onion.shared
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView().controlSize(.small)
+            Text(onion.status).font(.system(size: 13)).foregroundStyle(Palette.muted)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Palette.ground)
     }
 }
 

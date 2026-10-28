@@ -247,6 +247,36 @@ final class FetchEntry: ObservableObject, Identifiable {
 @MainActor
 final class Fetches: ObservableObject {
     @Published private(set) var entries: [FetchEntry] = []
+    private var proxyObserver: NSObjectProtocol?
+
+    init() {
+        proxyObserver = NotificationCenter.default.addObserver(forName: Proxy.routeChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.proxyChanged() }
+        }
+    }
+
+    deinit {
+        if let proxyObserver { NotificationCenter.default.removeObserver(proxyObserver) }
+    }
+
+    /// An active WKDownload can outlive its page and proxy configuration.
+    /// Cancel its old connection, preserving resumable visible downloads.
+    private func proxyChanged() {
+        for entry in entries where entry.state == .resuming {
+            entry.operationID = UUID()
+            entry.failed(URLError(.cancelled), resumeData: entry.resumeData)
+        }
+        for item in Array(running.values) where item.stopAction == nil {
+            guard let entry = item.entry,
+                  let operation = beginStop(entry, action: item.listed ? .pause : .cancel) else { continue }
+            operation.download.cancel { [weak self] resumeData in
+                DispatchQueue.main.async {
+                    guard let ended = self?.stopped(operation, resumeData: resumeData) else { return }
+                    ended.owner.relinquish(operation.download)
+                }
+            }
+        }
+    }
 
     /// A running download, or one just done: the circle is up.
     @Published private(set) var showing = false
@@ -319,6 +349,7 @@ final class Fetches: ObservableObject {
         operationID: UUID? = nil,
         helper: WKWebView? = nil
     ) -> Bool {
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return false }
         if let continuing, let operationID, continuing.operationID != operationID { return false }
 
         let entry: FetchEntry?
@@ -429,6 +460,7 @@ final class Fetches: ObservableObject {
     }
 
     func beginResume(_ entry: FetchEntry) -> StartOperation? {
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return nil }
         guard entry.canResume, let data = entry.resumeData, let store = entry.store else { return nil }
         guard entry.partialFileIsOurs else {
             entry.lostPartialFile()
@@ -442,6 +474,7 @@ final class Fetches: ObservableObject {
     /// `destination` is asked for once the partial file is let go, so a
     /// retry can have the name back.
     func beginRetry(_ entry: FetchEntry, destination: () -> URL) -> StartOperation? {
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return nil }
         guard entry.canRetry, let request = entry.request, let store = entry.store else { return nil }
         entry.discardOwnedPartialFile()
         let (webView, helper) = Self.view(for: entry, store: store)
@@ -460,13 +493,17 @@ final class Fetches: ObservableObject {
         configuration.websiteDataStore = store
         configuration.processPool = Web.pool
         configuration.applicationNameForUserAgent = Web.userAgentName
-        return (WKWebView(frame: .zero, configuration: configuration), true)
+        Proxy.shared.prepare(configuration)
+        let web = WKWebView(frame: .zero, configuration: configuration)
+        Proxy.shared.track(web)
+        return (web, true)
     }
 
     /// A new WKDownload returned from either WebKit resume API joins the same
     /// row. An obsolete callback is canceled before it can replace newer work.
     func accepts(_ operation: StartOperation) -> Bool {
-        operation.entry.state == .resuming && operation.entry.operationID == operation.operationID
+        !Proxy.shared.waiting && !Proxy.shared.changingContent
+            && operation.entry.state == .resuming && operation.entry.operationID == operation.operationID
     }
 
     /// Cancel can race the small interval after WebKit accepted resume/retry

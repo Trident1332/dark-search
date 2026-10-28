@@ -165,7 +165,7 @@ private struct SplitTabHalf: View {
     private var editing: Bool { browser.editingTab == tab.id }
     /// Where the page is, said on the half you're on (Settings › Tabs › Show
     /// the address on the tab you're on).
-    private var rest: AtRest? { focused && !editing && !narrow ? AtRest.said(tab.restAddress, always: prefs.showsAddress) : nil }
+    private var rest: AtRest? { focused && !editing && !narrow ? AtRest.said(tab.restAddress, always: prefs.showsAddress, tor: tab.usesTor) : nil }
     private var atRest: Bool { rest != nil }
 
     private var laidOut: some View {
@@ -304,7 +304,7 @@ private struct SplitTabHalf: View {
                 if !narrow {
                     PopupSign(browser: browser, tab: tab)
                     TranslateSign(tab: tab)
-                    ProxySign(browser: browser, tab: tab)
+                    ConnectionSign(browser: browser, tab: tab)
                 }
                 // The page is asking something, over its half of the stage.
                 if browser.paneQuestions.contains(where: { $0.tab == tab.id }) {
@@ -317,7 +317,7 @@ private struct SplitTabHalf: View {
                     TitleAtRest(label: title, rest: rest, shown: atRest, hovering: hovering,
                                 size: stacked ? prefs.sideTitle : 12,
                                 colour: focused ? Palette.ink : hovering ? Palette.ink.opacity(0.7) : Palette.muted,
-                                roomy: stacked)
+                                roomy: stacked, connectionHandled: tab.usesTor)
                 }
             }
         }

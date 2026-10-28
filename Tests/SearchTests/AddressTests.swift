@@ -60,6 +60,23 @@ final class AddressTests: XCTestCase {
             XCTAssertNil(Address.file(from: text), text)
         }
     }
+
+    func testOnionAddressesUseTheirOwnDefaultAndKeepEditableRoundTrips() throws {
+        let host = String(repeating: "a", count: 56) + ".onion"
+        XCTAssertEqual(Address.url(from: "SUB.\(host.uppercased())./path")?.absoluteString, "http://sub.\(host)/path")
+        for source in ["http://\(host)/", "https://\(host)/", "http://sub.\(host):8080/path?q=x#part"] {
+            let url = try XCTUnwrap(Address.url(from: source))
+            let back = try XCTUnwrap(Address.url(from: Address.editable(url)))
+            XCTAssertTrue(back.absoluteString == url.absoluteString || back.absoluteString + "/" == url.absoluteString,
+                          "The address editor may omit an otherwise empty root slash")
+        }
+        for invalid in ["short.onion", "http://short.onion/", "http://\(host)../", "\(host):0", "ftp://\(host)/"] {
+            XCTAssertNil(Address.url(from: invalid), invalid)
+        }
+        let ordinary = "https://example.com/article/.onion?next=short.onion"
+        XCTAssertEqual(Address.url(from: ordinary)?.absoluteString, ordinary,
+                       "A valid ordinary URL can discuss onions in its path or query")
+    }
 }
 
 @MainActor

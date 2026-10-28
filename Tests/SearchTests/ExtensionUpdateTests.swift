@@ -81,10 +81,14 @@ final class ExtensionUpdateTests: XCTestCase {
                              version: "1", enabled: false, fromStore: true, permissions: [])
         let started = expectation(description: "First update requested")
         let response = UpdateResponse()
+        // The update is fetched on a session of the proxy's, which takes
+        // its stand-ins from Proxy rather than from registerClass.
         URLProtocol.registerClass(UpdateProtocol.self)
+        Proxy.protocolClasses = [UpdateProtocol.self]
         UpdateProtocol.response = response
         defer {
             URLProtocol.unregisterClass(UpdateProtocol.self)
+            Proxy.protocolClasses = []
             UpdateProtocol.response = nil
         }
         response.started = started

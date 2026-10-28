@@ -105,7 +105,7 @@ enum Web {
         // Web notifications go through the store (see Notifications.swift);
         // a private tab's is left without, and a page there is refused.
         if !shy { let kept = config.websiteDataStore; MainActor.assumeIsolated { SiteNotifications.shared.attach(kept) } }
-        config.processPool = Web.pool
+        MainActor.assumeIsolated { Proxy.shared.prepare(config) }
         // A test run's pretend camera and microphone (see ExtensionCapture).
         if #available(macOS 15.4, *), Store.testing { ExtensionCapture.mockDevices(config.preferences) }
         // Chrome extensions see every page but a private one, unless Settings
@@ -114,7 +114,7 @@ enum Web {
         // added after.
         if #available(macOS 15.4, *) {
             MainActor.assumeIsolated {
-                if !shy || Extensions.shared.contexts.values.contains(where: \.hasAccessToPrivateData) { Extensions.attach(config) }
+                if !Onion.shared.owns(config.websiteDataStore), !shy || Extensions.shared.contexts.values.contains(where: \.hasAccessToPrivateData) { Extensions.attach(config) }
             }
         }
         // Left alone, WKWebView says only "AppleWebKit … (KHTML, like Gecko)" —
@@ -291,7 +291,15 @@ final class Tab: ObservableObject, Identifiable {
     /// The web view if there is one yet, for the callers that must not be
     /// the reason there is.
     private(set) var built: PageView?
+    @Published private(set) var proxyPaused = false
+    private var proxyWasOpen = false
+    static let proxyTabs = NSHashTable<Tab>.weakObjects()
     private var configuration: WKWebViewConfiguration
+    var usesTor: Bool { Onion.shared.owns(configuration.websiteDataStore) }
+    @Published private(set) var onionLoading = false
+    private var onionTask: Task<Void, Never>?
+    private var onionRequest: URLRequest?
+    private var onionNavigation = UUID()
     let extensionReturn = ExtensionReturnNavigation()
 
     /// Whether its page was made with the extension controller in it — every
@@ -857,6 +865,8 @@ final class Tab: ObservableObject, Identifiable {
         self.shy = shy
         self.bench = bench
         self.configuration = configuration ?? Web.configuration(shy: shy)
+        self.proxyPaused = Proxy.shared.waiting || Proxy.shared.changingContent
+        Tab.proxyTabs.add(self)
         if Store.testing { Tab.live.add(self) }
     }
 
@@ -866,6 +876,7 @@ final class Tab: ObservableObject, Identifiable {
     static let live = NSHashTable<Tab>.weakObjects()
 
     private func build() -> PageView {
+        Proxy.shared.prepare(configuration)
         // Here rather than in Web.configuration: a tab's configuration is
         // made with the tab, often long before its page, and a site or an
         // extension can hand over one of its own.
@@ -1108,7 +1119,7 @@ final class Tab: ObservableObject, Identifiable {
         )
         // Every frame, in the page's own world: a page an extension lists
         // reaches it as chrome.runtime (see ExtensionExternal.swift).
-        if let external = ExtensionExternal.script {
+        if !usesTor, let external = ExtensionExternal.script {
             controller.addUserScript(
                 WKUserScript(source: external, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: .page)
             )
@@ -1359,6 +1370,7 @@ final class Tab: ObservableObject, Identifiable {
             onCross(self, url)
             return
         }
+        if OnionAddress.isOnion(url) { prepareTorRoute() }
         // Set straight away rather than waiting for the observer: the tab has to
         // stop being blank in the same frame the field disappears, or the empty
         // state flashes back for an instant on its way out.
@@ -1378,6 +1390,8 @@ final class Tab: ObservableObject, Identifiable {
         picture = nil
         cover = nil
         adoptIcon()
+        if proxyPaused { pending = url; proxyWasOpen = true; steps(); return }
+        if usesTor { loadOnion(URLRequest(url: url)); steps(); return }
         web.open(url)
         // Back, from a page that came out of one of Search's own, goes there.
         steps()
@@ -1385,12 +1399,13 @@ final class Tab: ObservableObject, Identifiable {
 
     /// Brought back from the last session: everything the row needs to draw it,
     /// and nothing fetched.
-    func restore(url: URL, title: String, name: String? = nil) {
+    func restore(url: URL, title: String, name: String? = nil, tor: Bool = false) {
         if let own = InternalPage(url: url) {
             self.name = name
             show(own)
             return
         }
+        if tor || OnionAddress.isOnion(url) { prepareTorRoute() }
         address = url
         self.title = title
         self.name = name
@@ -1459,7 +1474,42 @@ final class Tab: ObservableObject, Identifiable {
             cover = nil
             discard()
         }
+        let tor = usesTor
         configuration = Web.configuration(space: space)
+        if tor { prepareTorRoute() }
+    }
+
+    /// Network transitions end existing documents, sockets and worker clients.
+    /// Keep the store and restorable navigation state for the verified route.
+    func suspendForProxy() {
+        proxyPaused = true
+        if usesTor && onionLoading {
+            pending = address
+            proxyWasOpen = true
+            onionTask?.cancel()
+            onionTask = nil
+        }
+        guard let view = built else { return }
+        proxyWasOpen = true
+        memory = view.isLoading ? nil : view.interactionState
+        pending = address ?? view.url
+        picture = nil
+        cover = nil
+        discard()
+        ProxyTimeZone.close(view)
+    }
+
+    func resumeAfterProxy() {
+        // A caller can ask for a blank view while a tab is paused. Never
+        // let that view keep the old process pool when its page is resumed.
+        if proxyPaused, built != nil { suspendForProxy() }
+        proxyPaused = false
+        if #available(macOS 15.4, *), !usesTor, !shy || carriesExtensions { Extensions.attach(configuration) }
+        Proxy.shared.prepare(configuration)
+        if proxyWasOpen {
+            proxyWasOpen = false
+            wake()
+        }
     }
 
     /// Settings › Videos wait for a click, changed: the page's next view
@@ -1468,6 +1518,97 @@ final class Tab: ObservableObject, Identifiable {
     /// autoplay policy (see Autoplay.apply).
     func playbackChanged() {
         configuration.mediaTypesRequiringUserActionForPlayback = Web.playback
+    }
+
+    private func prepareTorRoute() {
+        guard !usesTor else { return }
+        let store = Onion.shared.store(for: configuration.websiteDataStore)
+        if let old = built { discard(); ProxyTimeZone.close(old) }
+        configuration = Web.configuration(shy: true, store: store)
+        Proxy.shared.apply(to: store, profile: Profile.personalID)
+        Proxy.shared.prepare(configuration)
+        if #available(macOS 15.4, *) { Extensions.shared.onionChanged(self) }
+        Onion.shared.enteredTab()
+        memory = nil
+    }
+
+    /// A cross-route navigation must be restarted before WebKit sends it.
+    /// Keep the complete request; never turn a form submission into a GET.
+    func openOnion(_ request: URLRequest) {
+        guard let url = request.url else { return }
+        prepareTorRoute()
+        address = url
+        page = nil
+        pending = nil
+        memory = nil
+        title = Address.pretty(url)
+        if proxyPaused { onionRequest = request; pending = url; proxyWasOpen = true; return }
+        loadOnion(request)
+    }
+
+    func onionRouteChanged() {
+        guard usesTor, let url = address else { return }
+        onionTask?.cancel()
+        built?.stopLoading()
+        if proxyPaused { pending = url; proxyWasOpen = true; return }
+        loadOnion(onionRequest ?? URLRequest(url: url))
+    }
+
+    private func loadOnion(_ original: URLRequest, state: Any? = nil) {
+        onionTask?.cancel()
+        let id = UUID()
+        onionNavigation = id
+        guard let url = original.url, OnionNetwork.permits(url) else {
+            failure = "This address cannot open in a Tor tab. Use a normal tab for local addresses"
+            onionLoading = false
+            return
+        }
+        let method = original.httpMethod?.uppercased() ?? "GET"
+        guard ["GET", "HEAD"].contains(method) || original.httpBody != nil || original.httpBodyStream != nil else {
+            failure = "Open the onion website before submitting this form. Its request body could not be transferred safely"
+            onionLoading = false
+            return
+        }
+        var request = original
+        request.timeoutInterval = max(120, original.timeoutInterval)
+        request.setValue(nil, forHTTPHeaderField: "Referer")
+        onionRequest = request
+        onionLoading = true
+        failure = nil
+        onionTask = Task { [weak self] in
+            do {
+                _ = try await Onion.shared.connect()
+                guard !Task.isCancelled, let self, self.onionNavigation == id, !self.proxyPaused else { return }
+                Proxy.shared.prepare(self.configuration)
+                let view = self.web
+                // As with ordinary restored pages, let the stage attach the
+                // view before loading. A fast cached Tor bootstrap can beat
+                // SwiftUI's next frame and leave an off-window page blank.
+                for _ in 0..<50 where view.window == nil {
+                    try await Task.sleep(for: .milliseconds(20))
+                    guard !Task.isCancelled, self.onionNavigation == id,
+                          self.built === view, !self.proxyPaused else { return }
+                }
+                guard Onion.shared.port != nil else { return }
+                if let state { view.interactionState = state } else { view.load(request) }
+                self.onionRequest = nil
+                self.onionLoading = false
+                self.onionTask = nil
+                if ["GET", "HEAD"].contains(method) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak view] in
+                        guard let self, let view, self.onionNavigation == id,
+                              self.built === view, !self.proxyPaused, Onion.shared.port != nil,
+                              !view.isLoading, view.url == nil || view.url?.absoluteString == "about:blank" else { return }
+                        view.load(request)
+                    }
+                }
+            } catch {
+                guard !Task.isCancelled, let self, self.onionNavigation == id, !self.proxyPaused else { return }
+                self.onionLoading = false
+                self.onionTask = nil
+                self.failure = error.localizedDescription
+            }
+        }
     }
 
     /// Whether the page holds something typed and not yet sent — a draft, a
@@ -1592,6 +1733,9 @@ final class Tab: ObservableObject, Identifiable {
     /// about:blank with nothing left to say so. Still there, or still
     /// answering for a process that's already gone, is asked once more.
     private func loadAndVerify(_ url: URL, state: Any? = nil, tries: Int = 0) {
+        guard !proxyPaused else { pending = url; memory = state; proxyWasOpen = true; return }
+        if OnionAddress.isOnion(url) { prepareTorRoute() }
+        if usesTor { loadOnion(onionRequest ?? URLRequest(url: url), state: state); return }
         // Wait for the stage to take the view back before loading into it. A
         // page loaded while its view is off any window boots as a hidden tab,
         // and a site that holds everything until it is shown — x.com does,
@@ -1604,8 +1748,9 @@ final class Tab: ObservableObject, Identifiable {
         // than hanging on one that will never come.
         let view = web
         if view.window == nil, tries < 50 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
-                self?.loadAndVerify(url, state: state, tries: tries + 1)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self, weak view] in
+                guard let self, let view, self.built === view, !self.proxyPaused else { return }
+                self.loadAndVerify(url, state: state, tries: tries + 1)
             }
             return
         }
@@ -1618,19 +1763,20 @@ final class Tab: ObservableObject, Identifiable {
         } else {
             view.open(url)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self else { return }
-            guard built?.url?.absoluteString != "about:blank" else {
-                web.open(url)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak view] in
+            guard let self, let view, self.built === view, !self.proxyPaused else { return }
+            guard view.url?.absoluteString != "about:blank" else {
+                view.open(url)
                 return
             }
-            web.evaluateJavaScript("document.readyState") { [weak self] _, error in
+            view.evaluateJavaScript("document.readyState") { [weak self, weak view] _, error in
                 MainActor.assumeIsolated {
-                    guard let self, let error = error as NSError? else { return }
+                    guard let self, let view, self.built === view, !self.proxyPaused,
+                          let error = error as NSError? else { return }
                     guard error.domain == WKErrorDomain,
                           error.code == WKError.webContentProcessTerminated.rawValue
                     else { return }
-                    self.web.open(url)
+                    view.open(url)
                 }
             }
         }
@@ -1642,6 +1788,7 @@ final class Tab: ObservableObject, Identifiable {
     /// Asked anything at all, the page answers with one particular error, and
     /// the answer to that is to load it again.
     func revive() {
+        guard !proxyPaused else { return }
         if stale {
             stale = false
             recoverFromCrash()
@@ -1672,6 +1819,7 @@ final class Tab: ObservableObject, Identifiable {
     /// with a second one of its own for the same address.
     @discardableResult
     func wake() -> Bool {
+        guard !proxyPaused else { proxyWasOpen = pending != nil; return false }
         guard let url = pending else { return false }
         pending = nil
         failure = nil
@@ -1721,6 +1869,8 @@ final class Tab: ObservableObject, Identifiable {
     /// A view that has lost its document is given the address back instead:
     /// there is nothing else for it to reload.
     func reload(fromOrigin: Bool = false) {
+        guard !proxyPaused else { pending = address; proxyWasOpen = true; return }
+        if usesTor, let address { loadOnion(onionRequest ?? URLRequest(url: address)); return }
         // Search's own pages are drawn from what is there now, always.
         guard page == nil else { return }
         // A pin put down with ⌘W has no view left to reload; waking it is
@@ -1782,6 +1932,11 @@ final class Tab: ObservableObject, Identifiable {
     /// Called when the tab is thrown away. Without it the view keeps running
     /// whatever the page left behind — timers, video, sockets.
     func close() {
+        onionNavigation = UUID()
+        onionTask?.cancel()
+        onionTask = nil
+        onionLoading = false
+        if usesTor, let view = built { ProxyTimeZone.close(view) }
         onZoom = nil
         onLink = nil
         onPick = nil

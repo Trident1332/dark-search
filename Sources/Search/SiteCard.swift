@@ -485,6 +485,13 @@ struct SiteCard: View {
                 tint: Palette.safe, trust: trust
             )
         case "http":
+            if tab.usesTor, let host = tab.pageAddress?.host(), OnionAddress.isValidHost(host) {
+                return Safety(
+                    symbol: "network", title: "Onion connection through Tor",
+                    detail: "Tor encrypts the connection to this onion service. This tab uses a separate temporary session and UTC.",
+                    tint: Palette.ink, trust: nil
+                )
+            }
             return Safety(
                 symbol: "lock.open", title: "Connection is not secure",
                 detail: "Don't enter passwords or credit card numbers here: anything sent to this site can be read on the way.",

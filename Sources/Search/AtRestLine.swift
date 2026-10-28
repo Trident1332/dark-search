@@ -12,10 +12,13 @@ struct AtRestLine: View {
     /// "Not secure" in the room of one letter (the words are its tooltip),
     /// and the registrable domain alone stands for the host.
     var compact = false
+    /// A separate Tor control owns the connection icon and warning.
+    /// Its address still reads the complete security description aloud.
+    var connectionHandled = false
 
     var body: some View {
         HStack(spacing: 0) {
-            if rest.kind == .notSecure {
+            if rest.kind == .notSecure && !connectionHandled {
                 if compact {
                     Image(systemName: "lock.open")
                         .font(.system(size: size - 2, weight: .medium))
@@ -50,6 +53,7 @@ struct AtRestLine: View {
         .font(.system(size: size))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(rest.text)
+        .help(rest.text)
     }
 }
 
@@ -69,6 +73,7 @@ struct TitleAtRest: View {
     /// In the column, with room for "Not secure" and the subdomain; across
     /// the top a lock says the first and the site alone stands for the host.
     let roomy: Bool
+    var connectionHandled = false
 
     private var on: Bool { shown && rest != nil }
 
@@ -81,11 +86,12 @@ struct TitleAtRest: View {
                 .foregroundStyle(colour)
                 .opacity(on && !hovering ? 0 : 1)
             if let rest, on {
-                AtRestLine(rest: rest, size: size, compact: !roomy)
+                AtRestLine(rest: rest, size: size, compact: !roomy, connectionHandled: connectionHandled)
                     .opacity(hovering ? 0 : 1)
                     .transition(.opacity)
             }
         }
+        .help(on ? (rest?.text ?? label) : label)
         .animation(Motion.reduced ? nil : .easeInOut(duration: 0.22), value: on)
         .animation(Motion.reduced ? nil : .easeInOut(duration: 0.22), value: hovering)
     }

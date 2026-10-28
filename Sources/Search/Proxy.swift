@@ -70,14 +70,18 @@ struct ProxySetup: Equatable {
     /// Empty: every profile. Otherwise only these profiles' pages take the
     /// route; the others stay on the Mac's settings.
     var profiles: Set<UUID> = []
-    /// A page fails rather than slip out directly when the proxy can't be
-    /// reached. Off, WebKit falls back to a direct connection.
+    /// Reconnect at startup and hold all Search traffic until an authenticated
+    /// check succeeds. Off, unauthenticated routes may fail over directly.
     var blocks = true
     /// A mark beside the address while pages take the route.
     var shows = true
     /// Peer connections are off while the proxy is on: a call can't go
     /// through a proxy, so one would have shown the Mac's own address.
     var hidesCalls = true
+    /// Use the exit location's IANA time zone in WebKit processes.
+    var matchesTimeZone = true
+
+    var persistent: Bool { on && blocks }
 
     /// The port as set, or the kind's usual one.
     var portOrUsual: UInt16 { port ?? kind.usualPort }
@@ -94,7 +98,7 @@ struct ProxySetup: Equatable {
     /// Whether a profile's pages take the route.
     func applies(to profile: UUID) -> Bool {
         guard routes else { return false }
-        return profiles.isEmpty || profiles.contains(profile)
+        return persistent || profiles.isEmpty || profiles.contains(profile)
     }
 
     /// What the proxy is called in a line of words: its host and port.
@@ -105,7 +109,7 @@ struct ProxySetup: Equatable {
     var excluded: [String] {
         var seen: Set<String> = []
         var out: [String] = []
-        for raw in ["localhost", "127.0.0.1", "::1"] + bypass {
+        for raw in ["localhost", "127.0.0.1", "::1"] + (persistent ? [] : bypass) {
             let site = ProxySetup.domain(raw)
             guard !site.isEmpty, seen.insert(site).inserted else { continue }
             out.append(site)
@@ -150,15 +154,25 @@ final class Proxy: ObservableObject {
     /// The last test, for Settings › Proxy › Connection.
     @Published private(set) var check = ProxyCheck.untried
     /// The proxy stopped answering: a page failed on it, and nothing has
-    /// got through since. Cleared when a page loads, or when the probe that
-    /// runs every fifteen seconds reaches it again.
+    /// confirmed recovery since. Cleared by Test or by the probe that runs
+    /// every fifteen seconds and then reloads the failed pages.
     @Published private(set) var dropped = false
     /// The proxy asked a page for a name and password it didn't have, or
-    /// didn't take the ones it was given. Cleared when a page gets through.
+    /// didn't take the ones it was given. Cleared when credentials change
+    /// or the proxy is confirmed to be working again.
     @Published private(set) var refused = false
     /// Where sites see you from, from the last successful test: "Frankfurt,
     /// Germany", or just the address. For the address bar.
     @Published private(set) var place: String?
+    @Published private(set) var countryCode: String?
+    @Published private(set) var timeZoneID: String?
+    @Published private(set) var ready = false
+    @Published private(set) var changingContent = false
+    var waiting: Bool { setup.persistent && !ready }
+    var protectsLocation: Bool { (setup.routes && (setup.blocks || setup.hidesCalls)) || Onion.shared.hasTabs }
+    /// Tests supply a local endpoint; a rehearsal never contacts a live service.
+    var automaticTarget: URL?
+    var countryFlag: String? { ProxyCountry.flag(for: countryCode) }
     /// Goes up whenever the route changes, for sessions kept outside WebKit
     /// to be made again with the new one.
     @Published private(set) var revision = 0
@@ -174,10 +188,23 @@ final class Proxy: ObservableObject {
     private var routed: [ObjectIdentifier: Routed] = [:]
     /// Tabs whose page failed on the proxy: reloaded once it answers.
     private let failedTabs = NSHashTable<Tab>.weakObjects()
+    /// Destination failures are not proof of a proxy outage. Keep these
+    /// apart until the proxy's own endpoint has failed its reachability check.
+    private let suspectedTabs = NSHashTable<Tab>.weakObjects()
+    private let otherViews = NSHashTable<WKWebView>.weakObjects()
+    private var preferenceRules: [ObjectIdentifier: PreferenceRule] = [:]
+    private var usedPools: [ObjectIdentifier: WKProcessPool] = [:]
+    private var contentTransition: Task<Bool, Never>?
 
     private struct Routed {
         weak var store: WKWebsiteDataStore?
         var profile: UUID?
+    }
+
+    private struct PreferenceRule {
+        weak var value: WKPreferences?
+        var profile: UUID
+        var tor = false
     }
 
     /// The route for what the browser fetches outside WebKit, read from any
@@ -185,13 +212,17 @@ final class Proxy: ObservableObject {
     /// change; nil while no profile's pages take the route.
     nonisolated private static let snapshotLock = NSLock()
     nonisolated(unsafe) private static var snapshot: ProxyConfiguration?
+    nonisolated(unsafe) private static var onionSnapshot = OnionNetwork.configuration(port: nil, suffixOnly: true)
     nonisolated(unsafe) private static var snapshotRevision = 0
     nonisolated(unsafe) private static var keptFetches: (revision: Int, session: URLSession)?
+    nonisolated(unsafe) private static var savedCredentials: ProxyCredentials?
+    nonisolated(unsafe) private static var authentication: [ObjectIdentifier: ProxyAuthentication] = [:]
 
     private init() {}
 
     /// Long-lived clients must cancel connections using the previous route.
     nonisolated static let routeChanged = Notification.Name("SearchProxyRouteChanged")
+    nonisolated static let contentChanged = Notification.Name("SearchProxyContentChanged")
 
     // MARK: - the settings
 
@@ -204,10 +235,8 @@ final class Proxy: ObservableObject {
         guard fresh != before else { return }
         var networking = before
         networking.shows = fresh.shows
-        networking.hidesCalls = fresh.hidesCalls
         if networking == fresh {
-            // Neither switch changes a URLSession's route. Keep tests and
-            // streaming answers alive, and update WebRTC preferences alone.
+            // The address mark does not change the route or interrupt streams.
             for page in Web.pages.allObjects {
                 follow(page.configuration.preferences, store: page.configuration.websiteDataStore)
             }
@@ -218,17 +247,24 @@ final class Proxy: ObservableObject {
         if fresh.on != before.on || fresh.kind != before.kind || fresh.trimmedHost != before.trimmedHost
             || fresh.portOrUsual != before.portOrUsual || fresh.signsIn != before.signsIn || fresh.user != before.user {
             place = nil
+            countryCode = nil
             refused = false
         }
+        ready = false
+        timeZoneID = nil
         if !fresh.routes {
             dropped = false
             forgetFailures()
         }
         confirming?.cancel()
         confirming = nil
+        suspectedTabs.removeAllObjects()
         stopProbe()
+        if (before.routes && (before.blocks || before.matchesTimeZone)) || (fresh.routes && (fresh.blocks || fresh.matchesTimeZone)) {
+            suspendContent()
+        }
         reroute()
-        if dropped { startProbe() }
+        routePrepared()
     }
 
     /// The password was kept or taken out: the same settings, another route.
@@ -236,12 +272,17 @@ final class Proxy: ObservableObject {
         cancelTest()
         check = .untried
         place = nil
+        countryCode = nil
         refused = false
+        ready = false
+        timeZoneID = nil
         confirming?.cancel()
         confirming = nil
+        suspectedTabs.removeAllObjects()
         stopProbe()
+        if setup.routes && (setup.blocks || setup.matchesTimeZone) { suspendContent() }
         reroute()
-        if dropped { startProbe() }
+        routePrepared()
     }
 
     private func cancelTest() {
@@ -253,19 +294,48 @@ final class Proxy: ObservableObject {
     private func reroute() {
         revision += 1
         let route = setup.routes ? configuration() : nil
+        let credentials = setup.routes ? ProxyCredentials(setup: setup, revision: revision,
+            password: setup.signsIn ? ProxyPassword.read(setup) : nil) : nil
         Proxy.snapshotLock.lock()
         Proxy.snapshot = route
         Proxy.snapshotRevision = revision
+        Proxy.savedCredentials = credentials
+        let sessions = Proxy.authentication.values.compactMap { $0.reportsFailures ? $0.session : nil }
+        Proxy.keptFetches = nil
         Proxy.snapshotLock.unlock()
+        sessions.forEach { $0.invalidateAndCancel() }
         for (id, kept) in routed {
             guard let store = kept.store else { routed[id] = nil; continue }
             let wanted = kept.profile.map(setup.applies(to:)) ?? setup.routes
-            store.proxyConfigurations = wanted ? [configuration()] : []
+            store.proxyConfigurations = configurations(for: store, wanted: wanted)
+            followWorkers(in: store)
         }
         for page in Web.pages.allObjects {
             follow(page.configuration.preferences, store: page.configuration.websiteDataStore)
         }
+        for (id, rule) in preferenceRules {
+            guard let preferences = rule.value else { preferenceRules[id] = nil; continue }
+            follow(preferences, profile: rule.profile, tor: rule.tor)
+        }
+        SiteLocation.shared.proxyChanged()
+        Onion.shared.proxyChanged()
         NotificationCenter.default.post(name: Proxy.routeChanged, object: nil)
+    }
+
+    /// Tor listener changes update its isolated stores and suffix guards,
+    /// without replacing the normal proxy or canceling its connections.
+    func refreshOnionRoute(port: UInt16?) {
+        for (id, kept) in routed {
+            guard let store = kept.store else { routed[id] = nil; continue }
+            guard Onion.shared.owns(store) else { continue }
+            store.proxyConfigurations = [Onion.shared.configuration(for: store, port: port)]
+        }
+    }
+
+    private func configurations(for store: WKWebsiteDataStore, wanted: Bool) -> [ProxyConfiguration] {
+        if Onion.shared.owns(store) { return [Onion.shared.configuration(for: store, port: Onion.shared.port)] }
+        let onion = OnionNetwork.configuration(port: nil, suffixOnly: true)
+        return wanted ? [onion, configuration()] : [onion]
     }
 
     // MARK: - stores and pages
@@ -280,12 +350,13 @@ final class Proxy: ObservableObject {
         let wanted = profile.map(setup.applies(to:)) ?? setup.routes
         let already = routed[id]
         routed[id] = Routed(store: store, profile: profile)
-        if let already, already.store === store, already.profile == profile, store.proxyConfigurations.isEmpty == !wanted {
+        if let already, already.store === store, already.profile == profile {
             // The same store asked for again with nothing changed: WebKit
             // is not told twice.
             return
         }
-        store.proxyConfigurations = wanted ? [configuration()] : []
+        store.proxyConfigurations = configurations(for: store, wanted: wanted)
+        followWorkers(in: store)
     }
 
     /// Whose pages a store serves, as it was handed over; nil for one never
@@ -300,8 +371,9 @@ final class Proxy: ObservableObject {
     /// while its pages take the route and the switch is on. Through a name
     /// outside the public framework, as Safari's own switches are; a WebKit
     /// without it leaves calls on.
-    func follow(_ preferences: WKPreferences, profile: UUID) {
-        let calls = !(setup.applies(to: profile) && setup.hidesCalls)
+    func follow(_ preferences: WKPreferences, profile: UUID, tor: Bool = false) {
+        preferenceRules[ObjectIdentifier(preferences)] = PreferenceRule(value: preferences, profile: profile, tor: tor)
+        let calls = !tor && !(setup.applies(to: profile) && (setup.blocks || setup.hidesCalls))
         let set = NSSelectorFromString("_setPeerConnectionEnabled:")
         guard preferences.responds(to: set) else { return }
         typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
@@ -311,13 +383,22 @@ final class Proxy: ObservableObject {
     /// The same, for a page whose store says whose it is. A store never
     /// handed over — a page made some other way — counts as Personal's.
     func follow(_ preferences: WKPreferences, store: WKWebsiteDataStore) {
-        follow(preferences, profile: profile(of: store) ?? Profile.personalID)
+        follow(preferences, profile: profile(of: store) ?? Profile.personalID, tor: Onion.shared.owns(store))
+    }
+
+    private func followWorkers(in store: WKWebsiteDataStore) {
+        let selector = NSSelectorFromString("_setServiceWorkerOverridePreferences:")
+        guard store.responds(to: selector) else { return }
+        let preferences = WKPreferences()
+        follow(preferences, store: store)
+        typealias Setter = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+        unsafeBitCast(store.method(for: selector), to: Setter.self)(store, selector, preferences)
     }
 
     /// WebKit's and URLSession's route, built afresh each time so the
     /// password is read from the keychain only now.
     func configuration(forTest: Bool = false) -> ProxyConfiguration {
-        guard setup.complete else {
+        guard setup.complete, forTest || !waiting else {
             // Keep a valid proxy configuration in force while the fields
             // are incomplete. The reserved .invalid domain cannot resolve,
             // and failover must remain off even when ordinarily allowed.
@@ -337,8 +418,13 @@ final class Proxy: ObservableObject {
         if setup.signsIn, !setup.user.isEmpty, let password = ProxyPassword.read(setup), !password.isEmpty {
             made.applyCredential(username: setup.user, password: password)
         }
-        made.allowFailover = !forTest && !setup.blocks
-        made.excludedDomains = forTest ? [] : setup.excluded
+        // Network treats rejected preapplied credentials as a failed route
+        // before the auth delegate runs. Failover would hide that error and
+        // send the request directly, so authenticated routes keep it visible.
+        made.allowFailover = !forTest && !setup.blocks && !setup.signsIn
+        // The catch-all proxy is never a candidate for a hidden-service
+        // name, even if the framework tries another proxy configuration.
+        made.excludedDomains = forTest ? [] : setup.excluded + ["onion", "onion."]
         return made
     }
 
@@ -352,8 +438,9 @@ final class Proxy: ObservableObject {
     nonisolated static func session(_ configuration: URLSessionConfiguration) -> URLSessionConfiguration {
         snapshotLock.lock()
         let route = snapshot
+        let onion = onionSnapshot
         snapshotLock.unlock()
-        if let route { configuration.proxyConfigurations = [route] }
+        configuration.proxyConfigurations = [onion] + (route.map { [$0] } ?? [])
         return configuration
     }
 
@@ -366,105 +453,344 @@ final class Proxy: ObservableObject {
     }
 
     /// In place of URLSession.shared for what Search fetches for itself —
-    /// an update, an extension from the store, its update check: the shared
-    /// session itself while no proxy is on, and one with its defaults and
-    /// the route while one is. Any thread.
+    /// an update, an extension from the store, its update check. Managed even
+    /// with the proxy off, so enabling it cancels earlier direct connections.
     nonisolated static var fetches: URLSession {
         snapshotLock.lock()
-        defer { snapshotLock.unlock() }
-        guard let snapshot else { return .shared }
-        if let keptFetches, keptFetches.revision == snapshotRevision { return keptFetches.session }
-        let configuration = URLSessionConfiguration.default
-        configuration.proxyConfigurations = [snapshot]
-        let made = URLSession(configuration: configuration)
-        keptFetches = (snapshotRevision, made)
+        let revision = snapshotRevision
+        if let keptFetches, keptFetches.revision == revision { snapshotLock.unlock(); return keptFetches.session }
+        snapshotLock.unlock()
+        let made = makeSession(configuration: .default)
+        snapshotLock.lock()
+        if snapshotRevision == revision { keptFetches = (revision, made) }
+        snapshotLock.unlock()
         return made
+    }
+
+    /// Tests stand in for the network with URLProtocol classes, which the
+    /// shared session takes from `registerClass` and a session of its own
+    /// does not: these go in front of every session made here. Setting
+    /// them lets go of the session kept for `fetches`, made before they
+    /// were there.
+    nonisolated static var protocolClasses: [AnyClass] {
+        get { snapshotLock.lock(); defer { snapshotLock.unlock() }; return stubs }
+        set { snapshotLock.lock(); stubs = newValue; keptFetches = nil; snapshotLock.unlock() }
+    }
+    nonisolated(unsafe) private static var stubs: [AnyClass] = []
+
+    /// Every session has a bounded proxy-authentication policy, including
+    /// sessions whose own delegates handle redirects, downloads, or streams.
+    nonisolated static func makeSession(configuration: URLSessionConfiguration,
+                                       delegate: URLSessionDelegate? = nil, delegateQueue: OperationQueue? = nil,
+                                       route: ProxyConfiguration? = nil, reportsAuthenticationFailures: Bool = true) -> URLSession {
+        snapshotLock.lock()
+        let current = route.map { [$0] } ?? ([onionSnapshot] + (snapshot.map { [$0] } ?? []))
+        let credentials = savedCredentials
+        if !stubs.isEmpty {
+            configuration.protocolClasses = stubs + (configuration.protocolClasses ?? [])
+        }
+        configuration.proxyConfigurations = current
+        let handler = ProxyAuthentication(credentials: credentials, reportsFailures: reportsAuthenticationFailures)
+        let made = URLSession(configuration: configuration, delegate: delegate ?? handler, delegateQueue: delegateQueue)
+        handler.session = made
+        authentication = authentication.filter { $0.value.session != nil }
+        authentication[ObjectIdentifier(made)] = handler
+        snapshotLock.unlock()
+        return made
+    }
+
+    @discardableResult
+    nonisolated static func authenticate(_ challenge: URLAuthenticationChallenge, in session: URLSession? = nil,
+                                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) -> Bool {
+        snapshotLock.lock()
+        let handler: ProxyAuthentication?
+        if let session {
+            let found = authentication[ObjectIdentifier(session)]
+            handler = found?.session === session ? found : nil
+        } else {
+            handler = ProxyAuthentication(credentials: savedCredentials)
+        }
+        snapshotLock.unlock()
+        return handler?.respond(to: challenge, completionHandler: completionHandler) ?? false
+    }
+
+    nonisolated private static func authenticationFailure(in session: URLSession) -> String? {
+        snapshotLock.lock()
+        let handler = authentication[ObjectIdentifier(session)]
+        snapshotLock.unlock()
+        return handler?.failure
+    }
+
+    nonisolated static func authenticationError(_ error: Error, in session: URLSession) {
+        snapshotLock.lock()
+        let handler = authentication[ObjectIdentifier(session)]
+        let credentials = handler?.session === session && handler?.reportsFailures == true ? handler?.credentials : nil
+        snapshotLock.unlock()
+        guard let credentials else { return }
+        Task { @MainActor in
+            guard shared.revision == credentials.revision else { return }
+            if isAuthenticationFailure(error) {
+                shared.authenticationFailed(credentials.setup.signsIn ? ProxyAuthentication.rejected : ProxyAuthentication.missing,
+                                            revision: credentials.revision)
+            } else if looksLikeProxyTrouble(error), shared.setup.persistent {
+                shared.confirmFailure(error, tab: nil)
+            }
+        }
+    }
+
+    func authenticationFailed(_ message: String, revision: Int) {
+        guard setup.routes, self.revision == revision else { return }
+        refused = true
+        place = nil
+        countryCode = nil
+        check = .failed(message)
+        if setup.persistent { connectionFailed(message) }
     }
 
     // MARK: - the connection
 
-    /// Settings › Proxy › Connection › Test: one request through the proxy
-    /// to a site that answers with where it was reached from. Nothing is
-    /// sent until the button is pressed, and only the proxy's own address
-    /// reaches that site.
+    /// Manual and automatic checks use the real authenticated route, without
+    /// bypasses or failover. The location service sees the proxy exit IP.
     func test(configuration base: URLSessionConfiguration = .ephemeral, target: URL = Proxy.whereAmI) {
         cancelTest()
+        guard setup.routes else { check = .failed("Turn on Use a proxy before testing the connection"); return }
         guard setup.complete else {
             check = .failed("Enter the proxy's address first")
+            if setup.persistent { startProbe() }
+            return
+        }
+        if setup.signsIn, setup.user.isEmpty || ProxyPassword.read(setup)?.isEmpty != false {
+            authenticationFailed(ProxyAuthentication.missing, revision: revision)
             return
         }
         check = .testing
         let id = UUID()
         testID = id
         let testedRevision = revision
+        let authenticationMessage = setup.signsIn ? ProxyAuthentication.rejected : ProxyAuthentication.missing
         let configuration = base.copy() as! URLSessionConfiguration
         configuration.timeoutIntervalForRequest = 12
         configuration.timeoutIntervalForResource = 15
         configuration.waitsForConnectivity = false
         let route = self.configuration(forTest: true)
         configuration.proxyConfigurations = [route]
-        let session = URLSession(configuration: configuration)
+        let session = Proxy.makeSession(configuration: configuration, route: route, reportsAuthenticationFailures: false)
         let started = Date()
         task = Task { [weak self] in
             defer { session.invalidateAndCancel() }
             let result: ProxyCheck
+            var authenticationFailure: String?
+            var testedCountryCode: String?
+            var testedTimeZone: String?
             do {
                 var request = URLRequest(url: target)
                 request.setValue("application/json", forHTTPHeaderField: "Accept")
-                let (data, response) = try await session.data(for: request)
+                let (data, response) = try await session.proxyData(for: request)
                 let ms = Int((Date().timeIntervalSince(started) * 1000).rounded())
-                if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                if let http = response as? HTTPURLResponse, http.statusCode == 407 {
+                    authenticationFailure = authenticationMessage
+                    result = .failed(authenticationMessage)
+                } else if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                     // Reached, but the site had nothing to say: the proxy
                     // works, where you appear from is unknown.
-                    result = .reached(ms: ms, address: nil, place: nil)
+                    result = self?.setup.persistent == true
+                        ? .failed("The location service returned HTTP \(http.statusCode). Search stays offline and retries")
+                        : .reached(ms: ms, address: nil, place: nil)
                 } else {
                     let seen = Proxy.read(data)
-                    result = .reached(ms: ms, address: seen.address, place: seen.place)
+                    testedCountryCode = seen.countryCode
+                    testedTimeZone = seen.timeZone
+                    if self?.setup.matchesTimeZone == true, seen.timeZone == nil {
+                        result = .failed("The proxy location did not include a valid time zone. Test again")
+                    } else if self?.setup.matchesTimeZone == true, !ProxyTimeZone.isSupported {
+                        result = .failed("This version of WebKit cannot match the proxy time zone")
+                    } else if self?.setup.persistent == true, seen.address == nil {
+                        result = .failed("The proxy location could not be verified. Search stays offline")
+                    } else {
+                        result = .reached(ms: ms, address: seen.address, place: seen.place)
+                    }
                 }
             } catch is CancellationError {
                 return
             } catch let error as URLError where error.code == .cancelled {
-                return
+                guard let failure = Proxy.authenticationFailure(in: session) else { return }
+                authenticationFailure = failure
+                result = .failed(failure)
             } catch {
-                result = .failed(Proxy.explain(error))
+                if Proxy.isAuthenticationFailure(error) {
+                    authenticationFailure = authenticationMessage
+                    result = .failed(authenticationMessage)
+                } else {
+                    result = .failed(Proxy.authenticationFailure(in: session) ?? Proxy.explain(error))
+                }
             }
             guard !Task.isCancelled, let self, self.testID == id,
                   self.revision == testedRevision else { return }
             self.task = nil
             self.testID = nil
-            self.finish(result)
+            if let authenticationFailure { self.authenticationFailed(authenticationFailure, revision: testedRevision) }
+            await self.finish(result, countryCode: testedCountryCode, timeZone: testedTimeZone, revision: testedRevision)
         }
     }
 
-    private func finish(_ result: ProxyCheck) {
-        check = result
+    private func finish(_ result: ProxyCheck, countryCode: String?, timeZone: String?, revision testedRevision: Int) async {
+        guard revision == testedRevision else { return }
         if case .reached(_, let address, let spot) = result {
+            let zone = setup.matchesTimeZone ? timeZone : nil
+            var acceptingRevision = testedRevision
+            if zone != timeZoneID {
+                suspendContent()
+                if setup.persistent && ready {
+                    ready = false
+                    reroute()
+                    acceptingRevision = revision
+                }
+            }
+            let stopped = await contentTransition?.value ?? true
+            guard !Task.isCancelled, revision == acceptingRevision else { return }
+            guard stopped || !setup.persistent else {
+                connectionFailed("Search could not stop the previous browser processes. Restart Search to reconnect")
+                return
+            }
             place = spot ?? address
+            self.countryCode = countryCode
+            timeZoneID = zone
+            let wasWaiting = waiting
+            ready = true
+            if wasWaiting { reroute() }
+            resumeContent()
+            guard !waiting else { return }
             recovered()
+            check = result
+        } else if case .failed(let message) = result, setup.persistent {
+            connectionFailed(message)
+        } else {
+            check = result
         }
+    }
+
+    /// Keep the route closed before touching old pages or awaiting WebKit.
+    private func connectionFailed(_ message: String) {
+        guard setup.persistent else { return }
+        confirming?.cancel()
+        confirming = nil
+        suspectedTabs.removeAllObjects()
+        let wasReady = ready
+        ready = false
+        dropped = true
+        check = .failed(message)
+        if wasReady {
+            suspendContent()
+            reroute()
+        }
+        startProbe()
+    }
+
+    func track(_ view: WKWebView) {
+        otherViews.add(view)
+        let pool = view.configuration.processPool
+        usedPools[ObjectIdentifier(pool)] = pool
+    }
+
+    func prepare(_ configuration: WKWebViewConfiguration) {
+        follow(configuration.preferences, store: configuration.websiteDataStore)
+        configuration.processPool = processPool(for: configuration.websiteDataStore)
+        Onion.shared.prepare(configuration)
+        let pool = configuration.processPool
+        usedPools[ObjectIdentifier(pool)] = pool
+    }
+
+    func processPool(for store: WKWebsiteDataStore) -> WKProcessPool {
+        if Onion.shared.owns(store), let pool = ProxyTimeZone.pool(for: "UTC") { return pool }
+        let applies = profile(of: store).map(setup.applies(to:)) ?? setup.routes
+        if applies, let zone = timeZoneID, let pool = ProxyTimeZone.pool(for: zone) { return pool }
+        return Web.pool
+    }
+
+    private func suspendContent() {
+        guard !changingContent else { return }
+        changingContent = true
+        var pools = [Web.pool] + ProxyTimeZone.pools + Array(usedPools.values)
+        for tab in Tab.proxyTabs.allObjects {
+            if let view = tab.built { pools.append(view.configuration.processPool) }
+            tab.suspendForProxy()
+        }
+        for view in otherViews.allObjects {
+            pools.append(view.configuration.processPool)
+            ProxyTimeZone.close(view)
+        }
+        // Do not terminate the network process: that destroys private stores.
+        contentTransition = Task { await ProxyTimeZone.restartWorkers(in: pools) }
+    }
+
+    private func resumeContent() {
+        guard changingContent else { return }
+        changingContent = false
+        contentTransition = nil
+        if #available(macOS 15.4, *), !Store.testing, !Extensions.shared.proxyChanged() {
+            if setup.persistent {
+                connectionFailed("Search could not restart extensions safely. Restart Search to reconnect")
+                return
+            }
+            check = .failed("Some extensions could not restart. Restart Search to use them again")
+        }
+        for tab in Tab.proxyTabs.allObjects { tab.resumeAfterProxy() }
+        NotificationCenter.default.post(name: Proxy.contentChanged, object: nil)
+    }
+
+    private func routePrepared() {
+        let expected = revision
+        Task { [weak self] in
+            guard let self else { return }
+            let stopped = await self.contentTransition?.value ?? true
+            guard self.revision == expected else { return }
+            if self.setup.persistent {
+                guard WKPreferences().responds(to: NSSelectorFromString("_setPeerConnectionEnabled:")) else {
+                    self.connectionFailed("This version of WebKit cannot block direct peer connections")
+                    return
+                }
+                guard stopped else {
+                    self.connectionFailed("Search could not stop the previous browser processes. Restart Search to reconnect")
+                    return
+                }
+                self.automaticCheck()
+                self.startProbe()
+            } else {
+                self.resumeContent()
+                if self.setup.routes && self.setup.matchesTimeZone { self.automaticCheck() }
+                else if self.dropped { self.startProbe() }
+            }
+        }
+    }
+
+    private func automaticCheck() {
+        guard setup.routes, task == nil else { return }
+        guard let target = Store.testing ? automaticTarget : Proxy.whereAmI else { return }
+        test(target: target)
     }
 
     /// CFNetwork's errors, whose proxy ones (306, 310) carry no NSURLError.
     static let cfNetwork = kCFErrorDomainCFNetwork as String
 
     /// Answers with the address it was reached from and, when it knows,
-    /// the city and country of that address. Reached only on Test.
+    /// the city, country and IANA time zone of that address.
     nonisolated static let whereAmI = URL(string: "https://ipinfo.io/json")!
 
     /// What the answer says: the address, and "City, Country" when both are
     /// there (the country spelled out from its code, in the Mac's language).
-    static func read(_ data: Data) -> (address: String?, place: String?) {
-        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return (nil, nil) }
+    static func read(_ data: Data) -> (address: String?, place: String?, countryCode: String?, timeZone: String?) {
+        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return (nil, nil, nil, nil) }
         let address = (json["ip"] as? String)?.trimmingCharacters(in: .whitespaces)
         let city = (json["city"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
-        let code = (json["country"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
-        let country = code.isEmpty ? "" : (Locale.current.localizedString(forRegionCode: code) ?? code)
+        let code = ProxyCountry.normalized(json["country"] as? String)
+        let country = code.map { Locale.current.localizedString(forRegionCode: $0) ?? $0 } ?? ""
         let place = [city, country].filter { !$0.isEmpty }.joined(separator: ", ")
-        return (address?.isEmpty == false ? address : nil, place.isEmpty ? nil : place)
+        return (address?.isEmpty == false ? address : nil, place.isEmpty ? nil : place, code, ProxyTimeZone.identifier(json["timezone"] as? String))
     }
 
     /// A failed test in plain words.
     static func explain(_ error: Error) -> String {
+        if isAuthenticationFailure(error) { return ProxyAuthentication.rejected }
         let nsError = error as NSError
         switch (nsError.domain, nsError.code) {
         case (NSURLErrorDomain, NSURLErrorTimedOut): return "The proxy didn't answer in time"
@@ -492,44 +818,57 @@ final class Proxy: ObservableObject {
     /// Listening, and the failure was the site's: nothing is said.
     func failed(_ error: Error, profile: UUID, tab: Tab?) {
         guard setup.applies(to: profile), Proxy.looksLikeProxyTrouble(error) else { return }
-        if (error as NSError).code == NSURLErrorUserAuthenticationRequired {
-            refused = true
+        if Proxy.isAuthenticationFailure(error) {
+            if let tab { failedTabs.add(tab) }
+            authenticationFailed(setup.signsIn ? ProxyAuthentication.rejected : ProxyAuthentication.missing, revision: revision)
             tab?.failure = Proxy.refusedMessage
             return
         }
-        if let tab { failedTabs.add(tab) }
+        confirmFailure(error, tab: tab)
+    }
+
+    /// DNS, timeout and connection errors can belong to the requested site,
+    /// an icon or an optional service. Check the configured proxy endpoint
+    /// before closing every page; failover remains disabled on each request
+    /// throughout this check, so it cannot fall back to a direct connection.
+    private func confirmFailure(_ error: Error, tab: Tab?) {
         if dropped {
+            if let tab { failedTabs.add(tab) }
             tab?.failure = Proxy.droppedMessage
             return
         }
+        if let tab { suspectedTabs.add(tab) }
         guard confirming == nil else { return }
         let failedRevision = revision
+        let message = Proxy.explain(error)
         confirming = Task { [weak self] in
             guard let self else { return }
             let listening = await self.reachable()
             guard !Task.isCancelled, self.revision == failedRevision else { return }
             self.confirming = nil
-            guard !listening, self.setup.routes else {
-                self.failedTabs.removeAllObjects()
-                return
+            let suspects = self.suspectedTabs.allObjects
+            self.suspectedTabs.removeAllObjects()
+            guard !listening, self.setup.routes else { return }
+            for tab in suspects where tab.failure != nil {
+                self.failedTabs.add(tab)
+                tab.failure = Proxy.droppedMessage
             }
-            self.dropped = true
-            for tab in self.failedTabs.allObjects where tab.failure != nil { tab.failure = Proxy.droppedMessage }
-            self.startProbe()
+            if self.setup.persistent {
+                self.connectionFailed(message)
+                self.automaticCheck()
+            } else {
+                self.dropped = true
+                self.startProbe()
+            }
         }
-    }
-
-    /// The proxy asked a page who it is: the name and password it was
-    /// given, if any, weren't taken. Said in Settings; the page's own
-    /// sign-in box is not shown for a proxy.
-    func challenged() {
-        guard setup.routes else { return }
-        refused = true
     }
 
     /// Only an explicit proxy test or its recovery probe establishes health.
     /// A page commit can have come from cache, a bypass, or a local document.
     private func recovered() {
+        confirming?.cancel()
+        confirming = nil
+        suspectedTabs.removeAllObjects()
         dropped = false
         refused = false
         stopProbe()
@@ -539,6 +878,7 @@ final class Proxy: ObservableObject {
     /// The errors a dead or refusing proxy gives a page, as opposed to a
     /// site that is down: nothing listening, no name, a tunnel refused.
     static func looksLikeProxyTrouble(_ error: Error) -> Bool {
+        if isAuthenticationFailure(error) { return true }
         let nsError = error as NSError
         switch (nsError.domain, nsError.code) {
         case (NSURLErrorDomain, NSURLErrorCannotConnectToHost), (NSURLErrorDomain, NSURLErrorTimedOut),
@@ -552,11 +892,29 @@ final class Proxy: ObservableObject {
         }
     }
 
+    /// Network can reject pre-applied proxy credentials before Foundation
+    /// delivers a challenge. Classify its error codes, including wrappers,
+    /// rather than depending on a localized description.
+    static func isAuthenticationFailure(_ error: Error) -> Bool {
+        var pending = [error as NSError]
+        var seen: Set<ObjectIdentifier> = []
+        while let current = pending.popLast(), seen.count < 32 {
+            guard seen.insert(ObjectIdentifier(current)).inserted else { continue }
+            if current.domain == NSPOSIXErrorDomain,
+               [Int(POSIXErrorCode.EAUTH.rawValue), Int(POSIXErrorCode.ENEEDAUTH.rawValue)].contains(current.code) { return true }
+            if current.domain == cfNetwork, [307, 122].contains(current.code) { return true }
+            if current.domain == NSURLErrorDomain, current.code == NSURLErrorUserAuthenticationRequired { return true }
+            pending.append(contentsOf: current.underlyingErrors.map { $0 as NSError })
+        }
+        return false
+    }
+
     /// Settings stop routing while a probe is on its way: nothing to wait
     /// for any more.
     private func forgetFailures() {
         confirming?.cancel()
         confirming = nil
+        suspectedTabs.removeAllObjects()
         failedTabs.removeAllObjects()
     }
 
@@ -572,6 +930,10 @@ final class Proxy: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(15))
                 guard !Task.isCancelled, let self else { return }
+                if self.setup.persistent {
+                    self.automaticCheck()
+                    continue
+                }
                 let listening = await self.reachable()
                 guard !Task.isCancelled, self.revision == probingRevision else { return }
                 if listening {
@@ -658,15 +1020,35 @@ enum ProxyPassword {
 
     private static func key(_ setup: ProxySetup) -> String { "\(setup.user)@\(setup.name)/\(setup.kind.rawValue)" }
 
+    /// HTTP and HTTPS differ only in transport to the same proxy. A saved
+    /// account may be reused across that switch, but never across servers,
+    /// ports, usernames, Search labels, or the SOCKS protocol. Prefer the
+    /// selected transport's password when both have one.
+    private static func candidates(_ setup: ProxySetup) -> [ProxySetup] {
+        guard setup.kind != .socks5 else { return [setup] }
+        var alternate = setup
+        alternate.kind = setup.kind == .http ? .https : .http
+        alternate.port = setup.portOrUsual
+        return [setup, alternate]
+    }
+
     static func read(_ setup: ProxySetup) -> String? {
         guard !setup.user.isEmpty, setup.complete else { return nil }
-        if Store.testing { return rehearsal[key(setup)] }
-        var asked = identity(setup)
-        asked[kSecReturnData as String] = true
-        asked[kSecMatchLimit as String] = kSecMatchLimitOne
-        var out: CFTypeRef?
-        guard SecItemCopyMatching(asked as CFDictionary, &out) == errSecSuccess, let data = out as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        for candidate in candidates(setup) {
+            if Store.testing {
+                if let password = rehearsal[key(candidate)] { return password }
+                continue
+            }
+            var asked = identity(candidate)
+            asked[kSecReturnData as String] = true
+            asked[kSecMatchLimit as String] = kSecMatchLimitOne
+            var out: CFTypeRef?
+            if SecItemCopyMatching(asked as CFDictionary, &out) == errSecSuccess,
+               let data = out as? Data, let password = String(data: data, encoding: .utf8), !password.isEmpty {
+                return password
+            }
+        }
+        return nil
     }
 
     /// Kept, or taken out when empty.
@@ -690,21 +1072,33 @@ enum ProxyPassword {
 
     @discardableResult
     static func forget(_ setup: ProxySetup) -> Bool {
-        if Store.testing {
-            rehearsal[key(setup)] = nil
-            return true
+        // Forget the logical HTTP proxy account in both transport slots;
+        // otherwise deleting one would make the other password reappear.
+        var forgotten = true
+        for candidate in candidates(setup) {
+            if Store.testing {
+                rehearsal[key(candidate)] = nil
+                continue
+            }
+            let status = SecItemDelete(identity(candidate) as CFDictionary)
+            if status != errSecSuccess && status != errSecItemNotFound { forgotten = false }
         }
-        let status = SecItemDelete(identity(setup) as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
+        return forgotten
     }
 
     /// Whether a password is kept for what is set, without reading it.
     static func kept(_ setup: ProxySetup) -> Bool {
         guard !setup.user.isEmpty, setup.complete else { return false }
-        if Store.testing { return rehearsal[key(setup)] != nil }
-        var asked = identity(setup)
-        asked[kSecReturnAttributes as String] = true
-        asked[kSecMatchLimit as String] = kSecMatchLimitOne
-        return SecItemCopyMatching(asked as CFDictionary, nil) == errSecSuccess
+        for candidate in candidates(setup) {
+            if Store.testing {
+                if rehearsal[key(candidate)] != nil { return true }
+                continue
+            }
+            var asked = identity(candidate)
+            asked[kSecReturnAttributes as String] = true
+            asked[kSecMatchLimit as String] = kSecMatchLimitOne
+            if SecItemCopyMatching(asked as CFDictionary, nil) == errSecSuccess { return true }
+        }
+        return false
     }
 }

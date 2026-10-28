@@ -269,7 +269,7 @@ final class PaneStage: NSView {
     /// Search's own pages, asleep or floating, as Page decides it (see
     /// Stage.swift).
     private func page(_ tab: Tab) -> NSView? {
-        !tab.isWeb || tab.asleep || tab.floating ? nil : tab.web
+        !tab.isWeb || tab.asleep || tab.floating || tab.proxyPaused ? nil : tab.web
     }
 
     private func refill() {

@@ -365,12 +365,13 @@ struct LittleView: View {
             .padding(.horizontal, 10)
             .frame(height: 34)
             ZStack {
-                WebStage(page: tab.built ?? tab.web)
+                WebStage(page: tab.proxyPaused ? nil : (tab.built ?? tab.web))
                 // A page that never came says so, with Try again, as in a tab.
                 if let failure = tab.failure {
                     Trouble(message: failure) { tab.reload() }
                         .transition(.opacity)
                 }
+                if tab.onionLoading && !tab.proxyPaused { TorLoading() }
                 Swiping(pull: tab.pull)
             }
             .animation(Motion.quick, value: tab.failure)
@@ -394,7 +395,7 @@ struct LittleView: View {
         guard let url = arrived ?? opened else { return "" }
         switch url.scheme?.lowercased() {
         case "https": return SiteCard.site(url)
-        case "http": return "Not secure — " + SiteCard.site(url)
+        case "http": return (tab.usesTor && OnionAddress.isOnion(url) ? "" : "Not secure — ") + SiteCard.site(url)
         case "chrome-extension", "webkit-extension": return "Extension page"
         default: return url.absoluteString == "about:blank" ? "" : "Not a website"
         }

@@ -90,9 +90,11 @@ enum SettingsIndex {
         .init(id: "clear", page: .privacy, title: "Clear", icon: "trash"),
 
         .init(id: "proxy", page: .proxy, title: "Proxy", icon: "network"),
+        .init(id: "connection", page: .proxy, title: "Connection", icon: "dot.radiowaves.left.and.right"),
         .init(id: "exceptions", page: .proxy, title: "Exceptions", icon: "arrow.uturn.right"),
         .init(id: "proxyoptions", page: .proxy, title: "Options", icon: "slider.horizontal.3"),
         .init(id: "proxyprivacy", page: .proxy, title: "Privacy", icon: "hand.raised"),
+        .init(id: "tor", page: .proxy, title: "Tor", icon: "network.badge.shield.half.filled"),
 
         .init(id: "mouse", page: .keyboard, title: "Mouse and trackpad", icon: "computermouse"),
 
@@ -339,7 +341,7 @@ enum SettingsIndex {
               more: "Off, pages take the Mac's own settings from System Settings › Network, a PAC file included. The Mac's settings are never changed from here.",
               keys: ["proxy.on"], words: ["proxy", "socks", "socks5", "tunnel", "vpn", "route", "ip address"]),
         .init(id: "proxy.kind", group: "proxy", icon: "point.3.connected.trianglepath.dotted",
-              title: "Type", detail: "SOCKS5 carries every connection as it is; HTTP and HTTPS tunnel each one",
+              title: "Type", detail: "Whoever gave you the proxy says which. SOCKS5 and HTTP are the usual ones",
               keys: ["proxy.kind"], words: ["socks", "http proxy", "https proxy", "connect"], parent: "proxy.on"),
         .init(id: "proxy.server", group: "proxy", icon: "server.rack",
               title: "Server", detail: "Its address, and the port it listens on",
@@ -347,27 +349,39 @@ enum SettingsIndex {
         .init(id: "proxy.signIn", group: "proxy", icon: "person.badge.key",
               title: "Requires a password", detail: "Kept in your keychain, never in the settings file",
               keys: ["proxy.signsIn", "proxy.user"], words: ["password", "username", "authentication", "keychain"], parent: "proxy.on"),
-        .init(id: "proxy.test", group: "proxy", icon: "checkmark.circle",
-              title: "Connection", detail: "Not tested yet",
-              more: "Test sends one request through the proxy to ipinfo.io, which answers with the address it saw and where that address is. Nothing is sent until you press it.",
-              words: ["test", "location", "country", "city", "where", "connected"], parent: "proxy.on"),
+        .init(id: "proxy.test", group: "connection", icon: "circle.dotted",
+              title: "Status", detail: "Not tested yet",
+              more: "Poke sends a request through the proxy to ipinfo.io, which answers with the address it saw and where that address is. Persistent connection also checks automatically when Search starts and while recovering a connection. Matching the proxy time zone checks on launch too.",
+              words: ["poke", "test", "location", "country", "city", "where", "connected"], parent: "proxy.on"),
         .init(id: "proxy.bypass", group: "exceptions", icon: "arrow.uturn.right",
-              title: "Don't use the proxy for", detail: "Sites reached directly: a site, or a whole domain with its subdomains",
+              title: "Don't use the proxy for", detail: "Reached directly instead. A site, or a whole domain with its subdomains",
               keys: ["proxy.bypass"], words: ["bypass", "exception", "skip", "direct", "local", "intranet"], parent: "proxy.on"),
         .init(id: "proxy.profiles", group: "proxyoptions", icon: "person.2",
               title: "Use in all profiles", detail: "Off, only the profile this window is in takes the route",
               keys: ["proxy.profiles"], words: ["profile", "work", "personal"], parent: "proxy.on"),
         .init(id: "proxy.blocks", group: "proxyoptions", icon: "xmark.octagon",
-              title: "Block pages if the proxy is unavailable", detail: "A page fails rather than slip out directly. Search tries again every 15 seconds",
-              more: "Off, as in most browsers, a proxy that stops answering is quietly bypassed and pages connect directly.",
-              keys: ["proxy.blocks"], words: ["kill switch", "fallback", "failover", "leak", "unavailable", "down"], parent: "proxy.on"),
+              title: "Persistent connection", detail: "Reconnects on launch and keeps Search offline until the proxy works",
+              more: "Connects automatically when Search starts and retries if the connection drops. All Search internet traffic stays blocked until the proxy works, or you turn off Persistent connection or Use a proxy. Internet exceptions and profile limits are suspended, video-call protection is required, and physical-location access and external extension helpers are blocked. Pages and workers restart when the route changes; unsent forms may be lost. Nothing else on your Mac changes.",
+              keys: ["proxy.blocks"], words: ["persistent", "connection", "restart", "reconnect", "retry", "automatic", "offline", "kill switch", "fallback", "failover", "leak", "unavailable", "down"], parent: "proxy.on"),
         .init(id: "proxy.shows", group: "proxyoptions", icon: "eye",
               title: "Show the location in the address bar", detail: "A small mark beside the address while pages take the route, amber when it drops",
               keys: ["proxy.shows"], words: ["address bar", "indicator", "mark", "location"], parent: "proxy.on"),
         .init(id: "proxy.calls", group: "proxyprivacy", icon: "video",
               title: "Keep video calls from revealing your address", detail: "Calls can't go through a proxy, so they're off while it's on",
-              more: "WebRTC, which video calls use, connects straight from your Mac and would show its real address. With this on, pages can't start a peer connection while the proxy is on; turn it off to take a call.",
+              more: "WebRTC, which video calls use, connects straight from your Mac and would show its real address. With this on, pages can't start a peer connection while the proxy is on. Persistent connection requires this protection; otherwise you can turn it off to take a call.",
               keys: ["proxy.calls"], words: ["webrtc", "leak", "ip", "video call", "peer"], parent: "proxy.on"),
+        .init(id: "proxy.timeZone", group: "proxyprivacy", icon: "clock",
+              title: "Match the proxy's time zone", detail: "Pages use the time zone reported by the proxy's location",
+              more: "Date and Intl use the proxy location's time zone. UTC timestamps stay unchanged. Existing pages and workers restart when the time zone changes. Your Mac's time zone is never changed.",
+              keys: ["proxy.timeZone"], words: ["time zone", "timezone", "date", "intl", "utc", "clock", "location", "restart", "worker"], parent: "proxy.on"),
+        .init(id: "onion.on", group: "tor", icon: "network.badge.shield.half.filled",
+              title: "Open onion websites", detail: "Onion tabs use Tor; other tabs keep their existing connection",
+              more: "Opens .onion addresses in isolated temporary Tor tabs. Everything those tabs load, including redirects and downloads, stays on Tor. Extensions, direct peer connections and physical location are blocked, and dates use UTC. When Use a proxy is on, Tor connects through that proxy. HTTPS connections to the proxy are not supported yet; Search reports the error instead. Search keeps its own browser fingerprint.",
+              keys: ["onion.on"], words: ["tor", "onion", "hidden services", "temporary", "private", "utc"]),
+        .init(id: "onion.connection", group: "tor", icon: "circle.dotted",
+              title: "Connection", detail: "Tor starts when you open an onion website",
+              more: "Connect starts Tor without opening a page. If it cannot connect, the error appears here and onion tabs stay offline.",
+              words: ["tor", "onion", "connection", "status", "bootstrap", "relay"], parent: "onion.on"),
 
         // Keyboard & Mouse
         .init(id: "links.peek", group: "mouse", icon: "eye",
@@ -476,9 +490,11 @@ enum SettingsIndex {
         case "sidebar.roomy": return prefs.sidebar && !prefs.sideIcons
         case "sidebar.hides", "layout.cards", "pins.list": return prefs.sidebar
         case "toolbar.left": return !prefs.sidebar
-        case "proxy.profiles": return prefs.proxyOn && Profiles.shared.several
-        case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test", "proxy.bypass",
-             "proxy.blocks", "proxy.shows", "proxy.calls":
+        case "onion.connection": return prefs.onionEnabled
+        case "proxy.profiles": return prefs.proxyOn && !prefs.proxyBlocks && Profiles.shared.several
+        case "proxy.bypass": return prefs.proxyOn && !prefs.proxyBlocks
+        case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test",
+             "proxy.blocks", "proxy.shows", "proxy.calls", "proxy.timeZone":
             return prefs.proxyOn
         default: return true
         }
@@ -490,9 +506,11 @@ enum SettingsIndex {
         case "pages.dusk": return "Only while Search isn't set to Light"
         case "toolbar.left": return "Only with the tabs across the top"
         case "sidebar.roomy": return "Only with titles in the column"
-        case "proxy.profiles": return "Only with a proxy on and more than one profile"
-        case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test", "proxy.bypass",
-             "proxy.blocks", "proxy.shows", "proxy.calls":
+        case "onion.connection": return "Only with Open onion websites on"
+        case "proxy.profiles": return "Only with a proxy on, Persistent connection off and more than one profile"
+        case "proxy.bypass": return "Only with a proxy on and Persistent connection off"
+        case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test",
+             "proxy.blocks", "proxy.shows", "proxy.calls", "proxy.timeZone":
             return "Only with a proxy on"
         default: return "Only with the tabs down a side"
         }
@@ -662,7 +680,9 @@ extension SettingsIndex {
             "proxy.on": prefs.proxyOn,
             "proxy.kind": prefs.proxyKind.rawValue,
             "proxy.blocks": prefs.proxyBlocks,
-            "proxy.calls": prefs.proxyHidesCalls,
+            "proxy.calls": (prefs.proxyOn && prefs.proxyBlocks) || prefs.proxyHidesCalls,
+            "proxy.timeZone": prefs.proxyMatchesTimeZone,
+            "onion.on": prefs.onionEnabled,
             "always": [
                 "splitView": prefs.splitView, "tabs.groups": prefs.usesTabGroups,
                 "panel.sites": prefs.sitesInPanel, "translate": PageTranslator.enabled,
@@ -694,6 +714,15 @@ extension SettingsIndex {
             prefs.peekChoice = choice
         case "arc.setup":
             prefs.setUpLikeArc()
+        case "proxy.blocks":
+            guard let on = value as? Bool else { return false }
+            prefs.proxyBlocks = on
+        case "proxy.timeZone":
+            guard let on = value as? Bool else { return false }
+            prefs.proxyMatchesTimeZone = on
+        case "onion.on":
+            guard let on = value as? Bool else { return false }
+            prefs.onionEnabled = on
         default:
             return false
         }

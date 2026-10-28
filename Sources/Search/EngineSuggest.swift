@@ -60,6 +60,7 @@ enum EngineSuggest {
         let text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text.count <= longest else { return false }
         guard !text.contains(where: \.isNewline) else { return false }
+        guard !OnionAddress.hasIntent(text) else { return false }
         // An address the field would go to: a scheme, a host, localhost, an IP.
         if Address.url(from: text) != nil { return false }
         let tokens = text.split(whereSeparator: \.isWhitespace)
@@ -144,19 +145,23 @@ enum EngineSuggest {
         configuration.timeoutIntervalForRequest = patience
         configuration.timeoutIntervalForResource = patience
         configuration.httpMaximumConnectionsPerHost = 2
-        return URLSession(configuration: configuration, delegate: NoRedirects.shared, delegateQueue: nil)
+        return Proxy.makeSession(configuration: configuration, delegate: NoRedirects.shared, delegateQueue: nil)
     }
 
     /// An engine that answers by sending us somewhere else isn't followed
     /// there: the words would go to a host nobody picked.
     private final class NoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         static let shared = NoRedirects()
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if let error { Proxy.authenticationError(error, in: session) }
+        }
         func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                         newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
             completionHandler(nil)
         }
         func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            if Proxy.authenticate(challenge, in: session, completionHandler: completionHandler) { return }
             // Never a password: only the server's own certificate is judged.
             if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
                 completionHandler(.performDefaultHandling, nil)
@@ -192,7 +197,7 @@ final class EngineSuggester {
             request.httpShouldHandleCookies = false
             request.setValue("application/json, text/javascript;q=0.9", forHTTPHeaderField: "Accept")
             do {
-                let (data, response) = try await EngineSuggest.session.data(for: request)
+                let (data, response) = try await EngineSuggest.session.proxyData(for: request)
                 guard !Task.isCancelled, let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
                 let words = EngineSuggest.parse(data, asked: words)
                 guard !Task.isCancelled else { return }

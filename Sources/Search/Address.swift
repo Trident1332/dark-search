@@ -28,11 +28,17 @@ enum Address {
         if let split = text.range(of: "://") {
             let scheme = text[..<split.lowerBound].lowercased()
             guard ours.contains(scheme) else { return nil }
-            return URL(string: text)
+            guard let url = URL(string: text) else { return nil }
+            return OnionAddress.isOnion(url) ? OnionAddress.url(from: text) : url
         }
         if text.lowercased().hasPrefix("about:") || text.lowercased().hasPrefix("data:") {
             return URL(string: text)
         }
+
+        // Onion services often offer HTTP inside Tor's encrypted route.
+        // Keep an explicit HTTPS choice, and reject malformed service names
+        // rather than treating them as ordinary hosts or search phrases.
+        if OnionAddress.hasIntent(text), let onion = OnionAddress.url(from: text) { return onion }
 
         // Everything else has to look like a host before it gets a scheme put
         // in front of it. "hello world" is not a website, and neither is "todo".
@@ -41,6 +47,7 @@ enum Address {
         // This Mac by its IPv6 address, [::1]:3000, is a place too.
         if head.hasPrefix("[::1]") { return URL(string: "http://" + text) }
         let host = head.split(separator: ":").first.map(String.init) ?? String(head)
+        guard !OnionAddress.isOnionHost(host) else { return nil }
         guard looksLikeHost(host) else { return nil }
 
         // A local server almost never has a certificate, so https there is a

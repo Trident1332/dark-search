@@ -1,5 +1,6 @@
 import Foundation
 import WebKit
+import Combine
 
 // Chrome's native messaging, for the extensions that talk to an app on this
 // Mac — a password manager unlocking with its desktop app, a clipper handing
@@ -19,6 +20,41 @@ enum ExtensionNative {
     struct Refused: LocalizedError {
         let why: String
         var errorDescription: String? { why }
+    }
+
+    @MainActor
+    private static let routeWatch = NotificationCenter.default.publisher(for: Proxy.routeChanged)
+        .sink { _ in
+            MainActor.assumeIsolated {
+                guard Proxy.shared.setup.persistent || Onion.shared.hasTabs else { return }
+                stopProtectedHosts()
+            }
+        }
+
+    @MainActor
+    private static func allowHost() throws {
+        _ = routeWatch
+        guard !Proxy.shared.setup.persistent else {
+            throw Refused(why: "Native apps are unavailable while Persistent connection is on because their internet connections cannot use Search's proxy.")
+        }
+        guard !Onion.shared.hasTabs else {
+            throw Refused(why: "Native apps are unavailable while Tor tabs are open because their internet connections cannot use Tor.")
+        }
+    }
+
+    @MainActor
+    static func onionChanged() {
+        _ = routeWatch
+        if Onion.shared.hasTabs { stopProtectedHosts() }
+    }
+
+    @MainActor
+    private static func stopProtectedHosts() {
+        for pipe in Array(Live.requests.values) { pipe.stopImmediately() }
+        for (pipe, port) in Array(Live.pipes.values) {
+            pipe.stopImmediately()
+            if !port.isDisconnected { port.disconnect() }
+        }
     }
 
     /// Where Chromium browsers look, per user and for the whole Mac.
@@ -66,9 +102,13 @@ enum ExtensionNative {
     }
 
     /// `runtime.sendNativeMessage`: run, send one, read one, stop.
+    @MainActor
     static func send(_ message: Any, to name: String, from extensionID: String) async throws -> Any? {
+        try allowHost()
         let program = try host(name, for: extensionID)
         let pipe = HostPipe(program: program, origin: "chrome-extension://\(extensionID)/")
+        Live.requests[ObjectIdentifier(pipe)] = pipe
+        defer { Live.requests[ObjectIdentifier(pipe)] = nil }
         try pipe.start()
         defer { pipe.stop() }
         return try await pipe.request(message)
@@ -78,6 +118,7 @@ enum ExtensionNative {
     /// end lets go.
     @MainActor
     static func connect(_ port: WKWebExtension.MessagePort, from extensionID: String) throws {
+        try allowHost()
         guard let name = port.applicationIdentifier else { throw Refused(why: "No host named") }
         let program = try host(name, for: extensionID)
         // A new port is often a worker starting over; the one before may
@@ -138,6 +179,7 @@ enum ExtensionNative {
 
     /// Hosts that are connected, held until they end.
     private enum Live {
+        @MainActor static var requests: [ObjectIdentifier: HostPipe] = [:]
         nonisolated(unsafe) static var pipes: [ObjectIdentifier: (pipe: HostPipe, port: WKWebExtension.MessagePort)] = [:]
         static func keep(_ pipe: HostPipe, for port: WKWebExtension.MessagePort) {
             pipes[ObjectIdentifier(pipe)] = (pipe, port)
@@ -233,6 +275,12 @@ final class HostPipe: @unchecked Sendable {
         lock.unlock()
         output.fileHandleForReading.readabilityHandler = nil
         if process.isRunning { end() } else { finish() }
+    }
+
+    /// A proxy privacy transition cannot leave a host its usual quit grace.
+    func stopImmediately() {
+        stop()
+        if process.isRunning, process.processIdentifier > 0 { kill(process.processIdentifier, SIGKILL) }
     }
 
     func write(_ message: Any) throws {

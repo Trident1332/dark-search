@@ -311,8 +311,14 @@ if [ -f "Search.provisionprofile" ]; then
   ENTITLEMENTS="Search.passkeys.entitlements"
   echo "passkeys: profile embedded"
 fi
+# The separately signed Tor engine carries its own minimal runtime and
+# licenses. Verify the pinned vendor archive before extracting any code.
+# Sign nested code first; --deep on the outer app would replace the helper's
+# signing options, breaking local identities without an Apple Team ID.
+python3 scripts/bundle-tor.py --arch "$ARCH" \
+  --output "$APP/Contents/Resources/Tor" --identity "${IDENTITY:--}"
 if [ -n "$IDENTITY" ]; then
-  codesign --force --deep --timestamp --options runtime \
+  codesign --force --timestamp --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$IDENTITY" "$APP"
   echo "signed as: $IDENTITY"
@@ -320,7 +326,7 @@ else
   # A build that cannot sign at all is not a build: `|| true` here let one
   # through as though it had finished, leaving a bundle that would not open.
   # set -e stops it now, with codesign's own words above.
-  codesign --force --deep --sign - "$APP"
+  codesign --force --sign - "$APP"
   [ "$STEP" != "app" ] && echo "no Developer ID certificate found — the DMG will only open on this Mac" >&2
 fi
 

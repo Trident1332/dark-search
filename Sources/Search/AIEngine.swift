@@ -527,9 +527,9 @@ enum AIDownload {
         let configuration = Proxy.session(URLSessionConfiguration.ephemeral)
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 3 * 3600
-        let session = URLSession(configuration: configuration, delegate: watcher, delegateQueue: nil)
+        let session = Proxy.makeSession(configuration: configuration, delegate: watcher, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
-        let (temporary, response) = try await session.download(from: url, delegate: watcher)
+        let (temporary, response) = try await session.proxyDownload(from: url, delegate: watcher)
         guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? false else {
             try? FileManager.default.removeItem(at: temporary)
             throw Failure("The download was refused.")
@@ -558,8 +558,15 @@ enum AIDownload {
     /// through its host's CDN. What arrives is judged by its hash, not by
     /// where it came from; nothing of yours is sent along.
     private final class Watcher: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if let error { Proxy.authenticationError(error, in: session) }
+        }
         let progress: @MainActor (Double) -> Void
         let size: Int64
+        func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            if !Proxy.authenticate(challenge, in: session, completionHandler: completionHandler) { completionHandler(.performDefaultHandling, nil) }
+        }
         init(progress: @escaping @MainActor (Double) -> Void, size: Int64) {
             self.progress = progress
             self.size = size

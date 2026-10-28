@@ -89,7 +89,7 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 300
-        let made = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        let made = Proxy.makeSession(configuration: configuration, delegate: self, delegateQueue: nil)
         keptSession = (revision, made)
         return made
     }
@@ -117,6 +117,15 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
 
     // MARK: - asking
 
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error { Proxy.authenticationError(error, in: session) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if !Proxy.authenticate(challenge, in: session, completionHandler: completionHandler) { completionHandler(.performDefaultHandling, nil) }
+    }
+
     /// The answer to `messages`, a piece at a time. `system` says what the
     /// model is for and how to treat the page (see AIPage.system).
     func stream(_ provider: AIProvider, model: String, system: String, messages: [AIMessage],
@@ -125,7 +134,7 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
             let task = Task {
                 do {
                     let request = try Self.request(provider, model: model, system: system, messages: messages, key: key)
-                    let (bytes, response) = try await session.bytes(for: request, delegate: self)
+                    let (bytes, response) = try await session.proxyBytes(for: request, delegate: self)
                     guard let http = response as? HTTPURLResponse else { throw AIError.unreadable }
                     guard (200..<300).contains(http.statusCode) else {
                         var body = Data()
@@ -236,7 +245,7 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         request.httpBody = try JSONSerialization.data(withJSONObject: ["code": code, "code_verifier": verifier, "code_challenge_method": "S256"])
         let data: Data, response: URLResponse
         do {
-            (data, response) = try await session.data(for: request, delegate: self)
+            (data, response) = try await session.proxyData(for: request, delegate: self)
         } catch let error as URLError {
             throw AIError.unreachable(Self.reason(error, .openRouter))
         }
@@ -259,7 +268,7 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         guard Self.allowed(url, for: provider) else { return [] }
         var request = URLRequest(url: url)
         request.timeoutInterval = 2
-        guard let (data, response) = try? await session.data(for: request, delegate: self),
+        guard let (data, response) = try? await session.proxyData(for: request, delegate: self),
               (response as? HTTPURLResponse)?.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return [] }

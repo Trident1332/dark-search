@@ -10,12 +10,15 @@ import Foundation
 /// the subdomain before it is dim and gives way first. A name in another
 /// alphabet is shown as itself only when it can't pass for a Latin one, as
 /// Safari does; otherwise as the punycode it really is (xn--80ak6aa92e.com,
-/// not "аррӏе.com" in Cyrillic letters). A page over plain http says it isn't
-/// secure, and a file on this Mac is named by its file name.
+/// not "аррӏе.com" in Cyrillic letters). Plain HTTP warns unless Tor protects
+/// its onion-service connection; a file on this Mac uses its file name.
 struct AtRest: Equatable {
     enum Kind: Equatable {
         case secure
-        /// Plain http, somewhere other than this Mac.
+        /// HTTP inside Tor's authenticated onion-service connection. This
+        /// is separate from a site's HTTPS certificate and its validation.
+        case onion
+        /// Plain HTTP outside this Mac or a Tor onion-service connection.
         case notSecure
         /// A file on this Mac: `name` is its file name.
         case file
@@ -41,8 +44,8 @@ struct AtRest: Equatable {
 
     /// What the tab you're on says at rest: everything with the setting on,
     /// only a warning with it off.
-    static func said(_ url: URL?, always: Bool) -> AtRest? {
-        guard let rest = of(url), always || rest.warns else { return nil }
+    static func said(_ url: URL?, always: Bool, tor: Bool = false) -> AtRest? {
+        guard let rest = of(url, tor: tor), always || rest.warns else { return nil }
         return rest
     }
 
@@ -53,11 +56,11 @@ struct AtRest: Equatable {
 
     /// The page on screen (`Tab.pageAddress`), at rest. Nil for a tab with
     /// nowhere to say: a new tab, about:blank.
-    static func of(_ url: URL?) -> AtRest? {
+    static func of(_ url: URL?, tor: Bool = false) -> AtRest? {
         guard let url else { return nil }
-        let key = url.absoluteString as NSString
+        let key = ("tor:\(tor ? 1 : 0)|" + url.absoluteString) as NSString
         if let kept = cache.object(forKey: key) { return kept.value }
-        let made = make(url)
+        let made = make(url, tor: tor)
         cache.setObject(Box(made), forKey: key)
         return made
     }
@@ -66,14 +69,14 @@ struct AtRest: Equatable {
         let value: AtRest?
         init(_ value: AtRest?) { self.value = value }
     }
-    /// Worked out once per address: a row asks on every update it gets.
+    /// Worked out once per address and route: a row asks on every update.
     nonisolated(unsafe) private static let cache: NSCache<NSString, Box> = {
         let cache = NSCache<NSString, Box>()
         cache.countLimit = 256
         return cache
     }()
 
-    static func make(_ url: URL, isSuffix: ((String) -> Bool)? = AtRest.systemSuffix) -> AtRest? {
+    static func make(_ url: URL, isSuffix: ((String) -> Bool)? = AtRest.systemSuffix, tor: Bool = false) -> AtRest? {
         let scheme = url.scheme?.lowercased() ?? ""
         switch scheme {
         case "http", "https":
@@ -102,7 +105,9 @@ struct AtRest: Equatable {
             let standard = scheme == "https" ? 443 : 80
             let tail = url.port.map { $0 == standard ? "" : ":\($0)" } ?? ""
             let local = Hosts.isLoopback(ascii)
-            return AtRest(kind: scheme == "https" || local ? .secure : .notSecure, lead: lead, name: name, tail: tail)
+            let onion = tor && scheme == "http" && OnionAddress.isOnionHost(raw) && OnionAddress.isValidHost(raw)
+            let kind: Kind = onion ? .onion : (scheme == "https" || local ? .secure : .notSecure)
+            return AtRest(kind: kind, lead: lead, name: name, tail: tail)
         case "file":
             let file = url.lastPathComponent
             return AtRest(kind: .file, lead: "", name: file.isEmpty || file == "/" ? "File" : file, tail: "")

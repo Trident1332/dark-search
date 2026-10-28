@@ -8,6 +8,9 @@ final class ExtensionOffscreen: NSObject, WKNavigationDelegate, WKUIDelegate, WK
     private static var documents: [String: ExtensionOffscreen] = [:]
 
     static func create(_ path: String, reasons: [String] = [], for context: WKWebExtensionContext) async throws {
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else {
+            throw ExtensionShims.Unsupported(what: "The proxy connection is not ready. Try again when Settings › Proxy shows it is connected.")
+        }
         let id = context.uniqueIdentifier
         guard documents[id] == nil else {
             throw ExtensionShims.Unsupported(what: "Only a single offscreen document may be created.")
@@ -154,10 +157,22 @@ final class ExtensionOffscreen: NSObject, WKNavigationDelegate, WKUIDelegate, WK
         extensionID = context.uniqueIdentifier
         self.url = url
         self.reasons = reasons
+        Proxy.shared.prepare(configuration)
         web = WKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600), configuration: configuration)
         super.init()
+        Proxy.shared.track(web)
+        NotificationCenter.default.addObserver(self, selector: #selector(proxyChanged), name: Proxy.contentChanged, object: nil)
         web.navigationDelegate = self
         web.uiDelegate = self
+    }
+
+    @objc private func proxyChanged() {
+        close(error: ExtensionShims.Unsupported(what: "The proxy connection changed. Create the offscreen document again to use the new connection and time zone."))
+    }
+
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if !Proxy.authenticate(challenge, completionHandler: completionHandler) { completionHandler(.performDefaultHandling, nil) }
     }
 
     private func load() async throws {
@@ -242,10 +257,12 @@ final class ExtensionOffscreen: NSObject, WKNavigationDelegate, WKUIDelegate, WK
     // Only its first page failing ends it: once it is there, a later
     // navigation that fails or is called off leaves it where it was.
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        Proxy.shared.failed(error, profile: Proxy.shared.profile(of: webView.configuration.websiteDataStore) ?? Profile.personalID, tab: nil)
         if !ready { close(error: error) }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        Proxy.shared.failed(error, profile: Proxy.shared.profile(of: webView.configuration.websiteDataStore) ?? Profile.personalID, tab: nil)
         if !ready { close(error: error) }
     }
 

@@ -668,7 +668,7 @@ private struct TabPill: View {
     private var speaker: Bool { !editing && !tab.loading && (tab.noisy || tab.muted) }
     /// Where the page is, said on the tab you're on (Settings › Tabs › Show
     /// the address on the tab you're on).
-    private var rest: AtRest? { live && !editing ? AtRest.said(tab.restAddress, always: prefs.showsAddress) : nil }
+    private var rest: AtRest? { live && !editing ? AtRest.said(tab.restAddress, always: prefs.showsAddress, tor: tab.usesTor) : nil }
     private var atRest: Bool { rest != nil }
 
     /// A pinned tab is a square, an edited one is a field, everything else is
@@ -827,9 +827,9 @@ private struct TabPill: View {
                 // The page is translated (Translate.swift).
                 TranslateSign(tab: tab, colour: colour)
                 // Pages take Settings › Proxy's route (ProxySettings.swift).
-                ProxySign(browser: browser, tab: tab, colour: colour)
+                ConnectionSign(browser: browser, tab: tab, colour: colour)
                 TitleAtRest(label: tab.label, rest: rest, shown: atRest, hovering: hovering,
-                            size: 12.5, colour: colour, roomy: false)
+                            size: 12.5, colour: colour, roomy: false, connectionHandled: tab.usesTor)
             }
 
             Spacer(minLength: 2)

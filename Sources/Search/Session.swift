@@ -36,6 +36,8 @@ enum Session {
         /// Silenced by hand from the tab's speaker or menu. False in sessions
         /// written before tabs could keep it.
         var muted: Bool = false
+        /// Keep a Tor tab on Tor even after it followed a clearnet redirect.
+        var tor: Bool = false
     }
 
     struct Shape: Codable {
@@ -141,7 +143,7 @@ enum Session {
 // key it isn't asked for. In extensions, so the memberwise initialisers stay.
 
 extension Session.Entry {
-    private enum Keys: String, CodingKey { case url, title, pin, name, home, groupID, pinID, touched, letGo, listed, muted }
+    private enum Keys: String, CodingKey { case url, title, pin, name, home, groupID, pinID, touched, letGo, listed, muted, tor }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -156,6 +158,7 @@ extension Session.Entry {
         letGo = try? c.decodeIfPresent(Date.self, forKey: .letGo)
         listed = try? c.decodeIfPresent(Bool.self, forKey: .listed)
         muted = (try? c.decodeIfPresent(Bool.self, forKey: .muted)) ?? false
+        tor = try c.decodeIfPresent(Bool.self, forKey: .tor) ?? false
     }
 
     func encode(to encoder: Encoder) throws {
@@ -171,6 +174,7 @@ extension Session.Entry {
         try c.encodeIfPresent(letGo, forKey: .letGo)
         try c.encodeIfPresent(listed, forKey: .listed)
         try c.encode(muted, forKey: .muted)
+        if tor { try c.encode(true, forKey: .tor) }
     }
 }
 

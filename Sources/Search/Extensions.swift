@@ -55,11 +55,15 @@ final class Extensions: NSObject, ObservableObject {
     /// Every page view built for a tab is handed the controller at birth —
     /// it can't be given one later.
     static func attach(_ configuration: WKWebViewConfiguration) {
+        guard !Onion.shared.owns(configuration.websiteDataStore) else {
+            configuration.webExtensionController = nil
+            return
+        }
         configuration.webExtensionController = shared.controller
         ExtensionWorkerRecovery.shared.attach(configuration.userContentController)
     }
 
-    let controller: WKWebExtensionController
+    private(set) var controller: WKWebExtensionController
     @Published private(set) var installed: [Installed] = []
     /// The loaded ones, by id.
     @Published private(set) var contexts: [String: WKWebExtensionContext] = [:]
@@ -88,14 +92,19 @@ final class Extensions: NSObject, ObservableObject {
     private var windows: [ObjectIdentifier: ExtensionWindow] = [:]
     /// Each window's subscriptions to its row and its tab in front.
     private var following: [ObjectIdentifier: [AnyCancellable]] = [:]
+    private var exposedWindows: Set<ObjectIdentifier> = []
     /// A tab gone from one window's row into another's, and where it was.
     private var inTransit: [Tab.ID: (window: ObjectIdentifier, orders: [String: [Tab.ID]])] = [:]
     /// Every extension switched on has loaded, at launch.
     private(set) var started = false
     /// Waiting for that (see whenStarted).
     private var onStarted: [() -> Void] = []
+    /// Same context instances waiting for a route refresh to load successfully.
+    private var proxyContexts: [String: WKWebExtensionContext] = [:]
     /// The window in front's adapter.
-    var window: ExtensionWindow? { browser.map(window(of:)) }
+    var window: ExtensionWindow? {
+        browser.flatMap { $0.tabs.contains(where: seen) ? window(of: $0) : nil }
+    }
 
     func window(of browser: Browser) -> ExtensionWindow {
         let key = ObjectIdentifier(browser)
@@ -188,6 +197,11 @@ final class Extensions: NSObject, ObservableObject {
         Extensions.pages = views.userContentController
         ExtensionWorkerRecovery.shared.attach(views.userContentController)
         ExtensionCapture.mockDevices(views.preferences)
+        Proxy.shared.prepare(views)
+        Self.prepareWorkerPreferences(in: views.websiteDataStore)
+        if let store = configuration.defaultWebsiteDataStore, store !== views.websiteDataStore {
+            Self.prepareWorkerPreferences(in: store)
+        }
         configuration.webViewConfiguration = views
         controller = WKWebExtensionController(configuration: configuration)
         super.init()
@@ -196,6 +210,78 @@ final class Extensions: NSObject, ObservableObject {
     }
 
     // MARK: - starting
+
+    /// Worker preferences do not come from an already open page's settings.
+    /// Give the store the same proxy privacy policy before a worker starts.
+    @discardableResult
+    private static func prepareWorkerPreferences(in store: WKWebsiteDataStore) -> Bool {
+        let selector = NSSelectorFromString("_setServiceWorkerOverridePreferences:")
+        guard store.responds(to: selector) else { return false }
+        let preferences = WKPreferences()
+        Proxy.shared.follow(preferences, store: store)
+        typealias Setter = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+        unsafeBitCast(store.method(for: selector), to: Setter.self)(store, selector, preferences)
+        return true
+    }
+
+    /// The controller keeps a copy of its configuration. Recreate it with
+    /// the new pool and reload the same contexts, preserving extension data.
+    /// A failed unload or reload leaves the caller's internet gate closed.
+    @discardableResult
+    func proxyChanged() -> Bool {
+        var saved = proxyContexts
+        for (id, context) in contexts { saved[id] = context }
+        saved = saved.filter { id, _ in installed.contains { $0.id == id && $0.enabled } }
+        proxyContexts = saved
+        for (id, context) in Array(contexts) {
+            guard unload(id, replacingContext: false) else {
+                contexts[id] = context
+                return false
+            }
+        }
+
+        let configuration = controller.configuration
+        let views = configuration.webViewConfiguration ?? WKWebViewConfiguration()
+        views.webExtensionController = nil
+        Proxy.shared.prepare(views)
+        guard Self.prepareWorkerPreferences(in: views.websiteDataStore) else { return false }
+        if let store = configuration.defaultWebsiteDataStore, store !== views.websiteDataStore {
+            guard Self.prepareWorkerPreferences(in: store) else { return false }
+        }
+        configuration.webViewConfiguration = views
+        controller.delegate = nil
+        controller = WKWebExtensionController(configuration: configuration)
+        controller.delegate = self
+        Extensions.pages = views.userContentController
+        ExtensionWorkerRecovery.shared.attach(views.userContentController)
+
+        let browsers = Browsers.all.filter { following[ObjectIdentifier($0)] != nil }
+        following.removeAll()
+        exposedWindows.removeAll()
+        orders.removeAll()
+        watching.removeAll()
+        inTransit.removeAll()
+        for browser in browsers { attach(browser) }
+        var restored = true
+        for (id, context) in saved.sorted(by: { $0.key < $1.key }) {
+            let undoRecovery = ExtensionWorkerRecovery.shared.register(context)
+            do {
+                loadedBefore.insert(id)
+                try controller.load(context)
+                contexts[id] = context
+                proxyContexts[id] = nil
+                watch(context)
+                ShortcutStore.shared.adopt(context, id: id)
+            } catch {
+                undoRecovery()
+                restored = false
+                noteError("couldn't apply proxy settings to the extension: \(error.localizedDescription)", for: id)
+            }
+        }
+        for browser in browsers { follow(browser.tabs, in: browser) }
+        actionsChanged += 1
+        return restored
+    }
 
     func start(for browser: Browser) {
         attach(browser)
@@ -294,6 +380,9 @@ final class Extensions: NSObject, ObservableObject {
     // MARK: - the row, as WebKit sees it
 
     func adapter(for tab: Tab) -> ExtensionTab {
+        // A stale or direct caller receives a sealed adapter, never one
+        // registered with the controller or kept for future tab lookups.
+        if tab.usesTor { return ExtensionTab(tab: tab, owner: self) }
         if let known = adapters[tab.id] { return known }
         let made = ExtensionTab(tab: tab, owner: self)
         adapters[tab.id] = made
@@ -304,7 +393,7 @@ final class Extensions: NSObject, ObservableObject {
     /// let in (Settings › Extensions). Even to one you have, only the ones
     /// made since some extension was let in carry the controller; one made
     /// before has no page an extension could reach.
-    private func seen(_ tab: Tab) -> Bool { !tab.shy || tab.carriesExtensions }
+    private func seen(_ tab: Tab) -> Bool { !tab.usesTor && (!tab.shy || tab.carriesExtensions) }
     func seen(_ tab: Tab, for context: WKWebExtensionContext) -> Bool {
         seen(tab) && (!tab.shy || context.hasAccessToPrivateData)
     }
@@ -372,7 +461,6 @@ final class Extensions: NSObject, ObservableObject {
     func attach(_ browser: Browser) {
         let key = ObjectIdentifier(browser)
         guard following[key] == nil else { return }
-        controller.didOpenWindow(window(of: browser))
         following[key] = [
             browser.$tabs
                 .receive(on: DispatchQueue.main)
@@ -389,6 +477,7 @@ final class Extensions: NSObject, ObservableObject {
                     activated(from: pair.0, to: pair.1, in: browser)
                 },
         ]
+        follow(browser.tabs, in: browser)
     }
 
     /// Its window closed for good: its tabs, then the window, gone for WebKit.
@@ -404,13 +493,32 @@ final class Extensions: NSObject, ObservableObject {
             adapters[id] = nil
             watching[id] = nil
         }
-        if let window = windows.removeValue(forKey: key) { controller.didCloseWindow(window) }
+        if let window = windows.removeValue(forKey: key), exposedWindows.remove(key) != nil { controller.didCloseWindow(window) }
     }
 
     /// A window came to the front (windows.onFocusChanged).
     func focused(_ browser: Browser) {
         guard following[ObjectIdentifier(browser)] != nil else { return }
-        controller.didFocusWindow(window(of: browser))
+        controller.didFocusWindow(exposedWindows.contains(ObjectIdentifier(browser)) ? window(of: browser) : nil)
+    }
+
+    /// Called synchronously before a converted tab publishes an onion URL.
+    /// It is removed even when pins share the tab between several windows.
+    func onionChanged(_ tab: Tab) {
+        guard tab.usesTor else { return }
+        if let adapter = adapters.removeValue(forKey: tab.id) {
+            for context in contexts.values where context.openTabs.contains(adapter) {
+                context.didCloseTab(adapter, windowIsClosing: false)
+            }
+        }
+        watching[tab.id] = nil
+        inTransit[tab.id] = nil
+        for key in Array(orders.keys) { orders[key]?.removeAll { $0 == tab.id } }
+        for browser in Browsers.all where browser.tabs.contains(where: { $0.id == tab.id }) {
+            follow(browser.tabs, in: browser)
+        }
+        ExtensionNative.onionChanged()
+        actionsChanged += 1
     }
 
     private func follow(_ tabs: [Tab], in browser: Browser) {
@@ -418,6 +526,7 @@ final class Extensions: NSObject, ObservableObject {
         let order = orders[key] ?? []
         let oldOrders = visibleOrders(order)
         let now = tabs.filter(seen)
+        if !now.isEmpty, exposedWindows.insert(key).inserted { controller.didOpenWindow(window(of: browser)) }
         let ids = now.map(\.id)
         let gone = order.filter { !ids.contains($0) }
         for id in gone {
@@ -469,6 +578,7 @@ final class Extensions: NSObject, ObservableObject {
             }
         }
         orders[key] = ids
+        if now.isEmpty, exposedWindows.remove(key) != nil, let window = windows[key] { controller.didCloseWindow(window) }
     }
 
     private func watch(_ tab: Tab) {
@@ -552,6 +662,10 @@ final class Extensions: NSObject, ObservableObject {
             Extensions.fence(context)
             Extensions.watchTouches()
             context.hasAccessToPrivateData = Extensions.mayGoPrivate(context)
+            if Proxy.shared.waiting || Proxy.shared.changingContent {
+                proxyContexts[item.id] = context
+                return true
+            }
             let undoRecovery = ExtensionWorkerRecovery.shared.register(context)
             do { try controller.load(context) }
             catch { undoRecovery(); throw error }
@@ -785,7 +899,8 @@ final class Extensions: NSObject, ObservableObject {
 
     @discardableResult
     func revive(_ id: String, because reason: String) -> Bool {
-        guard let item = installed.first(where: { $0.id == id }), item.enabled,
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent,
+              let item = installed.first(where: { $0.id == id }), item.enabled,
               let context = contexts[id],
               Date().timeIntervalSince(revived[id] ?? .distantPast) > 60 else { return false }
         let popup = ExtensionPopup.shared.extensionID == id ? ExtensionPopup.shared.view?.url : nil
@@ -1122,7 +1237,7 @@ final class Extensions: NSObject, ObservableObject {
             URLQueryItem(name: "x", value: "id=\(item.id)&v=\(item.version)&uc"),
         ]
         guard let url = parts.url,
-              let (data, _) = try? await Proxy.fetches.data(from: url),
+              let (data, _) = try? await Proxy.fetches.proxyData(from: url),
               let xml = String(data: data, encoding: .utf8),
               // The answer is the <updatecheck> element alone: status="ok"
               // with a version when there is a newer one, "noupdate" when
@@ -1544,6 +1659,10 @@ final class Extensions: NSObject, ObservableObject {
     }
 
     func press(_ id: String) {
+        guard browser?.active?.usesTor != true else {
+            browser?.announce("Extensions are unavailable in Tor tabs")
+            return
+        }
         guard let context = contexts[id], !ExtensionPopup.shared.closes(id) else { return }
         Extensions.clicked[id] = Date()
         Extensions.pressed[id] = Date()
@@ -1584,6 +1703,7 @@ final class Extensions: NSObject, ObservableObject {
 
     /// A keystroke an extension registered for.
     func take(_ event: NSEvent) -> Bool {
+        guard browser?.active?.usesTor != true else { return false }
         for context in contexts.values where context.command(for: event) != nil {
             return context.performCommand(for: event)
         }
@@ -1597,11 +1717,12 @@ final class Extensions: NSObject, ObservableObject {
 extension Extensions: WKWebExtensionControllerDelegate {
     /// Every window, oldest first — the order Security's shim counts on.
     func webExtensionController(_ controller: WKWebExtensionController, openWindowsFor extensionContext: WKWebExtensionContext) -> [any WKWebExtensionWindow] {
-        Browsers.all.map(window(of:))
+        Browsers.all.filter { !visibleTabs(of: $0, for: extensionContext).isEmpty }.map(window(of:))
     }
 
     func webExtensionController(_ controller: WKWebExtensionController, focusedWindowFor extensionContext: WKWebExtensionContext) -> (any WKWebExtensionWindow)? {
-        window
+        guard let browser, !visibleTabs(of: browser, for: extensionContext).isEmpty else { return nil }
+        return window(of: browser)
     }
 
     /// Where an extension may send a tab. Not to javascript:, which would run
@@ -1777,6 +1898,11 @@ extension Extensions: WKWebExtensionControllerDelegate {
     // a worker woken inside the same extension context. No timer or JS probe.
     @objc(_webExtensionController:didCreateBackgroundWebView:forExtensionContext:)
     func createdBackground(_ controller: WKWebExtensionController, webView: WKWebView, context: WKWebExtensionContext) {
+        Proxy.shared.track(webView)
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else {
+            ProxyTimeZone.close(webView)
+            return
+        }
         ExtensionWorkerRecovery.shared.created(webView, in: context)
     }
 
@@ -1850,6 +1976,7 @@ final class ExtensionTab: NSObject, WKWebExtensionTab {
     private var browser: Browser? { tab.flatMap(owner.browser(of:)) }
 
     func window(for context: WKWebExtensionContext) -> (any WKWebExtensionWindow)? {
+        guard tab?.usesTor != true else { return nil }
         // WebKit asks a closed tab for its window after it has left the row,
         // and with none, onRemoved said window -1 and the shim dropped it.
         if let browser { lastWindow = owner.window(of: browser) }
@@ -1872,7 +1999,7 @@ final class ExtensionTab: NSObject, WKWebExtensionTab {
     /// included, and refused anything done to it. WebKit takes a tab's
     /// privacy from its window, and here a window holds both kinds.
     private func hidden(_ context: WKWebExtensionContext) -> Bool {
-        tab?.shy == true && !context.hasAccessToPrivateData
+        tab?.usesTor == true || (tab?.shy == true && !context.hasAccessToPrivateData)
     }
 
     private func checkAccess(_ context: WKWebExtensionContext) throws {
@@ -1884,12 +2011,12 @@ final class ExtensionTab: NSObject, WKWebExtensionTab {
     func webView(for context: WKWebExtensionContext) -> WKWebView? { sealed(context) ? nil : tab?.built }
     func title(for context: WKWebExtensionContext) -> String? { hidden(context) ? nil : tab?.title }
     func url(for context: WKWebExtensionContext) -> URL? { sealed(context) ? nil : tab?.address }
-    func isLoadingComplete(for context: WKWebExtensionContext) -> Bool { !(tab?.loading ?? false) }
-    func isSelected(for context: WKWebExtensionContext) -> Bool { tab?.id == browser?.activeID }
-    func isPinned(for context: WKWebExtensionContext) -> Bool { tab?.pin != nil }
-    func isPlayingAudio(for context: WKWebExtensionContext) -> Bool { tab?.noisy ?? false }
-    func zoomFactor(for context: WKWebExtensionContext) -> Double { Double(tab?.built?.pageZoom ?? 1) }
-    func size(for context: WKWebExtensionContext) -> CGSize { tab?.built?.bounds.size ?? .zero }
+    func isLoadingComplete(for context: WKWebExtensionContext) -> Bool { !hidden(context) && !(tab?.loading ?? false) }
+    func isSelected(for context: WKWebExtensionContext) -> Bool { !hidden(context) && tab?.id == browser?.activeID }
+    func isPinned(for context: WKWebExtensionContext) -> Bool { !hidden(context) && tab?.pin != nil }
+    func isPlayingAudio(for context: WKWebExtensionContext) -> Bool { !hidden(context) && (tab?.noisy ?? false) }
+    func zoomFactor(for context: WKWebExtensionContext) -> Double { hidden(context) ? 1 : Double(tab?.built?.pageZoom ?? 1) }
+    func size(for context: WKWebExtensionContext) -> CGSize { hidden(context) ? .zero : tab?.built?.bounds.size ?? .zero }
     func shouldGrantPermissionsOnUserGesture(for context: WKWebExtensionContext) -> Bool { !hidden(context) }
 
     func setPinned(_ pinned: Bool, for context: WKWebExtensionContext) async throws {
@@ -1955,6 +2082,9 @@ final class ExtensionWindow: NSObject, WKWebExtensionWindow {
     }
 
     private var nsWindow: NSWindow? { browser?.window }
+    private func visible(_ context: WKWebExtensionContext) -> Bool {
+        browser.map { !owner.visibleTabs(of: $0, for: context).isEmpty } ?? false
+    }
 
     func tabs(for context: WKWebExtensionContext) -> [any WKWebExtensionTab] {
         guard let browser else { return [] }
@@ -1965,33 +2095,36 @@ final class ExtensionWindow: NSObject, WKWebExtensionWindow {
         browser.flatMap { owner.activeAdapter(of: $0, for: context) }
     }
     func windowType(for context: WKWebExtensionContext) -> WKWebExtension.WindowType {
-        browser?.isPopup == true ? .popup : .normal
+        visible(context) && browser?.isPopup == true ? .popup : .normal
     }
     /// A window here holds private tabs and others, and WebKit would take
     /// this answer for all of them. The shim marks the private ones instead
     /// (`privacy` in ExtensionShims), until WebKit can be told per tab. A
     /// website's pop-up window holds its one page, so it can say.
     func isPrivate(for context: WKWebExtensionContext) -> Bool {
-        browser?.websitePopup == true && browser?.active?.shy == true
+        visible(context) && browser?.websitePopup == true && browser?.active?.shy == true
     }
 
     func windowState(for context: WKWebExtensionContext) -> WKWebExtension.WindowState {
-        guard let window = nsWindow else { return .normal }
+        guard visible(context), let window = nsWindow else { return .normal }
         if window.isMiniaturized { return .minimized }
         if window.styleMask.contains(.fullScreen) { return .fullscreen }
         return window.isZoomed ? .maximized : .normal
     }
 
-    func frame(for context: WKWebExtensionContext) -> CGRect { nsWindow?.frame ?? .null }
-    func screenFrame(for context: WKWebExtensionContext) -> CGRect { nsWindow?.screen?.frame ?? NSScreen.main?.frame ?? .null }
+    func frame(for context: WKWebExtensionContext) -> CGRect { visible(context) ? nsWindow?.frame ?? .null : .null }
+    func screenFrame(for context: WKWebExtensionContext) -> CGRect { visible(context) ? nsWindow?.screen?.frame ?? NSScreen.main?.frame ?? .null : .null }
 
     func focus(for context: WKWebExtensionContext) async throws {
-        guard let browser else { return }
+        guard visible(context), let browser else { return }
         Browsers.show(browser)
     }
 
     /// windows.remove.
     func close(for context: WKWebExtensionContext) async throws {
+        guard browser?.tabs.contains(where: \.usesTor) != true else {
+            throw NSError(domain: "Search", code: 1, userInfo: [NSLocalizedDescriptionKey: "The window contains tabs this extension cannot access."])
+        }
         guard context.hasAccessToPrivateData || browser?.tabs.contains(where: { $0.shy }) != true else {
             throw NSError(domain: "Search", code: 1, userInfo: [NSLocalizedDescriptionKey: "The window contains private tabs this extension cannot access."])
         }
@@ -2001,7 +2134,7 @@ final class ExtensionWindow: NSObject, WKWebExtensionWindow {
     /// windows.update with a position or size; unset parts come as NaN and
     /// stay as they are, and the window never goes below its smallest size.
     func setFrame(_ frame: CGRect, for context: WKWebExtensionContext) async throws {
-        guard let window = nsWindow else { return }
+        guard visible(context), let window = nsWindow else { return }
         let now = window.frame
         func or(_ value: CGFloat, _ current: CGFloat) -> CGFloat { value.isFinite ? value : current }
         let size = NSSize(width: max(window.minSize.width, or(frame.size.width, now.width)),
@@ -2323,8 +2456,10 @@ private final class HiddenPage: NSObject, WKNavigationDelegate {
     private var loaded: CheckedContinuation<Bool, Never>?
 
     init(_ configuration: WKWebViewConfiguration) {
+        Proxy.shared.prepare(configuration)
         web = WKWebView(frame: .zero, configuration: configuration)
         super.init()
+        Proxy.shared.track(web)
         web.navigationDelegate = self
     }
 

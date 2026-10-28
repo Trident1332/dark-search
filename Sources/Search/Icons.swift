@@ -338,7 +338,7 @@ final class Favicons {
     /// with it from script (GitHub), rather than declaring both, would
     /// otherwise have one look's icon overwrite the other's (#423).
     func fetch(for tab: Tab, changed: Bool = false) {
-        guard let url = tab.address, let site = Favicons.site(url),
+        guard !tab.usesTor, let url = tab.address, !OnionAddress.isOnion(url), let site = Favicons.site(url),
               url.scheme?.hasPrefix("http") == true
         else { return }
         load()
@@ -355,12 +355,17 @@ final class Favicons {
         guard !busy.contains(busyKey), changed || !missing.contains(busyKey) else { return }
         busy.insert(busyKey)
 
-        tab.web.evaluateJavaScript(Favicons.probe) { [weak self, weak tab] answer, _ in
+        let web = tab.web
+        web.evaluateJavaScript(Favicons.probe) { [weak self, weak tab, weak web] answer, _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                guard let tab, let web, tab.built === web, tab.address == url, !tab.usesTor else {
+                    self.busy.remove(busyKey)
+                    return
+                }
                 let declared = (answer as? [[String: String]]) ?? []
                 let candidates = Favicons.rank(declared, page: url, dark: dark)
-                let shy = tab?.shy ?? false
+                let shy = tab.shy
                 Task { await self.download(candidates, site: site, page: page, dark: dark, shy: shy) }
             }
         }
@@ -381,7 +386,7 @@ final class Favicons {
     private func download(_ candidates: [URL], site: String, page: String, dark: Bool, shy: Bool, again: Bool = true) async {
         let busyKey = site + page
         defer { busy.remove(busyKey) }
-        let session = URLSession(configuration: {
+        let session = Proxy.makeSession(configuration: {
             // Through Settings › Proxy's route when pages take it: an icon
             // fetched directly would name the site to the network.
             let config = Proxy.session(URLSessionConfiguration.ephemeral)
@@ -390,7 +395,7 @@ final class Favicons {
         }())
         var unanswered: [URL] = []
         var asked = false
-        for candidate in candidates where !failed.contains(candidate) {
+        for candidate in candidates where !failed.contains(candidate) && !OnionAddress.isOnion(candidate) {
             if let until = unreachable[candidate], until > Date() { continue }
             let ident = Favicons.ident(candidate)
             // Another page of the site wears the same file, and it is fresh.
@@ -400,7 +405,7 @@ final class Favicons {
             }
             asked = true
             // No answer at all is the network, not the site.
-            guard let (data, response) = try? await session.data(from: candidate) else {
+            guard let (data, response) = try? await session.proxyData(from: candidate) else {
                 unanswered.append(candidate)
                 continue
             }
@@ -729,6 +734,13 @@ final class SVGIcons: NSObject, WKNavigationDelegate {
     private var idle: DispatchWorkItem?
     private var running = 0
 
+    private override init() {
+        super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(proxyChanged), name: Proxy.contentChanged, object: nil)
+    }
+
+    @objc private func proxyChanged() { letGo() }
+
     /// An SVG by what the server says it is, or by its first bytes.
     nonisolated static func looksLikeSVG(_ data: Data, response: URLResponse?) -> Bool {
         guard data.count <= limit else { return false }
@@ -785,6 +797,7 @@ final class SVGIcons: NSObject, WKNavigationDelegate {
     """
 
     private func view() async -> WKWebView? {
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return nil }
         if let web, loaded { return web }
         if web == nil {
             let config = WKWebViewConfiguration()
@@ -795,7 +808,9 @@ final class SVGIcons: NSObject, WKNavigationDelegate {
             config.defaultWebpagePreferences.allowsContentJavaScript = false
             config.applicationNameForUserAgent = Web.userAgentName
             config.mediaTypesRequiringUserActionForPlayback = .all
+            Proxy.shared.prepare(config)
             let made = WKWebView(frame: NSRect(x: 0, y: 0, width: 16, height: 16), configuration: config)
+            Proxy.shared.track(made)
             made.navigationDelegate = self
             web = made
             loaded = false

@@ -26,7 +26,7 @@ enum ExtensionSocket {
         // Made again when Settings › Proxy's route changes (see Proxy.session).
         let revision = Proxy.routesRevision
         if let kept, kept.revision == revision { return kept.session }
-        let made = URLSession(configuration: Proxy.session(.default), delegate: nil, delegateQueue: .main)
+        let made = Proxy.makeSession(configuration: .default, delegateQueue: .main)
         kept = (revision, made)
         return made
     }
@@ -43,6 +43,10 @@ enum ExtensionSocket {
 
     @MainActor
     final class Connection: NSObject, URLSessionWebSocketDelegate {
+        nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                                   completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            if !Proxy.authenticate(challenge, in: session, completionHandler: completionHandler) { completionHandler(.performDefaultHandling, nil) }
+        }
         private let port: WKWebExtension.MessagePort
         private let origin: String
         private var task: URLSessionWebSocketTask?
@@ -158,6 +162,7 @@ enum ExtensionSocket {
         }
 
         nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if let error { Proxy.authenticationError(error, in: session) }
             MainActor.assumeIsolated {
                 guard !ended else { return }
                 if error != nil {

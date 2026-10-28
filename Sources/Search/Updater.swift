@@ -360,7 +360,7 @@ final class Updater: ObservableObject {
         // plain one older builds read, holding the same file with its code
         // signature (build.sh). Only what comes out of it, checked, is read:
         // a feed a server or a hijacked answer made up is no feed at all.
-        let packed = try await get(feed.appendingPathExtension("zip"), limit: 1 << 20)
+        let packed = try await get(feed.appendingPathExtension("zip"), limit: UpdateFeedArchive.compressedLimit)
         let data = try await Task.detached(priority: .utility, operation: { try Updater.verifiedFeed(packed) }).value
         return try release(from: data)
     }
@@ -405,14 +405,32 @@ final class Updater: ObservableObject {
     }
 
     private static func get(_ url: URL, limit: Int) async throws -> Data {
+        let configuration = Proxy.session(URLSessionConfiguration.ephemeral)
+        configuration.timeoutIntervalForRequest = 12
+        configuration.timeoutIntervalForResource = 15
+        let session = Proxy.makeSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        return try await downloadFeed(url, limit: limit, session: session)
+    }
+
+    /// Enforce the cap while receiving the response, including responses
+    /// with no Content-Length. Stop the underlying request on every exit.
+    nonisolated static func downloadFeed(_ url: URL, limit: Int, session: URLSession) async throws -> Data {
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 12
-        let (data, response) = try await Proxy.fetches.data(for: request)
+        let (bytes, response) = try await session.proxyBytes(for: request)
+        defer { bytes.task.cancel() }
         guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? false else {
             throw FeedFailure.response
         }
-        guard data.count <= limit else { throw FeedFailure.tooLarge }
+        guard limit > 0, response.expectedContentLength <= limit else { throw FeedFailure.tooLarge }
+        var data = Data()
+        data.reserveCapacity(min(limit, max(0, Int(response.expectedContentLength))))
+        for try await byte in bytes {
+            guard data.count < limit else { throw FeedFailure.tooLarge }
+            data.append(byte)
+        }
         return data
     }
 
@@ -436,19 +454,24 @@ final class Updater: ObservableObject {
     /// the release key, under the feed's own identifier. No new key to keep:
     /// the one that signs the app signs its feed.
     nonisolated static func opened(_ packed: Data) -> Data? {
+        guard let bounded = try? UpdateFeedArchive.normalized(packed) else { return nil }
         let files = FileManager.default
         let folder = files.temporaryDirectory.appendingPathComponent("search-feed-\(UUID().uuidString)", isDirectory: true)
         guard (try? files.createDirectory(at: folder, withIntermediateDirectories: true)) != nil else { return nil }
         defer { try? files.removeItem(at: folder) }
         let zip = folder.appendingPathComponent("appcast.json.zip")
         let out = folder.appendingPathComponent("out", isDirectory: true)
-        guard (try? packed.write(to: zip)) != nil, (try? Swap.unzip(zip, into: out)) != nil else { return nil }
+        guard (try? bounded.write(to: zip)) != nil, (try? Swap.unzip(zip, into: out)) != nil else { return nil }
         let file = out.appendingPathComponent("appcast.json")
         // The file itself, not a link to one somewhere else.
-        guard let kind = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+        guard let kind = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
               kind.isRegularFile == true, kind.isSymbolicLink != true,
-              let data = try? Data(contentsOf: file), data.count <= 1 << 20
+              let size = kind.fileSize, size <= UpdateFeedArchive.fileLimit,
+              let handle = try? FileHandle(forReadingFrom: file)
         else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: UpdateFeedArchive.fileLimit + 1),
+              data.count <= UpdateFeedArchive.fileLimit else { return nil }
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(file as CFURL, [], &code) == errSecSuccess, let code,
               let requirement = Swap.signedBy(signer, identifier: feedIdentifier),
@@ -528,7 +551,7 @@ private enum Swap {
         var request = URLRequest(url: url)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 60
-        let (got, response) = try await Proxy.fetches.download(for: request)
+        let (got, response) = try await Proxy.fetches.proxyDownload(for: request)
         guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true else {
             throw Refused.download
         }

@@ -3858,13 +3858,13 @@ enum ExtensionShims {
     /// The groups an extension is shown: never one without a tab. The same
     /// with groups off in Settings, where they are kept without a heading
     /// in the column (see the tab groups cases in `run`).
-    private static func listedGroups(_ browser: Browser) -> [TabGroup] {
-        browser.tabGroups.filter { !browser.tabs(in: $0.id).isEmpty }
+    private static func listedGroups(_ browser: Browser, context: WKWebExtensionContext, owner: Extensions) -> [TabGroup] {
+        browser.tabGroups.filter { group in browser.tabs(in: group.id).contains { owner.seen($0, for: context) } }
     }
 
-    private static func listedGroup(_ number: Any?, in browser: Browser) throws -> TabGroup {
+    private static func listedGroup(_ number: Any?, in browser: Browser, context: WKWebExtensionContext, owner: Extensions) throws -> TabGroup {
         guard let number = number as? Int,
-              let group = listedGroups(browser).first(where: { TabGroup.number($0.id) == number })
+              let group = listedGroups(browser, context: context, owner: owner).first(where: { TabGroup.number($0.id) == number })
         else { throw Unsupported(what: "No group with id: \(number.map { "\($0)" } ?? "none").") }
         return group
     }
@@ -4064,18 +4064,19 @@ enum ExtensionShims {
             let end = (spec["endTime"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) } ?? .distantFuture
             let limit = spec["maxResults"] as? Int ?? 100
             return browser.history.everything(matching: text)
-                .filter { $0.last >= start && $0.last <= end }
+                .filter { !OnionAddress.isOnion($0.url) && $0.last >= start && $0.last <= end }
                 .sorted { $0.last > $1.last }
                 .prefix(limit)
                 .map(visit)
         case "history.getVisits":
             let url = (first as? [String: Any])?["url"] as? String ?? ""
-            return browser.history.everything().filter { $0.url.absoluteString == url }.map { trace in
+            return browser.history.everything().filter { !OnionAddress.isOnion($0.url) && $0.url.absoluteString == url }.map { trace in
                 ["id": trace.key, "visitId": "1", "visitTime": trace.last.timeIntervalSince1970 * 1000,
                  "referringVisitId": "0", "transition": "link"]
             }
         case "history.addUrl":
             if let url = ((first as? [String: Any])?["url"] as? String).flatMap(URL.init(string:)) {
+                guard !OnionAddress.isOnion(url) else { throw Unsupported(what: "Onion visits are not added to shared history") }
                 browser.history.record(url, title: "")
             }
             return nil
@@ -4103,6 +4104,7 @@ enum ExtensionShims {
         case "downloads.download":
             let spec = first as? [String: Any] ?? [:]
             guard let url = (spec["url"] as? String).flatMap(URL.init(string:)) else { throw Unsupported(what: "No url to download") }
+            guard !OnionAddress.isOnion(url) else { throw Unsupported(what: "Download onion resources from their Tor tab") }
             guard let web = ExtensionShims.downloadPage(active: browser.active, tabs: browser.tabs) else {
                 throw Unsupported(what: "No page to download through")
             }
@@ -4189,6 +4191,7 @@ enum ExtensionShims {
             }
             return nil
         case "sidePanel.open":
+            guard owner.browser?.active?.usesTor != true else { throw Unsupported(what: "Extensions are unavailable in Tor tabs") }
             // For a tab, its own page when it was given one, and the panel
             // goes with that tab; otherwise the window's.
             let tab = (first as? [String: Any])?["tabId"] as? Int
@@ -4640,14 +4643,16 @@ enum ExtensionShims {
         // MARK: browsing data
         case "browsingData.settings":
             return ["options": ["since": 0], "dataToRemove": [:], "dataRemovalPermitted": [
-                "cache": true, "cookies": true, "history": true, "downloads": true, "localStorage": true,
+                "cache": true, "cookies": true, "history": true, "downloads": false, "localStorage": true,
                 "indexedDB": true, "serviceWorkers": true, "cacheStorage": true, "fileSystems": true, "webSQL": true,
             ]]
         case let api where api.hasPrefix("browsingData."):
-            let options = first as? [String: Any] ?? [:]
+            guard let options = first as? [String: Any] else {
+                throw Unsupported(what: "browsingData options must be an object")
+            }
             let what: [String: Bool]
             if api == "browsingData.remove" {
-                what = (args.dropFirst().first as? [String: Any] ?? [:]).compactMapValues { $0 as? Bool }
+                what = try ExtensionBrowsingData.booleans(args.dropFirst().first, named: "browsingData data types")
             } else {
                 let key = String(api.dropFirst("browsingData.remove".count))
                 what = [key.prefix(1).lowercased() + key.dropFirst(): true]
@@ -4657,8 +4662,8 @@ enum ExtensionShims {
 
         // MARK: sessions — the tabs you closed
         case "sessions.getRecentlyClosed":
-            let limit = (first as? [String: Any])?["maxResults"] as? Int ?? 25
-            return browser.ghosts.reversed().prefix(limit).map { ghost in
+            let limit = max(0, (first as? [String: Any])?["maxResults"] as? Int ?? 25)
+            return browser.ghosts.reversed().filter { !$0.tor && !OnionAddress.isOnion($0.url) }.prefix(limit).map { ghost in
                 ["lastModified": Int(Date().timeIntervalSince1970),
                  "tab": ["sessionId": ghost.id.uuidString, "url": ghost.url.absoluteString, "title": ghost.title,
                          "index": ghost.index, "windowId": 1, "active": false, "pinned": false, "highlighted": false,
@@ -4667,8 +4672,19 @@ enum ExtensionShims {
         case "sessions.getDevices":
             return []
         case "sessions.restore":
-            let ghost = (first as? String).flatMap { key in browser.ghosts.first { $0.id.uuidString == key } } ?? browser.ghosts.last
-            guard let ghost else { throw Unsupported(what: "Nothing to restore") }
+            let visible = browser.ghosts.filter { !$0.tor && !OnionAddress.isOnion($0.url) }
+            let selected: Browser.Ghost?
+            if let first, !(first is NSNull), !(first is String) {
+                throw Unsupported(what: "Invalid session id")
+            }
+            if let key = first as? String {
+                selected = visible.first { $0.id.uuidString == key }
+            } else { selected = visible.last }
+            guard var ghost = selected else { throw Unsupported(what: "No accessible session to restore") }
+            // Extension session IDs restore the chosen ordinary tab only.
+            // Native undo may reopen a batch, which can also contain Tor
+            // tabs that this extension must neither see nor restore.
+            ghost.batch = nil
             browser.reopen(ghost)
             return ["lastModified": Int(Date().timeIntervalSince1970),
                     "tab": ["url": ghost.url.absoluteString, "title": ghost.title, "index": ghost.index, "windowId": 1]]
@@ -4728,15 +4744,15 @@ enum ExtensionShims {
             }
         case "tabGroups.query":
             let spec = first as? [String: Any] ?? [:]
-            return listedGroups(browser).filter { group in
+            return listedGroups(browser, context: context, owner: owner).filter { group in
                 (spec["title"] as? String).map { $0 == group.name } ?? true
                     && (spec["collapsed"] as? Bool).map { $0 == group.collapsed } ?? true
                     && (spec["color"] as? String).map { $0 == "grey" } ?? true
             }.map(chromeGroup)
         case "tabGroups.get":
-            return chromeGroup(try listedGroup(first, in: browser))
+            return chromeGroup(try listedGroup(first, in: browser, context: context, owner: owner))
         case "tabGroups.update":
-            let group = try listedGroup(first, in: browser)
+            let group = try listedGroup(first, in: browser, context: context, owner: owner)
             let props = args.dropFirst().first as? [String: Any] ?? [:]
             if let title = props["title"] as? String { browser.renameTabGroup(group.id, to: title) }
             if let collapsed = props["collapsed"] as? Bool, collapsed != group.collapsed { browser.toggleTabGroup(group.id) }
@@ -4757,7 +4773,7 @@ enum ExtensionShims {
             }
             let target: UUID
             if let number = args.dropFirst().first as? Int, number != -1 {
-                target = try listedGroup(number, in: browser).id
+                target = try listedGroup(number, in: browser, context: context, owner: owner).id
             } else {
                 // A new group, as its menu makes one, without its name to type.
                 target = browser.addTabGroup(containing: tabs[0])
@@ -4883,7 +4899,7 @@ enum ExtensionShims {
     /// with the sign-ins of the page it's made through, and a private tab's
     /// are its own, whatever the extension may see.
     static func downloadPage(active: Tab?, tabs: [Tab]) -> WKWebView? {
-        ([active].compactMap { $0 } + tabs).filter { !$0.shy }.lazy.compactMap(\.built).first
+        ([active].compactMap { $0 } + tabs).filter { !$0.shy && !$0.usesTor }.lazy.compactMap(\.built).first
     }
 
     /// Downloads an extension asked for, by address, until they land; then
@@ -4934,31 +4950,12 @@ enum ExtensionShims {
 
     /// chrome.browsingData, from what WebKit and Search keep.
     private static func clear(_ what: [String: Bool], options: [String: Any], browser: Browser) async throws {
-        let since = Date(timeIntervalSince1970: (options["since"] as? Double ?? 0) / 1000)
-        let origins = (options["origins"] as? [String])?.compactMap { URL(string: $0)?.host() }
-        var types = Set<String>()
-        let map: [String: [String]] = [
-            "cache": [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache, WKWebsiteDataTypeFetchCache],
-            "cacheStorage": [WKWebsiteDataTypeFetchCache], "appcache": [WKWebsiteDataTypeOfflineWebApplicationCache],
-            "cookies": [WKWebsiteDataTypeCookies], "localStorage": [WKWebsiteDataTypeLocalStorage, WKWebsiteDataTypeSessionStorage],
-            "indexedDB": [WKWebsiteDataTypeIndexedDBDatabases], "serviceWorkers": [WKWebsiteDataTypeServiceWorkerRegistrations],
-            "webSQL": [WKWebsiteDataTypeWebSQLDatabases], "fileSystems": [WKWebsiteDataTypeFileSystem],
-        ]
-        for (key, on) in what where on { types.formUnion(map[key] ?? []) }
+        let plan = try ExtensionBrowsingData.Plan(what, options: options)
         // The window's profile's sites: its spaces' stores, never another
         // profile's (see Profiles.swift).
-        let stores = Spaces.stores(of: browser.profileID)
-        for store in stores where !types.isEmpty {
-            if let origins {
-                let records = await store.dataRecords(ofTypes: types)
-                let hit = records.filter { record in origins.contains { $0 == record.displayName || $0.hasSuffix("." + record.displayName) } }
-                await store.removeData(ofTypes: types, for: hit)
-            } else {
-                await store.removeData(ofTypes: types, modifiedSince: since)
-            }
-        }
-        if what["history"] == true, origins == nil {
-            for trace in browser.history.everything() where trace.last >= since { browser.history.forget(trace.key) }
+        try await plan.remove(from: Spaces.stores(of: browser.profileID))
+        if plan.removesHistory {
+            for trace in browser.history.everything() where trace.last >= plan.since { browser.history.forget(trace.key) }
         }
     }
 
@@ -5004,6 +5001,7 @@ enum ExtensionShims {
     /// button was pressed on.
     @discardableResult
     static func openPanel(_ context: WKWebExtensionContext, owner: Extensions) -> Bool {
+        guard owner.browser?.active?.usesTor != true else { return false }
         guard let browser = owner.browser, let panel = actionPanel(context, over: browser.activeID) else { return false }
         // In the side panel; a tab of its own if the panel can't be made,
         // as before there was a panel to put it in. Beside a private tab
@@ -5155,6 +5153,10 @@ enum ExtensionAuth {
         }
 
         func start(_ url: URL, limit: TimeInterval) {
+            guard !Proxy.shared.waiting, !Proxy.shared.changingContent else {
+                end(.failure(Quiet.failure("Search is waiting for the proxy connection.")))
+                return
+            }
             let config = WKWebViewConfiguration()
             // The front space's sign-ins, as the tab an interactive flow
             // opens would have; no extension's scripts, and the same user
@@ -5172,7 +5174,9 @@ enum ExtensionAuth {
                 WKUserScript(source: FormRelay.withoutPasskeys, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: .page)
             )
             // In no window, ever: there is nothing to show.
+            Proxy.shared.prepare(config)
             let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600), configuration: config)
+            Proxy.shared.track(view)
             view.navigationDelegate = self
             // Without a UI delegate WebKit puts up its own question for the
             // camera, the microphone or the screen; here every one is no.
@@ -5250,6 +5254,7 @@ enum ExtensionAuth {
         // check goes on as usual (and fails the load if it fails).
         func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
                      completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            if Proxy.authenticate(challenge, completionHandler: completionHandler) { return }
             if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
                 completionHandler(.performDefaultHandling, nil)
             } else {
