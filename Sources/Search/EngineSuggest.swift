@@ -123,8 +123,18 @@ enum EngineSuggest {
     /// One session for every question: nothing kept on disk, no cookies
     /// either way, no credentials, no cache, no referrer (a session's
     /// requests carry none), and a short timeout.
-    static let session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
+    static var session: URLSession {
+        // Made again when Settings › Proxy's route changes (see Proxy.session).
+        let revision = Proxy.routesRevision
+        if let kept, kept.revision == revision { return kept.session }
+        let made = make()
+        kept = (revision, made)
+        return made
+    }
+    nonisolated(unsafe) private static var kept: (revision: Int, session: URLSession)?
+
+    private static func make() -> URLSession {
+        let configuration = Proxy.session(URLSessionConfiguration.ephemeral)
         configuration.httpCookieAcceptPolicy = .never
         configuration.httpShouldSetCookies = false
         configuration.httpCookieStorage = nil
@@ -135,7 +145,7 @@ enum EngineSuggest {
         configuration.timeoutIntervalForResource = patience
         configuration.httpMaximumConnectionsPerHost = 2
         return URLSession(configuration: configuration, delegate: NoRedirects.shared, delegateQueue: nil)
-    }()
+    }
 
     /// An engine that answers by sending us somewhere else isn't followed
     /// there: the words would go to a host nobody picked.

@@ -45,7 +45,7 @@ BEFORE = {
     "shield": "ads", "sites.keep": "tracking", "notifications.ask": "notifications",
     "links.peek": "peek", "links.peekClick": "peek", "autoscroll": "middle button",
     "swipe.history": "swipe", "auto.install": "updates", "bench": "script",
-    "autocorrect": "spelling",
+    "autocorrect": "spelling", "proxy.on": "proxy",
     # Always on now: the find field says so.
     "splitView": "split", "tabs.groups": "groups", "panel.sites": "side panel",
     "translate.pages": "translate", "tabs.keepAwake": "awake", "search.sites": "site from the address",
@@ -83,8 +83,8 @@ def case_reachable(t):
     t.ok("results carry section and group", found and all(i["page"] and i["groupTitle"] for i in found), found)
     t.ok("…in Browsing › Video", any(i["page"] == "browsing" and i["groupTitle"] == "Video" for i in found))
     shown = [i for i in items if not i["findOnly"]]
-    t.ok("about fifty rows in the sections", 45 <= len(shown) <= 70, len(shown))
-    t.ok("ten sections", len(every["pages"]) == 10, every["pages"])
+    t.ok("about seventy rows in the sections", 60 <= len(shown) <= 95, len(shown))
+    t.ok("eleven sections", len(every["pages"]) == 11, every["pages"])
     # Old addresses land in the new sections.
     sv.cmd({"do": "ui", "show": "search://settings/shortcuts"}); time.sleep(0.6)
     t.ok("search://settings/shortcuts opens Keyboard & Mouse", settings()["settingsPage"] == "keyboard",

@@ -1687,6 +1687,21 @@ final class Bench {
             }
             var reply: [String: Any] = ["values": SettingsIndex.values(browser.prefs),
                                         "settingsPage": browser.settingsPage.rawValue]
+            // picture PATH [page NAME]: one section, drawn off screen as a
+            // tab of its own and tall enough to show every row, to a PNG.
+            if let path = request["picture"] as? String {
+                let page = (request["page"] as? String).flatMap(SettingsPanel.Page.named) ?? browser.settingsPage
+                let panel = SettingsPanel(browser: browser, prefs: browser.prefs, asked: page.rawValue, drawn: true)
+                let renderer = ImageRenderer(content: panel)
+                renderer.scale = 2
+                if let image = renderer.nsImage, let tiff = image.tiffRepresentation,
+                   let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]),
+                   (try? png.write(to: URL(fileURLWithPath: path))) != nil {
+                    reply["picture"] = path
+                } else {
+                    reply["picture"] = NSNull()
+                }
+            }
             if let words = request["find"] as? String {
                 reply["found"] = SettingsIndex.find(words).map(SettingsIndex.describe)
             } else {

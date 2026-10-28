@@ -22,7 +22,15 @@ enum ExtensionSocket {
 
     /// One session for every socket; each task has its connection as its
     /// own delegate.
-    private static let session = URLSession(configuration: .default, delegate: nil, delegateQueue: .main)
+    private static var session: URLSession {
+        // Made again when Settings › Proxy's route changes (see Proxy.session).
+        let revision = Proxy.routesRevision
+        if let kept, kept.revision == revision { return kept.session }
+        let made = URLSession(configuration: Proxy.session(.default), delegate: nil, delegateQueue: .main)
+        kept = (revision, made)
+        return made
+    }
+    nonisolated(unsafe) private static var kept: (revision: Int, session: URLSession)?
     /// Held from the port's opening until either end lets go.
     private static var open: [ObjectIdentifier: Connection] = [:]
 

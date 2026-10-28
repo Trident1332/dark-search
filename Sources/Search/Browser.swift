@@ -6957,6 +6957,8 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         if websitePopup { cancelCapture() }
+        // A page came: the proxy, if any, is answering.
+        Proxy.shared.loaded(profile: Spaces.profile(of: spaceID))
         popupTab(for: webView)?.popupGesture.clear()
         guard let tab = tab(for: webView) else {
             // A small window's page came: what failed before it is over.
@@ -7055,6 +7057,9 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // covered the playing video with "The page didn't load".
         guard !(nsError.domain == "WebKitErrorDomain" && code == 204) else { return }
         tab?.failure = message(for: code)
+        // When it was the proxy and not the site, the page says so instead,
+        // and comes back on its own once the proxy answers (see Proxy.swift).
+        Proxy.shared.failed(error, profile: Spaces.profile(of: spaceID), tab: tab)
     }
 
     private func message(for code: Int) -> String {

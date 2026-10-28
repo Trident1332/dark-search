@@ -165,6 +165,12 @@ final class Extensions: NSObject, ObservableObject {
         // extension's pages keep what they store where the browser does —
         // and a test run's apart from the real one's.
         views.websiteDataStore = Store.websites
+        // Workers fetch through it too, so it takes Settings › Proxy's route
+        // with the Personal profile's pages (see Proxy.swift).
+        Proxy.shared.apply(to: views.websiteDataStore, profile: Profile.personalID)
+        if let shared = configuration.defaultWebsiteDataStore, shared !== views.websiteDataStore {
+            Proxy.shared.apply(to: shared, profile: Profile.personalID)
+        }
         // The same user agent as the web tabs, to the letter. WebKit gives
         // workers the user agent of the last page that loaded and, when it
         // differs, stops the running workers to apply it — and extension
@@ -1116,7 +1122,7 @@ final class Extensions: NSObject, ObservableObject {
             URLQueryItem(name: "x", value: "id=\(item.id)&v=\(item.version)&uc"),
         ]
         guard let url = parts.url,
-              let (data, _) = try? await URLSession.shared.data(from: url),
+              let (data, _) = try? await Proxy.fetches.data(from: url),
               let xml = String(data: data, encoding: .utf8),
               // The answer is the <updatecheck> element alone: status="ok"
               // with a version when there is a newer one, "noupdate" when
@@ -2114,11 +2120,11 @@ private struct ExtensionActions: View {
         let pinned = extensions.installed.first { $0.id == id }?.pinned ?? false
         SwiftUI.Button(pinned ? "Unpin" : "Pin to Toolbar") { extensions.setPinned(id, !pinned) }
         if extensions.contexts[id]?.optionsPageURL != nil {
-            SwiftUI.Button("Options…") { extensions.openOptions(id) }
+            SwiftUI.Button("Options") { extensions.openOptions(id) }
         }
         SwiftUI.Button("Reload") { extensions.reload(id) }
         Divider()
-        SwiftUI.Button("Remove “\(name)”…") { ExtensionActions.confirmRemove(id, name: name, extensions) }
+        SwiftUI.Button("Remove “\(name)”") { ExtensionActions.confirmRemove(id, name: name, extensions) }
     }
 
     static func confirmRemove(_ id: String, name: String, _ extensions: Extensions) {
@@ -2175,15 +2181,15 @@ private struct ExtensionMenu: View {
             }
             Divider().overlay(Palette.hairline)
             VStack(spacing: 1) {
-                Foot("storefront", "Chrome Web Store…") {
+                Foot("storefront", "Chrome Web Store") {
                     extensions.menuOpen = false
                     extensions.browser?.open(Browser.webStore, foreground: true)
                 }
-                Foot("folder", "Load Unpacked…") {
+                Foot("folder", "Load Unpacked") {
                     extensions.menuOpen = false
                     DispatchQueue.main.async { extensions.installFolder() }
                 }
-                Foot("gearshape", "Manage Extensions…") {
+                Foot("gearshape", "Manage Extensions") {
                     extensions.menuOpen = false
                     Store.settings.set("extensions", forKey: "settings.page")
                     extensions.browser?.tuning = true

@@ -93,6 +93,15 @@ enum Web {
         // cookies, its own sign-ins, and nothing left behind when it closes.
         // With spaces on, each space's tabs share a store of that space's.
         config.websiteDataStore = store ?? (shy ? .nonPersistent() : MainActor.assumeIsolated { Spaces.store(for: space ?? Spaces.current) })
+        // Settings › Proxy: the store takes the route its profile's pages
+        // take — here, for every page, since a test run hands out a fresh
+        // store object each time — and a call can't be let out past the
+        // proxy (see Proxy.swift).
+        MainActor.assumeIsolated {
+            let profile = Spaces.profile(of: space ?? Spaces.current)
+            Proxy.shared.apply(to: config.websiteDataStore, profile: profile)
+            Proxy.shared.follow(config.preferences, profile: profile)
+        }
         // Web notifications go through the store (see Notifications.swift);
         // a private tab's is left without, and a page there is refused.
         if !shy { let kept = config.websiteDataStore; MainActor.assumeIsolated { SiteNotifications.shared.attach(kept) } }

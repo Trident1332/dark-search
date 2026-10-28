@@ -98,7 +98,7 @@ enum Crx {
     static func fetch(_ id: String) async throws -> Data {
         var request = URLRequest(url: downloadURL(for: id))
         request.timeoutInterval = 60
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await Proxy.fetches.data(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw Refused.download(http.statusCode)
         }

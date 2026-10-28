@@ -16,6 +16,9 @@ struct SettingsPanel: View {
     var asked: String? = nil
     /// Words already in Find a setting when it opens (previews).
     var found: String? = nil
+    /// Drawn off screen to a picture (the bench): the section alone, laid
+    /// out flat and as tall as it is, with nothing to scroll.
+    var drawn = false
     @Environment(\.asTab) private var asTab
 
     @ObservedObject private var updater = Updater.shared
@@ -23,6 +26,9 @@ struct SettingsPanel: View {
     @State private var isDefault = Links.isDefault
     /// A site shortcut being written, kept out of Preferences until it's saved.
     @State private var draft: Keyword?
+    /// A site the proxy is to be skipped for, being typed (Settings › Proxy).
+    @State private var bypassDraft: String?
+    @ObservedObject private var proxy = Proxy.shared
     @State private var page: Page = Page.named(Store.settings.string(forKey: "settings.page") ?? "") ?? .general
     /// What is typed in Find a setting.
     @State private var query = ""
@@ -34,7 +40,7 @@ struct SettingsPanel: View {
     @MainActor static var arcBefore: Preferences.ArcSetup?
 
     enum Page: String, CaseIterable, Identifiable {
-        case general, appearance, tabs, browsing, spaces, passwords, privacy, ai, extensions, keyboard, about
+        case general, appearance, tabs, browsing, spaces, passwords, privacy, proxy, ai, extensions, keyboard, about
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -45,6 +51,7 @@ struct SettingsPanel: View {
             case .spaces: return "Spaces & Pins"
             case .passwords: return "Passwords"
             case .privacy: return "Privacy"
+            case .proxy: return "Proxy"
             case .ai: return "AI"
             case .extensions: return "Extensions"
             case .keyboard: return "Keyboard & Mouse"
@@ -60,6 +67,7 @@ struct SettingsPanel: View {
             case .spaces: return "square.stack"
             case .passwords: return "key"
             case .privacy: return "hand.raised"
+            case .proxy: return "network"
             case .ai: return "sparkles"
             case .extensions: return "puzzlepiece.extension"
             case .keyboard: return "keyboard"
@@ -79,7 +87,7 @@ struct SettingsPanel: View {
         /// The rail's three blocks: the browser, your data and tools, About.
         static var blocks: [[Page]] {
             [[.general, .appearance, .tabs, .browsing, .spaces],
-             [.passwords, .privacy] + (AI.shipped ? [.ai] : []) + [.extensions, .keyboard],
+             [.passwords, .privacy, .proxy] + (AI.shipped ? [.ai] : []) + [.extensions, .keyboard],
              [.about]]
         }
     }
@@ -97,10 +105,28 @@ struct SettingsPanel: View {
 
     var body: some View {
         Group {
-            if asTab { tabbed } else { card }
+            if drawn { flat } else if asTab { tabbed } else { card }
         }
         .onChange(of: browser.settingsFind) { _, _ in finding = true }
         .onAppear { if let found { query = found } }
+    }
+
+    /// The section as a picture: its title and groups, nothing around them.
+    private var flat: some View {
+        // Nothing appears off screen, so the section asked for is read
+        // here rather than followed into `page`.
+        let shown = asked.flatMap(Page.named) ?? page
+        return VStack(alignment: .leading, spacing: 0) {
+            Text(shown.title)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Palette.ink)
+                .padding(.bottom, 18)
+            VStack(alignment: .leading, spacing: 22) { section(shown) }
+                .environment(\.ruleInset, 0)
+        }
+        .padding(24)
+        .frame(width: SettingsPanel.column, alignment: .topLeading)
+        .background(Palette.ground)
     }
 
     /// In a tab of its own (see InternalPages.swift): the sections down the
@@ -438,7 +464,21 @@ struct SettingsPanel: View {
         case "shield": return shield.trouble ?? item.detail
         case "updates.version": return versionDetail
         case "arc.import": return arcHere ? item.detail : "Arc isn't on this Mac. Bring Things Over can read an export"
+        case "proxy.test": return proxyCheckDetail
+        case "proxy.profiles":
+            return prefs.proxyProfiles.isEmpty ? item.detail
+                : "Only \(Profiles.shared.profile(browser.profileID).name) takes the route; the others stay on the Mac's settings"
         default: return item.detail
+        }
+    }
+
+    /// Settings › Proxy › Connection: how the last test went.
+    private var proxyCheckDetail: String {
+        switch proxy.check {
+        case .untried: return proxy.refused ? "The proxy didn't accept the name or password" : "Not tested yet"
+        case .testing: return "Testing…"
+        case .reached(let ms, _, _): return "Connected in \(ms) ms"
+        case .failed(let why): return why
         }
     }
 
@@ -455,6 +495,7 @@ struct SettingsPanel: View {
         case .browsing: browsingControl(item.id)
         case .spaces: spacesControl(item.id)
         case .passwords, .privacy: keptControl(item.id)
+        case .proxy: proxyControl(item.id)
         case .keyboard, .about: otherControl(item.id)
         default: EmptyView()
         }
@@ -668,6 +709,44 @@ struct SettingsPanel: View {
     }
 
     @ViewBuilder
+    private func proxyControl(_ id: String) -> some View {
+        switch id {
+        case "proxy.on": Switch(on: $prefs.proxyOn)
+        case "proxy.kind": Segmented(options: ProxyKind.allCases.map { ($0, $0.title) }, selection: $prefs.proxyKind)
+        case "proxy.signIn": Switch(on: $prefs.proxySignsIn)
+        case "proxy.test":
+            Pill("Test") { proxy.test() }
+                .disabled(proxy.check == .testing)
+                .opacity(proxy.check == .testing ? 0.5 : 1)
+        case "proxy.bypass":
+            if bypassDraft == nil {
+                Pill("Add") { bypassDraft = "" }
+            } else {
+                HStack(spacing: 6) {
+                    Pill("Cancel") { bypassDraft = nil }
+                    Pill("Save", filled: true) {
+                        let site = ProxySetup.domain(bypassDraft ?? "")
+                        if !site.isEmpty, !prefs.proxyBypass.contains(site) { prefs.proxyBypass.append(site) }
+                        bypassDraft = nil
+                    }
+                    .disabled(ProxySetup.domain(bypassDraft ?? "").isEmpty)
+                    .opacity(ProxySetup.domain(bypassDraft ?? "").isEmpty ? 0.5 : 1)
+                }
+            }
+        case "proxy.profiles":
+            // On: every profile. Off: only the one this window is in.
+            Switch(on: Binding(
+                get: { prefs.proxyProfiles.isEmpty },
+                set: { all in prefs.proxyProfiles = all ? [] : [browser.profileID] }
+            ))
+        case "proxy.blocks": Switch(on: $prefs.proxyBlocks)
+        case "proxy.shows": Switch(on: $prefs.proxyShows)
+        case "proxy.calls": Switch(on: $prefs.proxyHidesCalls)
+        default: EmptyView()
+        }
+    }
+
+    @ViewBuilder
     private func otherControl(_ id: String) -> some View {
         switch id {
         case "links.peek":
@@ -752,6 +831,20 @@ struct SettingsPanel: View {
         case "profiles":
             if !searched {
                 ProfileList(browser: browser)
+                    .under()
+            }
+        case "proxy.server":
+            ProxyServerFields(prefs: prefs)
+        case "proxy.signIn":
+            if prefs.proxySignsIn { ProxySignInFields(prefs: prefs) }
+        case "proxy.test":
+            if !searched {
+                ProxyLocationLine()
+                    .under()
+            }
+        case "proxy.bypass":
+            if !searched {
+                ProxyBypassList(prefs: prefs, draft: $bypassDraft)
                     .under()
             }
         case "pages.120":

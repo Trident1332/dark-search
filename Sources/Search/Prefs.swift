@@ -628,6 +628,65 @@ final class Preferences: ObservableObject {
         didSet { store.set(floatingNewTab, forKey: "newtab.floating") }
     }
 
+    // MARK: - Settings › Proxy (see Proxy.swift)
+
+    /// Pages go through a proxy of your own rather than the Mac's settings.
+    /// Off unless asked for.
+    @Published var proxyOn: Bool {
+        didSet { store.set(proxyOn, forKey: "proxy.on"); routeProxy() }
+    }
+    @Published var proxyKind: ProxyKind {
+        didSet { store.set(proxyKind.rawValue, forKey: "proxy.kind"); routeProxy() }
+    }
+    @Published var proxyHost: String {
+        didSet { store.set(proxyHost, forKey: "proxy.host"); routeProxy() }
+    }
+    /// As typed; the route takes it as a number, or the kind's usual port
+    /// when it isn't one (see `proxyPortNumber`).
+    @Published var proxyPort: String {
+        didSet { store.set(proxyPort, forKey: "proxy.port"); routeProxy() }
+    }
+    @Published var proxySignsIn: Bool {
+        didSet { store.set(proxySignsIn, forKey: "proxy.signsIn"); routeProxy() }
+    }
+    /// The name alone: the password is the keychain's (ProxyPassword).
+    @Published var proxyUser: String {
+        didSet { store.set(proxyUser, forKey: "proxy.user"); routeProxy() }
+    }
+    /// Sites reached directly, as typed.
+    @Published var proxyBypass: [String] {
+        didSet { store.set(proxyBypass, forKey: "proxy.bypass"); routeProxy() }
+    }
+    /// The profiles whose pages take the route, by id; empty for every one.
+    @Published var proxyProfiles: Set<UUID> {
+        didSet { store.set(proxyProfiles.map(\.uuidString).sorted(), forKey: "proxy.profiles"); routeProxy() }
+    }
+    @Published var proxyBlocks: Bool {
+        didSet { store.set(proxyBlocks, forKey: "proxy.blocks"); routeProxy() }
+    }
+    @Published var proxyShows: Bool {
+        didSet { store.set(proxyShows, forKey: "proxy.shows"); routeProxy() }
+    }
+    @Published var proxyHidesCalls: Bool {
+        didSet { store.set(proxyHidesCalls, forKey: "proxy.calls"); routeProxy() }
+    }
+
+    /// The port as a number: 1 to 65535, or nil for anything else typed.
+    var proxyPortNumber: UInt16? {
+        let digits = proxyPort.trimmingCharacters(in: .whitespaces)
+        guard let number = UInt16(digits), number > 0 else { return nil }
+        return number
+    }
+
+    /// The settings as Proxy takes them.
+    var proxySetup: ProxySetup {
+        ProxySetup(on: proxyOn, kind: proxyKind, host: proxyHost, port: proxyPortNumber,
+                   signsIn: proxySignsIn, user: proxyUser, bypass: proxyBypass, profiles: proxyProfiles,
+                   blocks: proxyBlocks, shows: proxyShows, hidesCalls: proxyHidesCalls)
+    }
+
+    private func routeProxy() { Proxy.shared.take(proxySetup) }
+
     init() {
         navigationLeft = store.bool(forKey: "toolbar.left")
         // Carried over from when there were four ways of holding the browser
@@ -806,6 +865,21 @@ final class Preferences: ObservableObject {
         for key in ["mind.model", "mind.effort", "mind.acting", "mind.width", "mind.open"] {
             store.removeObject(forKey: key)
         }
+        proxyOn = store.bool(forKey: "proxy.on")
+        proxyKind = store.string(forKey: "proxy.kind").flatMap(ProxyKind.init(rawValue:)) ?? .socks5
+        proxyHost = store.string(forKey: "proxy.host") ?? ""
+        proxyPort = store.string(forKey: "proxy.port") ?? ""
+        proxySignsIn = store.bool(forKey: "proxy.signsIn")
+        proxyUser = store.string(forKey: "proxy.user") ?? ""
+        proxyBypass = store.stringArray(forKey: "proxy.bypass") ?? []
+        proxyProfiles = Set((store.stringArray(forKey: "proxy.profiles") ?? []).compactMap(UUID.init(uuidString:)))
+        proxyBlocks = store.object(forKey: "proxy.blocks") as? Bool ?? true
+        proxyShows = store.object(forKey: "proxy.shows") as? Bool ?? true
+        proxyHidesCalls = store.object(forKey: "proxy.calls") as? Bool ?? true
+        // Before the first page is loaded: the shared store takes the route
+        // now, and every other store as it is made (see Proxy.apply).
+        Proxy.shared.take(proxySetup)
+        Proxy.shared.apply(to: Store.websites, profile: Profile.personalID)
     }
 
     /// WebKit's text checker takes its orders from the app's standard

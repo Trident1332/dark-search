@@ -234,6 +234,15 @@ extension Browser {
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
         let space = challenge.protectionSpace
+        // A proxy asking who you are is Settings › Proxy's business, not a
+        // sign-in box over the page in the proxy's name: the name and
+        // password set there are already on the route, so being asked
+        // means they weren't taken (see Proxy.challenged).
+        if space.isProxy(), space.authenticationMethod != NSURLAuthenticationMethodServerTrust {
+            Proxy.shared.challenged()
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
         switch space.authenticationMethod {
         case NSURLAuthenticationMethodServerTrust:
             trust(webView, challenge, completionHandler)

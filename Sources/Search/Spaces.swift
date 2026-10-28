@@ -181,6 +181,7 @@ enum Spaces {
         if let made = stores[id] { return made }
         let made = WKWebsiteDataStore(forIdentifier: id)
         if Store.keepsSignIns { Store.followSignIns(made) } else { Store.followCookies(made) }
+        Proxy.shared.apply(to: made, profile: profile)
         stores[id] = made
         return made
     }
@@ -621,7 +622,7 @@ enum SpaceMenu {
             menu.addItem(entry)
         }
         menu.addItem(.separator())
-        menu.addItem(item("New Space…") { browser.askForSpace() })
+        menu.addItem(item("New Space") { browser.askForSpace() })
         // The profiles, once there is more than one (see Profiles.swift).
         if Profiles.shared.several {
             menu.addItem(.separator())
@@ -633,7 +634,7 @@ enum SpaceMenu {
         }
         menu.addItem(.separator())
         let here = browser.space
-        menu.addItem(item("Rename “\(here.name)”…") {
+        menu.addItem(item("Rename “\(here.name)”") {
             Ask.name("Rename Space", placeholder: here.name, initial: here.name, confirm: "Rename") { browser.renameSpace(here.id, to: $0) }
         })
         let icons = NSMenu()
@@ -663,7 +664,7 @@ enum SpaceMenu {
             menu.addItem(.separator())
         }
         let folder = here.downloads.map { URL(fileURLWithPath: $0).lastPathComponent }
-        menu.addItem(item(folder.map { "Downloads to “\($0)”…" } ?? "Downloads Folder…") {
+        menu.addItem(item(folder.map { "Downloads to “\($0)”" } ?? "Downloads Folder") {
             Ask.folder { browser.setSpaceDownloads(here.id, to: $0) }
         })
         if folder != nil {
@@ -671,7 +672,7 @@ enum SpaceMenu {
         }
         if !here.isFirst, here.id != browser.homeSpaceID {
             menu.addItem(.separator())
-            menu.addItem(item("Delete “\(here.name)”…") {
+            menu.addItem(item("Delete “\(here.name)”") {
                 Ask.sure("Delete “\(here.name)”?", detail: "Its tabs close, and its cookies and sign-ins are erased from this Mac. History and bookmarks stay.", confirm: "Delete") {
                     browser.deleteSpace(here.id)
                 }

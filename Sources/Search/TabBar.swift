@@ -820,6 +820,8 @@ private struct TabPill: View {
                 PopupSign(browser: browser, tab: tab, colour: colour)
                 // The page is translated (Translate.swift).
                 TranslateSign(tab: tab, colour: colour)
+                // Pages take Settings › Proxy's route (ProxySettings.swift).
+                ProxySign(browser: browser, tab: tab, colour: colour)
                 TitleAtRest(label: tab.label, rest: rest, shown: atRest, hovering: hovering,
                             size: 12.5, colour: colour, roomy: false)
             }
@@ -881,6 +883,7 @@ private struct TabPill: View {
         .animation(Motion.quick, value: speaker)
         .animation(Motion.quick, value: tab.blockedPopups.isEmpty)
         .animation(Motion.quick, value: tab.translation == nil)
+        .animation(Motion.quick, value: Proxy.shared.revision)
     }
 
     @ViewBuilder
@@ -1385,7 +1388,7 @@ struct TabMenu: View {
                     }
                 }
                 if browser.spaces.count > 1 { Divider() }
-                Button("New Space…") {
+                Button("New Space") {
                     browser.askForSpace { space in
                         browser.move(tab, toSpace: space.id) {
                             browser.switchSpace(to: space.id)
@@ -1445,7 +1448,7 @@ struct TabMenu: View {
         }
         .disabled(!tab.isWeb)
         // The card a click on the tab you are on shows under its address.
-        Button("Site Information…") {
+        Button("Site Information") {
             if browser.activeID != tab.id { browser.select(tab) }
             browser.beginTabEdit(tab)
         }

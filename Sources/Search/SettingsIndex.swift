@@ -89,6 +89,11 @@ enum SettingsIndex {
         .init(id: "permissions", page: .privacy, title: "Site permissions", icon: "checkmark.shield"),
         .init(id: "clear", page: .privacy, title: "Clear", icon: "trash"),
 
+        .init(id: "proxy", page: .proxy, title: "Proxy", icon: "network"),
+        .init(id: "exceptions", page: .proxy, title: "Exceptions", icon: "arrow.uturn.right"),
+        .init(id: "proxyoptions", page: .proxy, title: "Options", icon: "slider.horizontal.3"),
+        .init(id: "proxyprivacy", page: .proxy, title: "Privacy", icon: "hand.raised"),
+
         .init(id: "mouse", page: .keyboard, title: "Mouse and trackpad", icon: "computermouse"),
 
         .init(id: "updates", page: .about, title: "Updates", icon: "arrow.triangle.2.circlepath"),
@@ -328,6 +333,42 @@ enum SettingsIndex {
         .init(id: "clear.cache", group: "clear", icon: "internaldrive",
               title: "Cache", detail: "Only what was fetched to draw pages", words: ["clear cache"]),
 
+        // Proxy
+        .init(id: "proxy.on", group: "proxy", icon: "arrow.triangle.branch",
+              title: "Use a proxy", detail: "Only Search connects through it. Nothing else on your Mac changes",
+              more: "Off, pages take the Mac's own settings from System Settings › Network, a PAC file included. The Mac's settings are never changed from here.",
+              keys: ["proxy.on"], words: ["proxy", "socks", "socks5", "tunnel", "vpn", "route", "ip address"]),
+        .init(id: "proxy.kind", group: "proxy", icon: "point.3.connected.trianglepath.dotted",
+              title: "Type", detail: "SOCKS5 carries every connection as it is; HTTP and HTTPS tunnel each one",
+              keys: ["proxy.kind"], words: ["socks", "http proxy", "https proxy", "connect"], parent: "proxy.on"),
+        .init(id: "proxy.server", group: "proxy", icon: "server.rack",
+              title: "Server", detail: "Its address, and the port it listens on",
+              keys: ["proxy.host", "proxy.port"], words: ["host", "address", "port", "server"], kind: .wide, parent: "proxy.on"),
+        .init(id: "proxy.signIn", group: "proxy", icon: "person.badge.key",
+              title: "Requires a password", detail: "Kept in your keychain, never in the settings file",
+              keys: ["proxy.signsIn", "proxy.user"], words: ["password", "username", "authentication", "keychain"], parent: "proxy.on"),
+        .init(id: "proxy.test", group: "proxy", icon: "checkmark.circle",
+              title: "Connection", detail: "Not tested yet",
+              more: "Test sends one request through the proxy to ipinfo.io, which answers with the address it saw and where that address is. Nothing is sent until you press it.",
+              words: ["test", "location", "country", "city", "where", "connected"], parent: "proxy.on"),
+        .init(id: "proxy.bypass", group: "exceptions", icon: "arrow.uturn.right",
+              title: "Don't use the proxy for", detail: "Sites reached directly: a site, or a whole domain with its subdomains",
+              keys: ["proxy.bypass"], words: ["bypass", "exception", "skip", "direct", "local", "intranet"], parent: "proxy.on"),
+        .init(id: "proxy.profiles", group: "proxyoptions", icon: "person.2",
+              title: "Use in all profiles", detail: "Off, only the profile this window is in takes the route",
+              keys: ["proxy.profiles"], words: ["profile", "work", "personal"], parent: "proxy.on"),
+        .init(id: "proxy.blocks", group: "proxyoptions", icon: "xmark.octagon",
+              title: "Block pages if the proxy is unavailable", detail: "A page fails rather than slip out directly. Search tries again every 15 seconds",
+              more: "Off, as in most browsers, a proxy that stops answering is quietly bypassed and pages connect directly.",
+              keys: ["proxy.blocks"], words: ["kill switch", "fallback", "failover", "leak", "unavailable", "down"], parent: "proxy.on"),
+        .init(id: "proxy.shows", group: "proxyoptions", icon: "eye",
+              title: "Show the location in the address bar", detail: "A small mark beside the address while pages take the route, amber when it drops",
+              keys: ["proxy.shows"], words: ["address bar", "indicator", "mark", "location"], parent: "proxy.on"),
+        .init(id: "proxy.calls", group: "proxyprivacy", icon: "video",
+              title: "Keep video calls from revealing your address", detail: "Calls can't go through a proxy, so they're off while it's on",
+              more: "WebRTC, which video calls use, connects straight from your Mac and would show its real address. With this on, pages can't start a peer connection while the proxy is on; turn it off to take a call.",
+              keys: ["proxy.calls"], words: ["webrtc", "leak", "ip", "video call", "peer"], parent: "proxy.on"),
+
         // Keyboard & Mouse
         .init(id: "links.peek", group: "mouse", icon: "eye",
               title: "Peek at a link", detail: "Its page opens in a panel over the one you're reading",
@@ -435,6 +476,10 @@ enum SettingsIndex {
         case "sidebar.roomy": return prefs.sidebar && !prefs.sideIcons
         case "sidebar.hides", "layout.cards", "pins.list": return prefs.sidebar
         case "toolbar.left": return !prefs.sidebar
+        case "proxy.profiles": return prefs.proxyOn && Profiles.shared.several
+        case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test", "proxy.bypass",
+             "proxy.blocks", "proxy.shows", "proxy.calls":
+            return prefs.proxyOn
         default: return true
         }
     }
@@ -445,6 +490,10 @@ enum SettingsIndex {
         case "pages.dusk": return "Only while Search isn't set to Light"
         case "toolbar.left": return "Only with the tabs across the top"
         case "sidebar.roomy": return "Only with titles in the column"
+        case "proxy.profiles": return "Only with a proxy on and more than one profile"
+        case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test", "proxy.bypass",
+             "proxy.blocks", "proxy.shows", "proxy.calls":
+            return "Only with a proxy on"
         default: return "Only with the tabs down a side"
         }
     }
@@ -610,6 +659,10 @@ extension SettingsIndex {
             "links.show": prefs.showsLinks,
             "float.flicks": prefs.floatFlicks,
             "arc": prefs.looksLikeArc,
+            "proxy.on": prefs.proxyOn,
+            "proxy.kind": prefs.proxyKind.rawValue,
+            "proxy.blocks": prefs.proxyBlocks,
+            "proxy.calls": prefs.proxyHidesCalls,
             "always": [
                 "splitView": prefs.splitView, "tabs.groups": prefs.usesTabGroups,
                 "panel.sites": prefs.sitesInPanel, "translate": PageTranslator.enabled,

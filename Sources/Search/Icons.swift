@@ -382,7 +382,9 @@ final class Favicons {
         let busyKey = site + page
         defer { busy.remove(busyKey) }
         let session = URLSession(configuration: {
-            let config = URLSessionConfiguration.ephemeral
+            // Through Settings › Proxy's route when pages take it: an icon
+            // fetched directly would name the site to the network.
+            let config = Proxy.session(URLSessionConfiguration.ephemeral)
             config.timeoutIntervalForRequest = 8
             return config
         }())
@@ -787,6 +789,9 @@ final class SVGIcons: NSObject, WKNavigationDelegate {
         if web == nil {
             let config = WKWebViewConfiguration()
             config.websiteDataStore = .nonPersistent()
+            // Fetched through the proxy when any profile's pages are: an
+            // icon fetched directly would name the site to the network.
+            Proxy.shared.apply(to: config.websiteDataStore, profile: nil)
             config.defaultWebpagePreferences.allowsContentJavaScript = false
             config.applicationNameForUserAgent = Web.userAgentName
             config.mediaTypesRequiringUserActionForPlayback = .all

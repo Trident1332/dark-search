@@ -5144,6 +5144,7 @@ enum ExtensionAuth {
             // opens would have; no extension's scripts, and the same user
             // agent as every other view (see Web.userAgentName).
             config.websiteDataStore = Spaces.store(for: Spaces.current)
+            Proxy.shared.apply(to: config.websiteDataStore, profile: Spaces.profile(of: Spaces.current))
             config.processPool = Web.pool
             config.applicationNameForUserAgent = Web.userAgentName
             config.preferences.javaScriptCanOpenWindowsAutomatically = false

@@ -83,6 +83,7 @@ final class Profiles: ObservableObject {
         if let made = stores[id] { return made }
         let made = WKWebsiteDataStore(forIdentifier: id)
         if Store.keepsSignIns { Store.followSignIns(made) } else { Store.followCookies(made) }
+        Proxy.shared.apply(to: made, profile: id)
         stores[id] = made
         return made
     }
@@ -253,7 +254,7 @@ enum ProfileMenu {
             })
         }
         items.append(.separator())
-        items.append(item("New Profile…") { askNew() })
+        items.append(item("New Profile") { askNew() })
         return items
     }
 

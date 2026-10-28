@@ -178,7 +178,7 @@ enum SiteSearch {
         var request = URLRequest(url: description, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
         request.httpShouldHandleCookies = false
         // Redirected only within the site: nothing is read from one not visited.
-        let session = URLSession(configuration: .ephemeral, delegate: SameSiteRedirects(host: host), delegateQueue: .main)
+        let session = URLSession(configuration: Proxy.session(.ephemeral), delegate: SameSiteRedirects(host: host), delegateQueue: .main)
         session.dataTask(with: request) { data, response, _ in
             defer { session.finishTasksAndInvalidate() }
             guard let data, data.count <= 64 * 1024, (response as? HTTPURLResponse)?.statusCode == 200,
