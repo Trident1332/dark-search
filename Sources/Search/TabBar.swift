@@ -997,6 +997,14 @@ struct Carried: ViewModifier {
     @State private var anchor: CGFloat = 0
     @State private var travel: CGFloat = 0
     @State private var reordered = false
+    /// Where the tab was along the row the last time it took a new place,
+    /// for the hysteresis below.
+    @State private var lastMove: CGFloat = 0
+
+    /// How far the hand goes, from where the tab last took a place, before
+    /// another place is considered: Chromium's 16, so the row never
+    /// flickers with a tab held at a line.
+    private static let threshold: CGFloat = 16
 
     /// The row as laid out: each item's length, pins and tabs told apart.
     private var slots: [Slot] {
@@ -1045,6 +1053,7 @@ struct Carried: ViewModifier {
                             held = true
                             from = index
                             anchor = starts[index]
+                            lastMove = anchor
                         }
                         let kind = row[index].pinned
                         guard let first = row.firstIndex(where: { $0.pinned == kind }),
@@ -1066,20 +1075,31 @@ struct Carried: ViewModifier {
                         // than moving along the row as it goes.
                         if let browser, let tab, browser.prefs.usesTabGroups, tab.pin == nil,
                            browser.group(of: tab) != nil || groupDestination?(tab, value.location) != nil { return }
-                        // Its place is among its own kind, after every one of
-                        // them whose middle its own middle has passed — as
-                        // Chromium's strip decides it. Measured against the
-                        // row as it is now, so once it has passed a tab, that
-                        // tab's middle is a whole place further back, and
-                        // the hand has to come all the way back for it to
-                        // change its mind: nothing flickers at the line.
-                        let middle = at + row[index].length / 2
+                        // Its place is the one whose start is nearest its own
+                        // leading edge, among the places its kind can take —
+                        // Chromium's rule: each place's start is where the
+                        // tab would begin with the others closed up before
+                        // it, and the nearest wins, the earlier on a tie. So
+                        // it takes the next place halfway there, and only
+                        // once the hand has gone the threshold since the
+                        // last place it took.
+                        guard abs(at - lastMove) > Self.threshold else { return }
+                        var ideal = starts[first]
                         var target = first
+                        var nearest = abs(at - ideal)
+                        var candidate = first
                         for position in first...last where position != index {
-                            if starts[position] + row[position].length / 2 < middle { target += 1 }
+                            ideal += row[position].length + gap
+                            candidate += 1
+                            let distance = abs(at - ideal)
+                            if distance < nearest {
+                                nearest = distance
+                                target = candidate
+                            }
                         }
                         if target != index {
                             reordered = true
+                            lastMove = at
                             withAnimation(Motion.settle) { move(target) }
                         }
                     }
@@ -1115,8 +1135,11 @@ struct Carried: ViewModifier {
                             if let onDropTab, let tab { onDropTab(tab, value.location) }
                             else { onDrop?(value.location) }
                         }
-                        // Let go, it settles into its place.
-                        withAnimation(Motion.settle) {
+                        // Let go, it eases into its place: a fifth of a
+                        // second, straight there, as Chromium's does. A
+                        // spring here overshot, and read as the tab going
+                        // somewhere else first.
+                        withAnimation(Motion.reduced ? nil : .easeOut(duration: 0.2)) {
                             held = false
                             travel = 0
                             reordered = false
