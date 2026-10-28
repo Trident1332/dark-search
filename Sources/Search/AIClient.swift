@@ -46,8 +46,41 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
 
     private static let log = Logger(subsystem: "com.officecommun.search", category: "AI")
 
-    private lazy var session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
+    private let sessionLock = NSLock()
+    private let baseConfiguration: URLSessionConfiguration
+    private var keptSession: (revision: Int, session: URLSession)?
+    private var routeObserver: NSObjectProtocol?
+
+    init(configuration: URLSessionConfiguration = .ephemeral) {
+        baseConfiguration = configuration.copy() as! URLSessionConfiguration
+        super.init()
+        routeObserver = NotificationCenter.default.addObserver(forName: Proxy.routeChanged, object: nil, queue: nil) { [weak self] _ in
+            self?.invalidateRoute()
+        }
+    }
+
+    deinit {
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        keptSession?.session.invalidateAndCancel()
+    }
+
+    private func invalidateRoute() {
+        let previous = sessionLock.withLock {
+            let previous = keptSession?.session
+            keptSession = nil
+            return previous
+        }
+        previous?.invalidateAndCancel()
+    }
+
+    /// Every AI request follows the current route; changing it also stops
+    /// an answer still streaming over the previous connection.
+    var session: URLSession {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        let revision = Proxy.routesRevision
+        if let keptSession, keptSession.revision == revision { return keptSession.session }
+        let configuration = Proxy.session(baseConfiguration.copy() as! URLSessionConfiguration)
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
@@ -56,8 +89,10 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 300
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
+        let made = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        keptSession = (revision, made)
+        return made
+    }
 
     /// Where a provider's requests may go: its own host, over https, or
     /// this Mac over plain http for the apps that run on it.

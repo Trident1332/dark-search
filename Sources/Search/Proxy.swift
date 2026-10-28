@@ -87,8 +87,9 @@ struct ProxySetup: Equatable {
     /// Whether what is set could be connected to at all: a host.
     var complete: Bool { !trimmedHost.isEmpty }
 
-    /// On, and set well enough to route through.
-    var routes: Bool { on && complete }
+    /// An enabled route stays in force while its fields are being edited.
+    /// An incomplete server blocks connections instead of going direct.
+    var routes: Bool { on }
 
     /// Whether a profile's pages take the route.
     func applies(to profile: UUID) -> Bool {
@@ -163,6 +164,7 @@ final class Proxy: ObservableObject {
     @Published private(set) var revision = 0
 
     private var task: Task<Void, Never>?
+    private var testID: UUID?
     private var probe: Task<Void, Never>?
     /// A page just failed: one look at the proxy, to tell its fault from
     /// the site's before saying so.
@@ -188,6 +190,9 @@ final class Proxy: ObservableObject {
 
     private init() {}
 
+    /// Long-lived clients must cancel connections using the previous route.
+    nonisolated static let routeChanged = Notification.Name("SearchProxyRouteChanged")
+
     // MARK: - the settings
 
     /// Preferences hands the settings over here, at launch and on every
@@ -197,25 +202,52 @@ final class Proxy: ObservableObject {
         let before = setup
         setup = fresh
         guard fresh != before else { return }
+        var networking = before
+        networking.shows = fresh.shows
+        networking.hidesCalls = fresh.hidesCalls
+        if networking == fresh {
+            // Neither switch changes a URLSession's route. Keep tests and
+            // streaming answers alive, and update WebRTC preferences alone.
+            for page in Web.pages.allObjects {
+                follow(page.configuration.preferences, store: page.configuration.websiteDataStore)
+            }
+            return
+        }
+        cancelTest()
+        check = .untried
         if fresh.on != before.on || fresh.kind != before.kind || fresh.trimmedHost != before.trimmedHost
             || fresh.portOrUsual != before.portOrUsual || fresh.signsIn != before.signsIn || fresh.user != before.user {
-            check = .untried
             place = nil
             refused = false
         }
         if !fresh.routes {
             dropped = false
-            stopProbe()
             forgetFailures()
         }
+        confirming?.cancel()
+        confirming = nil
+        stopProbe()
         reroute()
+        if dropped { startProbe() }
     }
 
     /// The password was kept or taken out: the same settings, another route.
     func passwordChanged() {
+        cancelTest()
         check = .untried
+        place = nil
         refused = false
+        confirming?.cancel()
+        confirming = nil
+        stopProbe()
         reroute()
+        if dropped { startProbe() }
+    }
+
+    private func cancelTest() {
+        testID = nil
+        task?.cancel()
+        task = nil
     }
 
     private func reroute() {
@@ -233,6 +265,7 @@ final class Proxy: ObservableObject {
         for page in Web.pages.allObjects {
             follow(page.configuration.preferences, store: page.configuration.websiteDataStore)
         }
+        NotificationCenter.default.post(name: Proxy.routeChanged, object: nil)
     }
 
     // MARK: - stores and pages
@@ -283,7 +316,15 @@ final class Proxy: ObservableObject {
 
     /// WebKit's and URLSession's route, built afresh each time so the
     /// password is read from the keychain only now.
-    func configuration() -> ProxyConfiguration {
+    func configuration(forTest: Bool = false) -> ProxyConfiguration {
+        guard setup.complete else {
+            // Keep a valid proxy configuration in force while the fields
+            // are incomplete. The reserved .invalid domain cannot resolve,
+            // and failover must remain off even when ordinarily allowed.
+            var blocked = ProxyConfiguration(httpCONNECTProxy: .hostPort(host: "missing-proxy.invalid", port: 9))
+            blocked.allowFailover = false
+            return blocked
+        }
         let host = NWEndpoint.Host(setup.trimmedHost)
         let port = NWEndpoint.Port(rawValue: setup.portOrUsual) ?? NWEndpoint.Port(rawValue: setup.kind.usualPort)!
         let endpoint = NWEndpoint.hostPort(host: host, port: port)
@@ -296,8 +337,8 @@ final class Proxy: ObservableObject {
         if setup.signsIn, !setup.user.isEmpty, let password = ProxyPassword.read(setup), !password.isEmpty {
             made.applyCredential(username: setup.user, password: password)
         }
-        made.allowFailover = !setup.blocks
-        made.excludedDomains = setup.excluded
+        made.allowFailover = !forTest && !setup.blocks
+        made.excludedDomains = forTest ? [] : setup.excluded
         return made
     }
 
@@ -346,19 +387,21 @@ final class Proxy: ObservableObject {
     /// to a site that answers with where it was reached from. Nothing is
     /// sent until the button is pressed, and only the proxy's own address
     /// reaches that site.
-    func test() {
-        task?.cancel()
+    func test(configuration base: URLSessionConfiguration = .ephemeral, target: URL = Proxy.whereAmI) {
+        cancelTest()
         guard setup.complete else {
             check = .failed("Enter the proxy's address first")
             return
         }
         check = .testing
-        let configuration = URLSessionConfiguration.ephemeral
+        let id = UUID()
+        testID = id
+        let testedRevision = revision
+        let configuration = base.copy() as! URLSessionConfiguration
         configuration.timeoutIntervalForRequest = 12
         configuration.timeoutIntervalForResource = 15
         configuration.waitsForConnectivity = false
-        var route = self.configuration()
-        route.allowFailover = false
+        let route = self.configuration(forTest: true)
         configuration.proxyConfigurations = [route]
         let session = URLSession(configuration: configuration)
         let started = Date()
@@ -366,7 +409,7 @@ final class Proxy: ObservableObject {
             defer { session.invalidateAndCancel() }
             let result: ProxyCheck
             do {
-                var request = URLRequest(url: Proxy.whereAmI)
+                var request = URLRequest(url: target)
                 request.setValue("application/json", forHTTPHeaderField: "Accept")
                 let (data, response) = try await session.data(for: request)
                 let ms = Int((Date().timeIntervalSince(started) * 1000).rounded())
@@ -380,10 +423,16 @@ final class Proxy: ObservableObject {
                 }
             } catch is CancellationError {
                 return
+            } catch let error as URLError where error.code == .cancelled {
+                return
             } catch {
                 result = .failed(Proxy.explain(error))
             }
-            self?.finish(result)
+            guard !Task.isCancelled, let self, self.testID == id,
+                  self.revision == testedRevision else { return }
+            self.task = nil
+            self.testID = nil
+            self.finish(result)
         }
     }
 
@@ -391,9 +440,7 @@ final class Proxy: ObservableObject {
         check = result
         if case .reached(_, let address, let spot) = result {
             place = spot ?? address
-            dropped = false
-            refused = false
-            stopProbe()
+            recovered()
         }
     }
 
@@ -402,7 +449,7 @@ final class Proxy: ObservableObject {
 
     /// Answers with the address it was reached from and, when it knows,
     /// the city and country of that address. Reached only on Test.
-    static let whereAmI = URL(string: "https://ipinfo.io/json")!
+    nonisolated static let whereAmI = URL(string: "https://ipinfo.io/json")!
 
     /// What the answer says: the address, and "City, Country" when both are
     /// there (the country spelled out from its code, in the Mac's language).
@@ -456,9 +503,11 @@ final class Proxy: ObservableObject {
             return
         }
         guard confirming == nil else { return }
+        let failedRevision = revision
         confirming = Task { [weak self] in
             guard let self else { return }
             let listening = await self.reachable()
+            guard !Task.isCancelled, self.revision == failedRevision else { return }
             self.confirming = nil
             guard !listening, self.setup.routes else {
                 self.failedTabs.removeAllObjects()
@@ -478,12 +527,13 @@ final class Proxy: ObservableObject {
         refused = true
     }
 
-    /// A page got through: the proxy is up.
-    func loaded(profile: UUID) {
-        guard dropped || refused, setup.applies(to: profile) else { return }
+    /// Only an explicit proxy test or its recovery probe establishes health.
+    /// A page commit can have come from cache, a bypass, or a local document.
+    private func recovered() {
         dropped = false
         refused = false
         stopProbe()
+        cameBack()
     }
 
     /// The errors a dead or refusing proxy gives a page, as opposed to a
@@ -517,14 +567,15 @@ final class Proxy: ObservableObject {
 
     private func startProbe() {
         guard probe == nil else { return }
+        let probingRevision = revision
         probe = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(15))
                 guard !Task.isCancelled, let self else { return }
-                if await self.reachable() {
-                    self.dropped = false
-                    self.probe = nil
-                    self.cameBack()
+                let listening = await self.reachable()
+                guard !Task.isCancelled, self.revision == probingRevision else { return }
+                if listening {
+                    self.recovered()
                     return
                 }
             }
@@ -550,6 +601,7 @@ final class Proxy: ObservableObject {
     /// One TCP connection to the proxy's port, nothing sent: enough to tell
     /// whether it is listening again.
     private func reachable() async -> Bool {
+        guard setup.complete else { return false }
         let host = NWEndpoint.Host(setup.trimmedHost)
         guard let port = NWEndpoint.Port(rawValue: setup.portOrUsual) else { return false }
         let connection = NWConnection(host: host, port: port, using: .tcp)

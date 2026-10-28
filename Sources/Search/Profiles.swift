@@ -167,6 +167,11 @@ final class Profiles: ObservableObject {
         Store.settings.removeObject(forKey: "space.current.\(id.uuidString)")
         list.removeAll { $0.id == id }
         write()
+        // An empty restriction means all remaining profiles. A deleted
+        // profile must not leave the proxy enabled for nobody.
+        if Shared.prefs.proxyProfiles.contains(id) {
+            Shared.prefs.proxyProfiles.remove(id)
+        }
     }
 
     /// The spaces a profile holds, for Settings.

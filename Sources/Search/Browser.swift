@@ -6957,8 +6957,6 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         if websitePopup { cancelCapture() }
-        // A page came: the proxy, if any, is answering.
-        Proxy.shared.loaded(profile: Spaces.profile(of: spaceID))
         popupTab(for: webView)?.popupGesture.clear()
         guard let tab = tab(for: webView) else {
             // A small window's page came: what failed before it is over.

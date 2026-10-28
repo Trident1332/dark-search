@@ -524,7 +524,7 @@ enum AIDownload {
             throw Failure("There isn't enough free space on this Mac (\(ByteCountFormatter.string(fromByteCount: size, countStyle: .file)) needed).")
         }
         let watcher = Watcher(progress: progress, size: size)
-        let configuration = URLSessionConfiguration.ephemeral
+        let configuration = Proxy.session(URLSessionConfiguration.ephemeral)
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 3 * 3600
         let session = URLSession(configuration: configuration, delegate: watcher, delegateQueue: nil)

@@ -22,9 +22,10 @@ struct ProxySign: View {
         proxy.setup.shows && tab.id == browser.activeID && !tab.isBlank && proxy.routes(for: Spaces.profile(of: browser.spaceID))
     }
 
-    private var trouble: Bool { proxy.dropped || proxy.refused }
+    private var trouble: Bool { !proxy.setup.complete || proxy.dropped || proxy.refused }
 
     private var words: String {
+        if !proxy.setup.complete { return "Enter a proxy address in Settings › Proxy" }
         if proxy.refused { return "The proxy didn't accept the name or password" }
         if proxy.dropped { return "The proxy isn't answering — trying again every 15 seconds" }
         if let place = proxy.place { return "Through \(proxy.setup.name) · \(place)" }
