@@ -1065,23 +1065,22 @@ struct Carried: ViewModifier {
                         // than moving along the row as it goes.
                         if let browser, let tab, browser.prefs.usesTabGroups, tab.pin == nil,
                            browser.group(of: tab) != nil || groupDestination?(tab, value.location) != nil { return }
-                        // It takes a neighbour's place the moment it has
-                        // cleared that neighbour: carried right, once its
-                        // leading edge is past the neighbour's far edge;
-                        // carried left, once its trailing edge is before the
-                        // neighbour's near one. Lying over a neighbour, it
-                        // takes nothing. The neighbour then slides into the
-                        // place left behind, and the tab stays under the
-                        // hand. Once swapped, the two are a whole place
-                        // apart, so nothing flickers at the edge.
+                        // It takes a neighbour's place once its leading
+                        // corner is past that neighbour's middle: carried
+                        // right, its right edge past the middle of the tab
+                        // after it; carried left, its left edge before the
+                        // middle of the tab before it. The neighbour then
+                        // slides into the place left behind, and the tab
+                        // stays under the hand. Once swapped, the two are a
+                        // place apart, so nothing flickers at the middle.
                         var target = index
                         var next = index + 1
-                        while next <= last, at >= starts[next] + row[next].length {
+                        while next <= last, at + row[index].length >= starts[next] + row[next].length / 2 {
                             target = next
                             next += 1
                         }
                         var previous = index - 1
-                        while previous >= first, at + row[index].length <= starts[previous] {
+                        while previous >= first, at <= starts[previous] + row[previous].length / 2 {
                             target = previous
                             previous -= 1
                         }
