@@ -22,6 +22,7 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Fixed
 
+- Settings' switches slide smoothly: the knob moves first and the setting follows once it has arrived, where changing the setting mid-slide redrew the page under it and made the knob stutter.
 - Find a setting lets go of the keys when a section or anywhere on the page is clicked; its caret stayed until something else took them.
 - With tabs across the top, a Split View pair is as tall as the tabs beside it (it stood 40 points high beside 28), and its close button stays under the pointer: moving onto it no longer took the hover from the half under it, so it no longer faded out or changed which page it closes on the way. Reported on X
 - Moving the column to the other side while it is folded away leaves the red, yellow and green buttons in the bar that comes down with the menu bar in full screen. They went missing from it until the column next came out. With several windows open, a window's buttons no longer follow another window's column when the side changes. Thanks [@Tom-Boscher](https://github.com/Tom-Boscher) ([#767](https://github.com/driceroland/Search/pull/767))

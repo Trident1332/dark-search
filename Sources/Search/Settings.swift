@@ -1330,22 +1330,56 @@ struct Segmented<Option: Hashable>: View {
 }
 
 /// On or off, in ink rather than in blue.
+///
+/// The knob moves on a state of its own, and the setting follows once it
+/// has arrived. Flipped inside the animation, the setting redrew the whole
+/// page, and often the browser behind it, frame by frame on the main thread
+/// while the knob was meant to be gliding: the switch stuttered. Moved by an
+/// offset rather than by changing the overlay's alignment, the knob is
+/// only drawn again, never laid out.
 struct Switch: View {
     @Binding var on: Bool
+    @State private var lit: Bool
+    /// Flips still on their way to the setting: until they land, a change
+    /// to it is one of ours coming back, not news.
+    @State private var pending = 0
+
+    /// About as long as Motion.settle takes to look done.
+    private static let lag: TimeInterval = 0.24
+
+    init(on: Binding<Bool>) {
+        _on = on
+        _lit = State(initialValue: on.wrappedValue)
+    }
 
     var body: some View {
         Capsule()
-            .fill(on ? Palette.ink : Palette.faint)
+            .fill(lit ? Palette.ink : Palette.faint)
             .frame(width: 30, height: 18)
-            .overlay(alignment: on ? .trailing : .leading) {
+            .overlay(alignment: .leading) {
                 Circle()
                     .fill(Palette.ground)
                     .shadow(color: .black.opacity(0.18), radius: 1.5, y: 1)
-                    .padding(2)
+                    .frame(width: 14, height: 14)
+                    .offset(x: lit ? 14 : 2)
             }
             .contentShape(Capsule())
-            .onTapGesture { withAnimation(Motion.settle) { on.toggle() } }
-            .animation(Motion.settle, value: on)
+            .onTapGesture { flip() }
+            .onChange(of: on) { _, now in
+                guard pending == 0, now != lit else { return }
+                withAnimation(Motion.settle) { lit = now }
+            }
+    }
+
+    private func flip() {
+        let next = !lit
+        withAnimation(Motion.settle) { lit = next }
+        pending += 1
+        let setting = $on
+        DispatchQueue.main.asyncAfter(deadline: .now() + (Motion.reduced ? 0 : Self.lag)) {
+            setting.wrappedValue = next
+            pending -= 1
+        }
     }
 }
 
