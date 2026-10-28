@@ -23,6 +23,7 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Fixed
 
+- The address field keeps its glow without shadowing the glow's rectangular backing surface. Opening the field animates only the field and its cover, so an outgoing page does not fade beneath a new tab.
 - Extension proxy, privacy and content-setting controls now report an error when Search cannot enforce them, instead of claiming protection. Optional access to native apps requires consent and can be revoked; the browser's internal extension bridge grants no such access.
 - Accepting an untrusted certificate applies only to that certificate and origin in the same profile or private store. A changed certificate, another port or another browsing store asks again.
 - Session, window and pinned-tab files leave usernames and passwords out of saved URLs, including old entries when restored. Deleting a space or profile invalidates queued session saves so they cannot recreate its deleted file.

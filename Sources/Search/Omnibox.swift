@@ -78,6 +78,9 @@ struct Omnibox: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Animate the field and its cover, not the page behind them. At the
+        // window level this also faded an outgoing page beneath a new tab.
+        .animation(browser.fieldShowing ? Motion.settle : Motion.quick, value: browser.fieldShowing)
     }
 
     private var field: some View {
@@ -102,6 +105,10 @@ struct Omnibox: View {
 
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .fill(Palette.ground)
+                        // Only the rounded field casts this shadow. Applying
+                        // it to the whole field also composites Breath's
+                        // native backing surface into the shadow's mask.
+                        .shadow(color: .black.opacity(0.06), radius: 24, y: 8)
                 }
             }
             .overlay(
@@ -112,7 +119,6 @@ struct Omnibox: View {
                     )
                     .allowsHitTesting(false)
             )
-            .shadow(color: .black.opacity(0.06), radius: 24, y: 8)
             .modifier(Shake(travel: shake))
             .onAppear {
                 shake = 0
