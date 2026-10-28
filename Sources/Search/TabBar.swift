@@ -997,6 +997,10 @@ struct Carried: ViewModifier {
     @State private var anchor: CGFloat = 0
     @State private var travel: CGFloat = 0
     @State private var reordered = false
+    /// Where the tab was along the row when it last took a place, for the
+    /// dead band below.
+    @State private var lastSwap: CGFloat?
+
     /// The row as laid out: each item's length, pins and tabs told apart.
     private var slots: [Slot] {
         run ?? Array(repeating: Slot(length: step), count: count)
@@ -1044,6 +1048,7 @@ struct Carried: ViewModifier {
                             held = true
                             from = index
                             anchor = starts[index]
+                            lastSwap = nil
                         }
                         let kind = row[index].pinned
                         guard let first = row.firstIndex(where: { $0.pinned == kind }),
@@ -1071,8 +1076,15 @@ struct Carried: ViewModifier {
                         // after it; carried left, its left edge before the
                         // middle of the tab before it. The neighbour then
                         // slides into the place left behind, and the tab
-                        // stays under the hand. Once swapped, the two are a
-                        // place apart, so nothing flickers at the middle.
+                        // stays under the hand.
+                        //
+                        // Swapped, the neighbour's new middle lies only a
+                        // gap from the tab's other corner, so the next few
+                        // points back would swap them again, and the two
+                        // went back and forth under a hand at rest. After a
+                        // swap, nothing is considered until the hand has
+                        // gone half a tab from where the swap happened.
+                        if let lastSwap, abs(at - lastSwap) <= row[index].length / 2 { return }
                         var target = index
                         var next = index + 1
                         while next <= last, at + row[index].length >= starts[next] + row[next].length / 2 {
@@ -1086,6 +1098,7 @@ struct Carried: ViewModifier {
                         }
                         if target != index {
                             reordered = true
+                            lastSwap = at
                             withAnimation(Motion.settle) { move(target) }
                         }
                     }
