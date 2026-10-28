@@ -150,6 +150,10 @@ struct Command: Identifiable {
         self.run = run
     }
 
+    /// The title as Settings lists it: without the "…" a menu ends it with,
+    /// which says a window comes next and means nothing in a list of keys.
+    var name: String { title.hasSuffix("…") ? String(title.dropLast()) : title }
+
     static func named(_ id: String) -> Command? { byID[id] }
     private static let byID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
 
@@ -362,7 +366,7 @@ final class ShortcutStore: ObservableObject {
     /// or an extension's.
     func owner(of combo: KeyCombo, except id: String) -> (id: String, title: String)? {
         if let command = Command.all.first(where: { $0.id != id && key(for: $0.id) == combo }) {
-            return (command.id, command.title)
+            return (command.id, command.name)
         }
         if #available(macOS 15.4, *),
            let other = extensionCommands().first(where: { $0.id != id && key(for: $0.id) == combo }) {

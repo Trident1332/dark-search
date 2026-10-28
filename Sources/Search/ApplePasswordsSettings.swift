@@ -40,13 +40,13 @@ struct ApplePasswordsCard: View {
     @ViewBuilder private var pairing: some View {
         switch apple.state {
         case .idle:
-            Line(apple.trouble ?? "Not connected", "Your Mac shows a code, and you type it here. Once per launch of Search, and only when you first want an account: under a sign-in box, Connect Apple Passwords… asks for it there.") {
-                Pill("Connect…") { Task { await apple.connect() } }
+            Line(apple.trouble ?? "Not connected", "Your Mac shows a code, and you type it here. Once per launch of Search, and only when you first want an account: under a sign-in box, Connect Apple Passwords asks for it there.") {
+                Pill("Connect") { Task { await apple.connect() } }
             }
         case .starting:
-            Line("Connecting…", "Waiting for your Mac to show a code") { EmptyView() }
+            Line("Connecting", "Waiting for your Mac to show a code") { EmptyView() }
         case .code, .checking:
-            Line("Enter the code your Mac shows", apple.state == .checking ? "Checking…" : "Six digits, from the Passwords window") {
+            Line("Enter the code your Mac shows", apple.state == .checking ? "Checking" : "Six digits, from the Passwords window") {
                 HStack(spacing: 8) {
                     TextField("000000", text: $code)
                         .textFieldStyle(.plain)
@@ -158,9 +158,9 @@ struct ApplePairingCard: View {
     private var title: String {
         switch apple.state {
         case .idle: return apple.trouble ?? "Not connected"
-        case .starting: return "Connecting to Apple Passwords…"
+        case .starting: return "Connecting to Apple Passwords"
         case .code: return "Enter the code your Mac shows"
-        case .checking: return "Checking…"
+        case .checking: return "Checking"
         case .paired: return "Connected"
         }
     }

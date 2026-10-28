@@ -37,7 +37,7 @@ struct ShortcutsPage: View {
                     Card {
                         ForEach(Array(commands.enumerated()), id: \.element.id) { index, command in
                             if index > 0 { Rule() }
-                            Line(command.title) {
+                            Line(command.name) {
                                 KeyBox(browser: browser, store: store, id: command.id)
                             }
                             .contextMenu {

@@ -631,7 +631,7 @@ struct SettingsPanel: View {
                 Pill("Set Up", filled: true) { setUpLikeArc() }
             }
         case "arc.import":
-            Pill("Bring Over…") { browser.lead(to: InternalPage(.importing, "Arc")) }
+            Pill("Bring Over") { browser.lead(to: InternalPage(.importing, "Arc")) }
                 .disabled(!arcHere)
                 .opacity(arcHere ? 1 : 0.4)
         case "spaces": Switch(on: $prefs.usesSpaces)
@@ -919,7 +919,7 @@ struct SettingsPanel: View {
     private var versionTitle: String {
         switch updater.stage {
         case .none: return "Updates"
-        case .fetching(let next): return "Search \(next.version) is downloading…"
+        case .fetching(let next): return "Search \(next.version) is downloading"
         case .ready(let next): return "Search \(next.version) is ready"
         case .offered(let next), .waiting(let next): return "Search \(next.version) is out"
         }
@@ -945,7 +945,7 @@ struct SettingsPanel: View {
     private var versionControl: some View {
         switch updater.stage {
         case .none:
-            Pill(updater.checking ? "Checking…" : "Check now") {
+            Pill(updater.checking ? "Checking" : "Check now") {
                 updater.check { found in
                     if found == nil { browser.announce("This is the latest one") }
                 }
@@ -956,7 +956,7 @@ struct SettingsPanel: View {
         case .ready:
             Pill("Relaunch now", filled: true) { updater.relaunch() }
         case .offered:
-            Pill(updater.fetchingDisk ? "Downloading…" : "Download", filled: true) { updater.openDisk() }
+            Pill(updater.fetchingDisk ? "Downloading" : "Download", filled: true) { updater.openDisk() }
                 .disabled(updater.fetchingDisk)
         case .waiting:
             Pill("Install", filled: true) { updater.install() }

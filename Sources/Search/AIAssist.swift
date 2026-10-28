@@ -425,10 +425,10 @@ struct AISettings: View {
                 Card {
                     Line("Where it runs", place) {
                         if drawn {
-                            Stand(prefs.aiProvider.map { $0.isLocal ? "\($0.name), on this Mac" : $0.name } ?? "Choose…", menu: true)
+                            Stand(prefs.aiProvider.map { $0.isLocal ? "\($0.name), on this Mac" : $0.name } ?? "Choose", menu: true)
                         } else {
                         Picker("", selection: Binding(get: { prefs.aiProvider }, set: { prefs.aiProvider = $0 })) {
-                            Text("Choose…").tag(AIProvider?.none)
+                            Text("Choose").tag(AIProvider?.none)
                             ForEach(AIProvider.allCases.filter { $0 != .thisMac || engine.available || prefs.aiProvider == .thisMac }) { provider in
                                 Text(provider == .thisMac ? provider.name : provider.isLocal ? "\(provider.name), on this Mac" : provider.name)
                                     .tag(AIProvider?.some(provider))
@@ -476,7 +476,7 @@ struct AISettings: View {
                     Pill("Download", filled: true) { engine.install() }
                 }
             case .downloading(let done):
-                Line("Model", "Downloading… \(Int(done * 100))%") {
+                Line("Model", "Downloading \(Int(done * 100))%") {
                     Pill("Cancel") { engine.cancelInstall() }
                 }
             case .preparing:
@@ -524,7 +524,7 @@ struct AISettings: View {
                         .onSubmit { save(provider) }
                     Pill("Save") { save(provider) }
                     if provider == .openRouter {
-                        Pill("Sign In…") {
+                        Pill("Sign In") {
                             AISignIn.start(in: browser)
                         }
                     }
@@ -573,13 +573,13 @@ struct AISettings: View {
     @ViewBuilder
     private func localModel(_ provider: AIProvider) -> some View {
         if models.isEmpty {
-            Line("Model", looking ? "Asking \(provider.name)…" : "\(provider.name) isn't running, or has no model yet") {
+            Line("Model", looking ? "Asking \(provider.name)" : "\(provider.name) isn't running, or has no model yet") {
                 Pill("Look Again") { refresh() }
             }
         } else {
             Line("Model", "From \(provider.name) on this Mac") {
                 Picker("", selection: Binding(get: { prefs.aiModel(for: provider) }, set: { prefs.setAIModel($0, for: provider) })) {
-                    Text("Choose…").tag("")
+                    Text("Choose").tag("")
                     ForEach(models, id: \.self) { Text($0).tag($0) }
                 }
                 .labelsHidden()

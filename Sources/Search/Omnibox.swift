@@ -46,6 +46,15 @@ struct Omnibox: View {
                         .ignoresSafeArea(.all, edges: fitted ? [] : .all)
                         .onTapGesture { browser.dismiss() }
                         .transition(.opacity)
+                } else {
+                    // On an empty tab nothing else takes the keys, so AppKit
+                    // left them with the field after a click beside it, its
+                    // caret still blinking. A click on the empty page lets go
+                    // of them, as a click on a page does; a click on the
+                    // field, ⌘L or ⌘T gives them back.
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { NSApp.keyWindow?.makeFirstResponder(nil) }
                 }
 
                 field

@@ -83,6 +83,12 @@ struct Page: View {
 
             Swiping(pull: tab.pull)
         }
+        // These fades are for one tab's page changing. Going to another tab
+        // changes them all at once, and the one being left faded out under
+        // whatever came up at once: from Settings to a new tab, its cards
+        // showed through for a moment as a shaded box around the address
+        // field. Innermost, so it has the last word over the ones below.
+        .transaction(value: tab.id) { $0.animation = nil }
         .animation(Motion.quick, value: tab.page?.kind)
         .animation(Motion.quick, value: tab.failure)
         .animation(Motion.quick, value: tab.floating)

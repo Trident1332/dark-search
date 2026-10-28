@@ -95,7 +95,7 @@ struct TabBar: View {
                                             let ungrouped = browser.displayedTabs.filter { $0.pin == nil && browser.group(of: $0) == nil }
                                             ForEach(Array(ungrouped.enumerated()), id: \.element.id) { index, tab in
                                                 topTab(tab, index: index, count: ungrouped.count,
-                                                       group: nil, strip: geo.size.width, each: each)
+                                                       group: nil, strip: geo.size.width, each: each, endsRow: true)
                                             }
                                         } else {
                                             // Drawn before the first tab that isn't a pin,
@@ -106,7 +106,7 @@ struct TabBar: View {
                                             ForEach(Array(browser.displayedTabs.enumerated()), id: \.element.id) { index, tab in
                                                 if pinLine, index == firstLoose { PinLine() }
                                                 topTab(tab, index: index, count: browser.displayedTabs.count,
-                                                       group: nil, strip: geo.size.width, each: each)
+                                                       group: nil, strip: geo.size.width, each: each, endsRow: true)
                                             }
                                         }
                                     }
@@ -301,7 +301,8 @@ struct TabBar: View {
 
     /// `each`: every loose tab's width (see `width(in:)`), worked out once
     /// for the run.
-    private func topTab(_ tab: Tab, index: Int, count: Int, group: UUID?, strip: CGFloat, each: CGFloat) -> some View {
+    private func topTab(_ tab: Tab, index: Int, count: Int, group: UUID?, strip: CGFloat, each: CGFloat,
+                        endsRow: Bool = false) -> some View {
         let pair = browser.prefs.splitView ? browser.split(for: tab) : nil
         let isPairRepresentative = pair?.left == tab.id
         let itemWidth = isPairRepresentative ? splitItemWidth(base: each) : each
@@ -317,7 +318,7 @@ struct TabBar: View {
             .modifier(Carried(index: index, count: count, step: step, vertical: false,
                               space: "strip", onDropTab: { source, point in drop(source, at: point) },
                               groupDestination: { source, point in destination(source, at: point) },
-                              outside: { browser.dragOut(tab) }, browser: browser, tab: tab) {
+                              outside: { browser.dragOut(tab) }, browser: browser, tab: tab, endsRow: endsRow) {
                 if browser.prefs.usesTabGroups && tab.pin == nil {
                     browser.move(tab, within: group, to: $0)
                 } else {
@@ -951,6 +952,10 @@ struct Carried: ViewModifier {
     var land: ((CGPoint?) -> Bool)? = nil
     /// Over that block: faint, so the place it opened shows through.
     var faded = false
+    /// The last run of the row across the top, which the plus follows:
+    /// carried past its last place, the tab stops there. Further on it slid
+    /// under the plus and out of the run, whose scroll view clips it.
+    var endsRow = false
     let move: (Int) -> Void
 
     @State private var held = false
@@ -973,12 +978,6 @@ struct Carried: ViewModifier {
                     }
                 }
             }
-            // Under the hand exactly. Its place in the row springs when it
-            // passes another tab, and the offset springs back the same way —
-            // until the next move of the hand cuts the offset's spring short
-            // and leaves the place's running: the tab jumped a whole slot and
-            // drifted back each time it passed one. Only the others glide.
-            .transaction { if held { $0.animation = nil } }
             .zIndex(held ? 1 : 0)
             .shadow(color: .black.opacity(held ? 0.14 : 0), radius: 12, y: 4)
             .opacity(held && faded ? 0.4 : 1)
@@ -990,6 +989,7 @@ struct Carried: ViewModifier {
                             from = index
                         }
                         travel = vertical ? value.translation.height : value.translation.width
+                        if endsRow, !vertical { travel = min(travel, CGFloat(count - 1 - from) * step) }
                         // Asked every move, so the block it left lets go
                         // of it as soon as it is elsewhere.
                         let crossed = cross?(value.location) == true
@@ -1055,6 +1055,15 @@ struct Carried: ViewModifier {
                 travel = 0
                 reordered = false
             }
+            // Under the hand exactly. Its place in the row springs when it
+            // passes another tab, and the offset springs back the same way —
+            // until the next move of the hand cuts the offset's spring short
+            // and leaves the place's running: the tab jumped a whole slot and
+            // drifted back each time it passed one. Only the others glide.
+            // Outermost, so it covers the shadow and the fade too: the row
+            // places the tab by its outer layer, and with this inside them
+            // the place still sprang while the offset jumped.
+            .transaction { if held { $0.animation = nil } }
     }
 }
 

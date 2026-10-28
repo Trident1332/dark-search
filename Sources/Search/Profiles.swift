@@ -322,13 +322,13 @@ struct ProfilesSettings: View {
             Line(profile.name + (current ? " — this window" : ""), spaces.joined(separator: ", ")) {
                 HStack(spacing: 6) {
                     if !current { Pill("Open") { Browsers.open(profile: profile.id) } }
-                    Pill("Rename…") {
+                    Pill("Rename") {
                         Ask.name("Rename Profile", placeholder: profile.name, initial: profile.name, confirm: "Rename") {
                             Profiles.shared.rename(profile.id, to: $0)
                         }
                     }
                     if !profile.isPersonal {
-                        Pill("Delete…", tint: .red) {
+                        Pill("Delete", tint: .red) {
                             Ask.sure("Delete “\(profile.name)”?",
                                      detail: "Its windows close, its spaces go with their tabs and pins, and its cookies, sign-ins, history and bookmarks are erased from this Mac.",
                                      confirm: "Delete", returnCancels: true) {
