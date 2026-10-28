@@ -657,9 +657,9 @@ struct SettingsPanel: View {
         case "privacy.clickIDs": Switch(on: $prefs.removesClickIDs)
         case "privacy.gpc": Switch(on: $prefs.sendsPrivacySignal)
         case "notifications.ask": Switch(on: $prefs.siteNotifications)
-        case "privacy.forget": Pill("Forget choices") { browser.forgetCaptureChoices() }
+        case "privacy.forget": Pill("Forget") { browser.forgetCaptureChoices() }
         case "clear.history": Pill("Clear") { browser.clearHistory() }
-        case "clear.cookies": Pill("Sign out of everything") { browser.clearSites() }
+        case "clear.cookies": Pill("Sign Out") { browser.clearSites() }
         case "clear.cache": Pill("Clear") { browser.clearCache() }
         default: EmptyView()
         }
