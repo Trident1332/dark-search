@@ -171,6 +171,7 @@ struct SettingsPanel: View {
                             count: searching ? counts[item] ?? 0 : nil) {
                         query = ""
                         page = item
+                        finding = false
                     }
                 }
             }
@@ -314,6 +315,10 @@ struct SettingsPanel: View {
         .padding(.top, 18)
         .padding(.bottom, 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Plain buttons and empty space don't take the keys on the Mac, so
+        // Find a setting would keep its caret after a click anywhere else.
+        .contentShape(Rectangle())
+        .onTapGesture { finding = false }
     }
 
     @ViewBuilder
