@@ -3509,9 +3509,12 @@ final class Bench {
         case "sidepanel":
             // The side panel (SidePanel.swift): what is in it, and, in a test
             // run, JavaScript in its extension page, or closing it.
-            let web = SidePanelPages.shared.web(in: browser)
+            let web = browser.sidePanel == .dialer ? browser.dialerPage?.web : SidePanelPages.shared.web(in: browser)
             var content: [String: Any] = ["kind": "none"]
             switch browser.sidePanel {
+            case .dialer: content = ["kind": "dialer", "status": browser.dialerPage?.status.text ?? "",
+                                     "statusKind": browser.dialerPage?.status.kind ?? "", "state": browser.dialerPage?.status.state ?? "",
+                                     "ready": browser.dialerPage?.ready ?? false]
             case .page(let id, let url, let tab): content = ["kind": "page", "extension": id, "url": url.absoluteString, "tab": tab.map { $0.uuidString } ?? ""]
             case .site(let url, let space): content = ["kind": "site", "url": url.absoluteString, "space": space.uuidString,
                                                        "store": web.map { $0.configuration.websiteDataStore.isPersistent } ?? false,
@@ -3581,6 +3584,16 @@ final class Bench {
                 guard Store.testing else { answer(["error": "sidepanel totab only works on a --test run"]); return }
                 browser.sitePanelToTab()
                 answer(["shown": browser.sidePanelShown, "tabs": browser.tabs.count])
+            case "dialer":
+                // The dialer into the panel, or a number to it (Dialer.swift).
+                // Test runs only.
+                guard Store.testing else { answer(["error": "sidepanel dialer only works on a --test run"]); return }
+                if let number = request["number"] as? String, !number.isEmpty {
+                    browser.call(number, name: request["name"] as? String ?? "")
+                } else {
+                    browser.showDialer()
+                }
+                answer(["shown": browser.sidePanelShown, "dialer": browser.dialerShown])
             default:
                 answer(state)
             }

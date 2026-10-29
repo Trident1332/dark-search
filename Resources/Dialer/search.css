@@ -1,0 +1,123 @@
+/* Search — the dialer in Search's own clothes.
+ *
+ * dialer.css is Otto's: Geist, a navy card, blue for anything live, as Chrome's side panel had
+ * it. Search is white or near-black, grey for everything but a connection's green and amber,
+ * San Francisco, hairlines and 10-point corners (Design.swift). This sheet, loaded after
+ * dialer.css, reads the same markup in that language: the variables, every colour the
+ * stylesheet writes out by hand, and the few sizes that were Chrome's. The page's own header
+ * goes: the panel's line above it already says Dialer, the line's state, Settings and Close. */
+:root {
+  color-scheme: light dark;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --r-card: 10px; --r-panel: 10px; --r-menu: 10px; --r-item: 7px;
+  --pad: 12px;
+  /* Palette.NS, light: ground 1, ink .09, muted .55, faint .83, hairline .91, wash .937, pinLive .90.
+   * safe and unsafe as SiteCard draws them; the red is the hang-up button's alone. */
+  --bg: #ffffff; --card: #ffffff; --card-2: #efefef; --key: #efefef; --key-hi: #e6e6e6; --seg: #ffffff;
+  --line: #e8e8e8; --line-2: #d4d4d4;
+  --txt: #171717; --txt-2: #3d3d3d; --muted: #8c8c8c; --faint: #b4b4b4;
+  --accent: #171717; --accent-txt: #171717; --green: #148040; --red: #c9372c; --amber: #b5540a;
+  --accent-soft: #efefef; --green-soft: rgba(20, 128, 64, .14); --red-soft: rgba(201, 55, 44, .12); --amber-soft: rgba(181, 84, 10, .14);
+  --on-tint: #ffffff; --ripple: rgba(0, 0, 0, .06); --scrim: rgba(0, 0, 0, .22);
+  --shadow-card: none;
+  --shadow-seg: 0 1px 2px rgba(0, 0, 0, .08), 0 0 0 1px rgba(0, 0, 0, .03);
+  --shadow-sheet: 0 -8px 32px -16px rgba(0, 0, 0, .25);
+  --shadow-menu: 0 10px 30px -12px rgba(0, 0, 0, .3), 0 0 0 1px rgba(0, 0, 0, .04);
+  /* The keys, without the page's header above them: the card is about 200 px + 5.8 keys tall. */
+  --key-size: clamp(48px, min(calc((100vh - 290px) / 5.8), calc((100vw - 120px) / 3)), 68px);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Palette.NS, dark: ground .11, ink .93, muted .58, faint .32, hairline .20, wash .175, pinLive .21. */
+    --bg: #1c1c1c; --card: #1c1c1c; --card-2: #2d2d2d; --key: #2d2d2d; --key-hi: #363636; --seg: #404040;
+    --line: #333333; --line-2: #525252;
+    --txt: #ededed; --txt-2: #c4c4c4; --muted: #949494; --faint: #5c5c5c;
+    --accent: #ededed; --accent-txt: #ededed; --green: #4ade80; --red: #ff6b63; --amber: #fabf24;
+    --accent-soft: #2d2d2d; --green-soft: rgba(74, 222, 128, .16); --red-soft: rgba(255, 107, 99, .16); --amber-soft: rgba(250, 191, 36, .16);
+    --on-tint: #161616; --ripple: rgba(255, 255, 255, .08); --scrim: rgba(0, 0, 0, .5);
+    --shadow-seg: 0 1px 2px rgba(0, 0, 0, .3);
+    --shadow-sheet: 0 -8px 32px -12px rgba(0, 0, 0, .7);
+    --shadow-menu: 0 12px 32px -10px rgba(0, 0, 0, .7), 0 0 0 1px rgba(0, 0, 0, .4);
+  }
+}
+
+body { font: 400 13px/1.4 var(--font); padding: 10px 12px 12px; }
+:focus-visible { outline: 2px solid var(--muted); outline-offset: 2px; }
+
+/* The card is the panel: no border, no shadow, the page's white. */
+.phone { background: transparent; border: 0; border-radius: 0; padding: 0; box-shadow: none; }
+.bar { display: none; }
+
+/* Readout. Calling: amber, as a connection that isn't settled; on a call: green. */
+.display { padding: 14px 16px 12px; min-height: 96px; }
+.phone[data-state="calling"] .display { border-color: color-mix(in srgb, var(--amber) 55%, transparent); }
+.phone[data-state="incall"] .display { border-color: color-mix(in srgb, var(--green) 55%, transparent); box-shadow: inset 0 0 0 1px var(--green-soft); }
+.who { font-size: 12.5px; font-weight: 500; }
+.num { font-weight: 500; }
+.num:empty::before { color: var(--muted); font-weight: 400; font-size: 15px; }
+.sub { font-size: 12px; }
+.timer { font-weight: 500; }
+
+/* Not set up yet: a note in the wash, and Settings as a filled pill (Settings.swift's Pill). */
+.setup { background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-panel); padding: 12px 14px; font-size: 12.5px; }
+.setup p { color: var(--txt-2); }
+.setup button { background: var(--txt); color: var(--bg); font-size: 11.5px; font-weight: 500; padding: 6px 11px; }
+.setup button:hover { filter: brightness(1.15); }
+
+/* Keys: grey circles, the digit in regular weight, the letters muted. */
+.pad { margin-top: 12px; }
+.key { background: var(--key); color: var(--txt); }
+.key > span:first-child { font-weight: 400; }
+.key .l { color: var(--muted); font-weight: 500; }
+.key::after { background: var(--ripple); }
+.key:hover { background: var(--key-hi); }
+.key:active, .key.pressed { background: var(--key-hi); }
+
+/* Call and hang up: one flat green, one flat red, no coloured glow. */
+.call, .hang { color: var(--on-tint); }
+.call { background: var(--green); box-shadow: none; }
+.hang { background: var(--red); box-shadow: none; }
+.call:hover:not(:disabled) { box-shadow: none; filter: brightness(1.06); }
+.call:disabled { background: var(--key); color: var(--faint); }
+.back:hover { color: var(--txt); background: var(--key); }
+
+/* The toolbar: a segmented control in the wash, the lit segment raised on the page's white. */
+.util { margin-top: 12px; padding: 3px; gap: 2px; background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-panel); }
+.util > button, .util > .mwrap > button { height: 32px; border-radius: 8px; font-size: 11.5px; font-weight: 500; color: var(--muted); }
+.util > button:hover, .util > .mwrap > button:hover { color: var(--txt); background: var(--key-hi); }
+.util > button.on, .util > .mwrap > button.on, .util > .mwrap > button[aria-expanded="true"] { color: var(--txt); background: var(--seg); box-shadow: var(--shadow-seg); }
+.util > #mute.on { color: var(--red); background: var(--red-soft); box-shadow: none; }
+.util .pips i.f { background: var(--txt); }
+
+/* Menus: the page's white, a hairline, a soft shadow; the chosen row wears a tick, not a colour. */
+.menu { background: var(--bg); border: 1px solid var(--line-2); box-shadow: var(--shadow-menu); padding: 4px; }
+.menu button { font-size: 12.5px; font-weight: 400; padding: 6px 9px; }
+.menu button:hover:not(:disabled) { background: var(--key); }
+.menu button[aria-checked="true"] { color: var(--txt); }
+.menu .vparent.sel { color: var(--txt); }
+.menu .vparent[aria-expanded="true"] { background: var(--key); }
+.menu .vparent .pips i.f { background: var(--txt); }
+.menu .lvls button.on { background: var(--key); }
+.menu .lvls button.on i.f { background: var(--txt); }
+.menu .vlist button.on { color: var(--txt); }
+
+/* Recents: a sheet on the page's white with a hairline, sliding up over the keys. */
+.scrim { background: var(--scrim); }
+.recents { background: var(--bg); border: 1px solid var(--line); box-shadow: var(--shadow-sheet); }
+.recents.open { box-shadow: var(--shadow-sheet); }
+.rtitle { font-size: 12.5px; font-weight: 600; }
+.rcount { background: var(--key); color: var(--muted); font-size: 11px; }
+.rclear { font-size: 11.5px; }
+.rclear:hover { background: var(--key); color: var(--txt); }
+.rrow { border-radius: 8px; }
+.rrow:hover { background: var(--card-2); }
+.rrow:active { background: var(--key-hi); }
+.ric { background: var(--key); color: var(--muted); }
+.ric.in { background: var(--key); color: var(--txt); }
+.rname { font-size: 13px; font-weight: 500; }
+.rsub, .rwhen, .rdur { font-size: 11.5px; }
+.rday { color: var(--muted); }
+.rempty { font-size: 12px; }
+
+/* The line's dot, should the header ever show: amber while calling, as the panel's line has it. */
+.dot.calling { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }

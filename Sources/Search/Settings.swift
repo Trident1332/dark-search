@@ -28,7 +28,10 @@ struct SettingsPanel: View {
     @State private var draft: Keyword?
     /// A site the proxy is to be skipped for, being typed (Settings › Proxy).
     @State private var bypassDraft: String?
+    /// A site that may use the dialer, being typed (Settings › Dialer).
+    @State private var dialerSiteDraft: String?
     @ObservedObject private var proxy = Proxy.shared
+    @ObservedObject private var dialer = Dialer.shared
     @ObservedObject private var onion = Onion.shared
     @State private var page: Page = Page.named(Store.settings.string(forKey: "settings.page") ?? "") ?? .general
     /// What is typed in Find a setting.
@@ -44,7 +47,7 @@ struct SettingsPanel: View {
     @MainActor static var arcBefore: Preferences.ArcSetup?
 
     enum Page: String, CaseIterable, Identifiable {
-        case general, appearance, tabs, browsing, spaces, passwords, privacy, proxy, ai, extensions, keyboard, about
+        case general, appearance, tabs, browsing, spaces, passwords, privacy, proxy, dialer, ai, extensions, keyboard, about
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -56,6 +59,7 @@ struct SettingsPanel: View {
             case .passwords: return "Passwords"
             case .privacy: return "Privacy"
             case .proxy: return "Proxy"
+            case .dialer: return "Dialer"
             case .ai: return "AI"
             case .extensions: return "Extensions"
             case .keyboard: return "Keyboard & Mouse"
@@ -72,6 +76,7 @@ struct SettingsPanel: View {
             case .passwords: return "key"
             case .privacy: return "hand.raised"
             case .proxy: return "network"
+            case .dialer: return "phone"
             case .ai: return "sparkles"
             case .extensions: return "puzzlepiece.extension"
             case .keyboard: return "keyboard"
@@ -91,7 +96,7 @@ struct SettingsPanel: View {
         /// The rail's three blocks: the browser, your data and tools, About.
         static var blocks: [[Page]] {
             [[.general, .appearance, .tabs, .browsing, .spaces],
-             [.passwords, .privacy, .proxy] + (AI.shipped ? [.ai] : []) + [.extensions, .keyboard],
+             [.passwords, .privacy, .proxy, .dialer] + (AI.shipped ? [.ai] : []) + [.extensions, .keyboard],
              [.about]]
         }
     }
@@ -401,7 +406,7 @@ struct SettingsPanel: View {
     private func groups(of page: Page) -> some View {
         ForEach(SettingsIndex.groups(of: page)) { group in
             let visible = SettingsIndex.items(in: group.id).filter(shown)
-            if page != .proxy || ((group.id == "proxy" || group.id == "tor" || prefs.proxyOn) && !visible.isEmpty) {
+            if groupShown(group, visible: visible) {
                 GroupBlock(title: group.title, icon: group.icon) {
                     Card { rows(visible, searched: false) }
                 }
@@ -412,6 +417,16 @@ struct SettingsPanel: View {
 
     /// In its section, a dependent row is there only while it counts.
     private func shown(_ item: SettingsItem) -> Bool { SettingsIndex.applies(item, prefs) }
+
+    /// Proxy's and Dialer's other groups are there only while their switch
+    /// is on: nothing to set up until it is.
+    private func groupShown(_ group: SettingsGroup, visible: [SettingsItem]) -> Bool {
+        switch group.page {
+        case .proxy: return (group.id == "proxy" || group.id == "tor" || prefs.proxyOn) && !visible.isEmpty
+        case .dialer: return (group.id == "dialer" || prefs.dialerOn) && !visible.isEmpty
+        default: return true
+        }
+    }
 
     private func rows(_ items: [SettingsItem], searched: Bool) -> some View {
         ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
@@ -502,6 +517,13 @@ struct SettingsPanel: View {
     }
 
     private func tint(of item: SettingsItem) -> Color? {
+        if item.id == "dialer.status" {
+            switch browser.dialerPage?.status.kind ?? "" {
+            case "reg", "oncall", "calling": return Palette.safe
+            case "err": return Palette.unsafe
+            default: return nil
+            }
+        }
         guard item.id == "proxy.test" else { return nil }
         if proxy.refused || proxy.dropped { return Palette.unsafe }
         switch proxy.check {
@@ -531,6 +553,7 @@ struct SettingsPanel: View {
         case "updates.version": return versionDetail
         case "arc.import": return arcHere ? item.detail : "Arc isn't on this Mac. Bring Things Over can read an export"
         case "proxy.test": return proxyCheckDetail
+        case "dialer.status": return dialerStatusDetail
         case "onion.connection": return onion.status
         case "proxy.calls":
             return prefs.proxyBlocks ? "Required by Persistent connection to prevent direct peer connections" : item.detail
@@ -539,6 +562,17 @@ struct SettingsPanel: View {
                 : "Only \(Profiles.shared.profile(browser.profileID).name) takes the route; the others stay on the Mac's settings"
         default: return item.detail
         }
+    }
+
+    /// Settings › Dialer › Status: what this window's dialer says, when it
+    /// has been opened.
+    private var dialerStatusDetail: String {
+        guard let page = browser.dialerPage else {
+            return prefs.dialerSetup.complete
+                ? (DialerPassword.kept(prefs.dialerSetup) ? "Opens with the dialer: ⇧⌘K" : "Enter the seat's password first")
+                : "Enter the phone server and seat first"
+        }
+        return page.status.text.isEmpty ? "Starting…" : page.status.text
     }
 
     /// Settings › Proxy › Status: how the last test went.
@@ -570,6 +604,8 @@ struct SettingsPanel: View {
         key += values.keys.sorted().map { "\($0)=\(values[$0] ?? "")" }
         key += [prefs.engine == .custom, draft == nil, bypassDraft == nil, isDefault, shield.trouble ?? "",
                 prefs.proxySignsIn, prefs.proxyBypass, proxy.check == .testing, proxyCheckDetail,
+                prefs.dialerOn, prefs.dialerSites, dialerSiteDraft == nil, dialerStatusDetail,
+                DialerSetup.validWSS(prefs.dialerWSS), browser.dialerShown,
                 proxy.place ?? "", proxy.timeZoneID ?? "", prefs.translateAlways.count, Vault.never.count,
                 Profiles.shared.several, lit ?? ""]
         return key
@@ -596,6 +632,7 @@ struct SettingsPanel: View {
         case .spaces: spacesControl(item.id)
         case .passwords, .privacy: keptControl(item.id)
         case .proxy: proxyControl(item.id)
+        case .dialer: dialerControl(item.id)
         case .keyboard, .about: otherControl(item.id)
         default: EmptyView()
         }
@@ -859,6 +896,33 @@ struct SettingsPanel: View {
     }
 
     @ViewBuilder
+    private func dialerControl(_ id: String) -> some View {
+        switch id {
+        case "dialer.on": Switch(on: $prefs.dialerOn)
+        case "dialer.open":
+            Pill(browser.dialerShown ? "Close" : "Show", filled: !browser.dialerShown) { browser.toggleDialer() }
+        case "dialer.autodial": Switch(on: $prefs.dialerAutodial)
+        case "dialer.region": DialerRegionPicker(prefs: prefs)
+        case "dialer.sites":
+            if dialerSiteDraft == nil {
+                Pill("Add") { dialerSiteDraft = "" }
+            } else {
+                HStack(spacing: 6) {
+                    Pill("Cancel") { dialerSiteDraft = nil }
+                    Pill("Save", filled: true) {
+                        let site = Dialer.site(dialerSiteDraft ?? "")
+                        if !site.isEmpty, !prefs.dialerSites.contains(site) { prefs.dialerSites.append(site) }
+                        dialerSiteDraft = nil
+                    }
+                    .disabled(Dialer.site(dialerSiteDraft ?? "").isEmpty)
+                    .opacity(Dialer.site(dialerSiteDraft ?? "").isEmpty ? 0.5 : 1)
+                }
+            }
+        default: EmptyView()
+        }
+    }
+
+    @ViewBuilder
     private func otherControl(_ id: String) -> some View {
         switch id {
         case "links.peek":
@@ -952,6 +1016,20 @@ struct SettingsPanel: View {
             }
         case "proxy.server":
             ProxyServerFields(prefs: prefs)
+        case "dialer.on":
+            if !searched, !prefs.dialerOn {
+                DialerHint()
+                    .transition(SettingsPanel.unfolding)
+            }
+        case "dialer.server":
+            DialerServerFields(prefs: prefs)
+        case "dialer.seat":
+            DialerSeatFields(prefs: prefs)
+        case "dialer.sites":
+            if !searched {
+                DialerSitesList(prefs: prefs, draft: $dialerSiteDraft)
+                    .under()
+            }
         case "proxy.signIn":
             if prefs.proxySignsIn {
                 ProxySignInFields(prefs: prefs)

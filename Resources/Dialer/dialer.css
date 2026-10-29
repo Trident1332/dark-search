@@ -1,0 +1,362 @@
+/* Ottocaller — the dialer panel.
+ *
+ * One 4 px grid, one type family (Geist, bundled in vendor/ — no network, identical on macOS
+ * and Windows), one icon language (Lucide: 24-unit grid, 2 px round strokes). The keys are
+ * circles sized from the panel's height and width (--key-size), and the keypad, the call row
+ * and the toolbar all sit on the same three columns, so the layout stays even whatever size
+ * the side panel is. Motion is CSS-only and driven by state the script sets:
+ *   .phone[data-state=idle|calling|incall]   which of call / hang-up shows (handset rotates)
+ *   body.has-entry                           the call button breathes when there is a number
+ *   .key.pressed                             keyboard presses light the on-screen key
+ *   .back.hold                               the ring that fills while ⌫ is held to clear
+ *   .display.shake / .display.wipe           failed call or bad paste / cleared
+ *   .num .din / .num.swap                    a typed digit slides in / a new number fades in
+ *   .menu:not([hidden]), .rrow with --i      menus pop from their anchor, recents stagger in
+ * Everything collapses under prefers-reduced-motion. */
+
+@font-face {
+  font-family: "Geist"; font-style: normal; font-weight: 400 700; font-display: block;
+  src: url("vendor/geist-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Geist"; font-style: normal; font-weight: 400 700; font-display: block;
+  src: url("vendor/geist-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@property --hold { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
+
+:root {
+  color-scheme: dark;
+  --bg: #0a0c10; --card: #14171e; --card-2: #1b1f28; --key: #222733; --key-hi: #2e3442;
+  --line: rgba(255, 255, 255, .07); --line-2: rgba(255, 255, 255, .12);
+  --txt: #f3f5f9; --txt-2: #c9cfda; --muted: #8b93a6; --faint: #5a6272;
+  --accent: #0a84ff; --accent-txt: #7fb7ff; --green: #30d158; --red: #ff453a; --amber: #ff9f0a;
+  --accent-soft: rgba(10, 132, 255, .16); --green-soft: rgba(48, 209, 88, .16);
+  --red-soft: rgba(255, 69, 58, .16); --amber-soft: rgba(255, 159, 10, .16);
+  --r-card: 26px; --r-panel: 18px; --r-menu: 14px; --r-item: 9px;
+  --pad: 16px;
+  /* Keys: 68 px circles on a roomy panel, shrinking with the panel's height and width down to
+   * 56 px. Column gaps are wider than row gaps (the classic keypad rhythm); every halo and ring
+   * on the call and hang-up buttons grows less than half a row gap, so they never reach a key. */
+  --key-size: clamp(48px, min(calc((100vh - 342px) / 5.8), calc((100vw - 140px) / 3)), 68px);   /* the card is 254px + 5.8 keys tall; 342 = that + body padding + the sheet's collapsed header */
+  --col-gap: clamp(14px, calc(var(--key-size) * .32), 22px);
+  --row-gap: clamp(10px, calc(var(--key-size) * .2), 14px);
+  --ease-out: cubic-bezier(.2, .7, .2, 1); --spring: cubic-bezier(.2, .9, .3, 1.3);
+  --font: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, .035), 0 24px 60px -28px rgba(0, 0, 0, .8);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+[hidden] { display: none !important; }   /* the hidden attribute must beat author display rules (pips, chevrons, menus) */
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--txt);
+  font: 450 15px/1.4 var(--font); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  font-feature-settings: "tnum";
+  position: relative; display: flex; flex-direction: column; align-items: center; padding: 12px;
+  user-select: none; overflow: hidden; overscroll-behavior: contain;   /* the panel never scrolls: Recents is a sheet that slides over the dialer */
+}
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+:focus:not(:focus-visible) { outline: none; }
+
+/* Stroke icons (Lucide). Sized where they are used. */
+.i, .ico, .mi, .chev, .vchev { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+/* ------------------------------ card ------------------------------ */
+.phone, .recents {
+  position: relative; width: 100%; max-width: 392px;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r-card);
+  padding: var(--pad); box-shadow: var(--shadow-card);
+}
+
+/* ------------------------------ header ------------------------------ */
+.bar { display: flex; align-items: center; gap: 10px; height: 36px; margin-bottom: 12px; }
+.brand { flex: none; display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; letter-spacing: -.015em; }
+.brand img { width: 22px; height: 22px; border-radius: 7px; display: block; box-shadow: 0 1px 2px rgba(0, 0, 0, .4); }
+.status {
+  flex: 0 1 auto; min-width: 0; margin: 0 auto;
+  display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 11px 0 9px;
+  border-radius: 999px; background: rgba(255, 255, 255, .04); border: 1px solid var(--line);
+  font-size: 12.5px; font-weight: 500; color: var(--muted); transition: color .25s;
+}
+.status #stat { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status:has(.dot.reg), .status:has(.dot.oncall) { color: var(--txt-2); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; transition: background .25s, box-shadow .25s; }
+.dot.reg { background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+.dot.oncall { background: var(--green); animation: live 1.6s ease-in-out infinite; }
+.dot.err { background: var(--red); box-shadow: 0 0 0 3px var(--red-soft); }
+.dot.calling { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); animation: pulse 1s ease-in-out infinite; }
+.gear {
+  flex: none; width: 32px; height: 32px; border-radius: 50%; border: 0; background: transparent; color: var(--muted);
+  display: grid; place-items: center; cursor: pointer; padding: 0;
+  transition: background .2s, color .2s, transform .5s var(--ease-out);
+}
+.gear:hover { background: var(--key); color: var(--txt); transform: rotate(40deg); }
+.gear svg { width: 18px; height: 18px; }
+
+/* ------------------------------ readout ------------------------------ */
+.display {
+  position: relative; background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-panel);
+  padding: 14px 18px 12px; min-height: 100px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; cursor: context-menu; transition: border-color .3s, box-shadow .3s;
+}
+.phone[data-state="calling"] .display { border-color: rgba(10, 132, 255, .4); }
+.phone[data-state="incall"] .display { border-color: rgba(48, 209, 88, .4); box-shadow: inset 0 0 0 1px rgba(48, 209, 88, .12); }
+.display.shake { animation: shake .45s var(--ease-out); }
+.display.wipe { animation: wipe .35s var(--ease-out); }
+.who { font-size: 13px; font-weight: 500; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 2px; }
+.who:empty { display: none; }
+.num {
+  font-size: 34px; line-height: 1.15; font-weight: 500; letter-spacing: -.01em; font-variant-numeric: tabular-nums;
+  word-break: break-all; min-height: 40px; width: 100%; user-select: text; transition: font-size .25s var(--ease-out);
+}
+.num[data-size="m"] { font-size: 28px; }
+.num[data-size="s"] { font-size: 22px; letter-spacing: 0; }
+.num[data-size="xs"] { font-size: 18px; letter-spacing: 0; }
+.num:empty::before { content: "Enter a number"; color: var(--faint); font-weight: 450; font-size: 17px; letter-spacing: 0; }
+.num .din { display: inline-block; white-space: pre; animation: din .28s var(--ease-out) both; }
+.num.swap { animation: swap .3s var(--ease-out); }
+.sub { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 12.5px; font-weight: 500; color: var(--muted); margin-top: 4px; min-height: 17px; }
+.timer { font-variant-numeric: tabular-nums; color: var(--green); font-weight: 600; }
+.timer:not(:empty) { display: inline-flex; align-items: center; }
+.timer:not(:empty)::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); margin-right: 5px; animation: pulse 1.2s ease-in-out infinite; }
+
+/* Right-click menu on the readout, and the two toolbar menus. */
+.menu {
+  position: fixed; z-index: 50; min-width: 168px; padding: 5px;
+  background: #1e2330; border: 1px solid var(--line-2); border-radius: var(--r-menu);
+  box-shadow: 0 16px 40px -8px rgba(0, 0, 0, .7), 0 0 0 1px rgba(0, 0, 0, .35); transform-origin: top left;
+}
+.menu:not([hidden]) { animation: menu-in .18s var(--ease-out); }
+.menu button {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: transparent; border: 0;
+  color: var(--txt); font-size: 13px; font-weight: 500; padding: 8px 10px; border-radius: var(--r-item); cursor: pointer;
+  transition: background .15s;
+}
+.menu button:hover:not(:disabled) { background: var(--key-hi); }
+.menu button:disabled { color: var(--faint); cursor: default; }
+.menu .mi { width: 16px; height: 16px; opacity: .85; }
+
+/* ------------------------------ not configured ------------------------------ */
+.setup { background: var(--accent-soft); border: 1px solid rgba(10, 132, 255, .35); border-radius: var(--r-panel); padding: 14px 16px; margin: 12px 0 0; font-size: 13px; }
+.setup p { margin: 0 0 10px; color: var(--txt-2); line-height: 1.45; }
+.setup button { background: var(--accent); color: #fff; border: 0; border-radius: 999px; padding: 8px 14px; font-size: 13px; font-weight: 600; cursor: pointer; }
+
+/* ------------------------------ keypad ------------------------------ */
+.pad {
+  display: grid; grid-template-columns: repeat(3, var(--key-size)); column-gap: var(--col-gap); row-gap: var(--row-gap);
+  justify-content: center; margin: 14px 0 0;
+}
+.key {
+  position: relative; width: var(--key-size); aspect-ratio: 1; border-radius: 50%; border: 0; padding: 0;
+  background: var(--key); color: var(--txt); display: flex; flex-direction: column; align-items: center; justify-content: center;
+  cursor: pointer; transition: transform .32s var(--spring), background .25s;
+}
+.key > span:first-child { font-size: calc(var(--key-size) * .37); font-weight: 500; line-height: 1; letter-spacing: -.01em; }
+.key .l { font-size: 9.5px; font-weight: 600; letter-spacing: .18em; padding-left: .18em; color: var(--muted); line-height: 1; height: 10px; margin-top: 5px; }
+.key[data-key="*"] .l, .key[data-key="#"] .l { display: none; }
+.key[data-key="*"] > span:first-child { font-size: calc(var(--key-size) * .5); line-height: .7; padding-top: .28em; }
+.key[data-key="#"] > span:first-child { font-size: calc(var(--key-size) * .4); }
+.key::after {   /* press ripple */
+  content: ""; position: absolute; inset: 0; border-radius: 50%; background: rgba(255, 255, 255, .14);
+  opacity: 0; transform: scale(.5); transition: opacity .4s var(--ease-out), transform .4s var(--ease-out); pointer-events: none;
+}
+.key:hover { background: var(--key-hi); }
+.key:active, .key.pressed { transform: scale(.9); background: var(--key-hi); transition-duration: .06s; }
+.key:active::after, .key.pressed::after { opacity: 1; transform: scale(1); transition-duration: .08s; }
+
+/* ------------------------------ call row ------------------------------ */
+/* Same three columns as the keypad: call under 0, ⌫ under #. */
+.row {
+  display: grid; grid-template-columns: repeat(3, var(--key-size)); column-gap: var(--col-gap);
+  justify-content: center; align-items: center; margin-top: var(--row-gap);
+}
+.call, .hang {
+  grid-column: 2; grid-row: 1; position: relative; width: var(--key-size); aspect-ratio: 1; border-radius: 50%; border: 0; padding: 0;
+  color: #fff; display: grid; place-items: center; cursor: pointer;
+  transition: transform .35s var(--spring), opacity .22s var(--ease-out), box-shadow .3s, background .3s, filter .2s;
+}
+.hs { width: calc(var(--key-size) * .42); height: auto; fill: currentColor; stroke: currentColor; stroke-width: 1.2; stroke-linejoin: round; }
+.hang .hs { transform: rotate(135deg); }
+.call { background: var(--green); box-shadow: 0 6px 16px -8px rgba(48, 209, 88, .7); }
+.hang { background: var(--red); box-shadow: 0 6px 16px -8px rgba(255, 69, 58, .7); }
+.call:hover:not(:disabled) { box-shadow: 0 8px 20px -8px rgba(48, 209, 88, .85); filter: brightness(1.06); }
+.call:active:not(:disabled), .hang:active { transform: scale(.92); transition-duration: .06s; }
+.call:disabled { background: var(--key); color: var(--faint); box-shadow: none; cursor: default; }
+.phone[data-state="calling"] .call, .phone[data-state="incall"] .call { opacity: 0; transform: rotate(135deg) scale(.4); pointer-events: none; }
+.phone[data-state="idle"] .hang { opacity: 0; transform: rotate(-135deg) scale(.4); pointer-events: none; }
+.call::before, .hang::before, .hang::after { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 2px solid currentColor; opacity: 0; pointer-events: none; }
+.call::before { border-color: var(--green); }
+.hang::before, .hang::after { border-color: var(--red); }
+body.has-entry .phone[data-state="idle"] .call:not(:disabled)::before { animation: ready 2.4s var(--ease-out) infinite; }
+.phone[data-state="calling"] .hang::before { animation: ring 1.8s ease-out infinite; }
+.phone[data-state="calling"] .hang::after { animation: ring 1.8s ease-out .9s infinite; }
+.back {
+  grid-column: 3; justify-self: center; position: relative; width: 44px; height: 44px; border-radius: 50%; border: 0; padding: 0;
+  background: transparent; color: var(--muted); display: grid; place-items: center; cursor: pointer;
+  transition: background .2s, color .2s, transform .3s var(--spring), opacity .25s;
+}
+.back svg { width: 22px; height: 22px; }
+.back:hover { color: var(--txt); background: var(--key); }
+.back:active { transform: scale(.9); }
+body:not(.has-entry) .phone[data-state="idle"] .back { opacity: .4; }
+.back::before {   /* hold-to-clear progress ring */
+  content: ""; position: absolute; inset: -3px; border-radius: 50%; opacity: 0; pointer-events: none;
+  background: conic-gradient(var(--red) var(--hold), transparent 0);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+}
+.back.hold { color: var(--txt); }
+.back.hold::before { opacity: 1; animation: hold 2s linear forwards; }
+
+/* ------------------------------ toolbar ------------------------------ */
+/* One segmented bar, three equal segments: Mute · Number · Voice. */
+.util { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; margin-top: 14px; padding: 4px; background: var(--card-2); border: 1px solid var(--line); border-radius: 14px; }
+.util > * { min-width: 0; }
+.mwrap { position: relative; }
+.util > button, .util > .mwrap > button {
+  width: 100%; height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  background: transparent; border: 0; border-radius: 10px; color: var(--muted); padding: 0 6px;
+  font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap;
+  transition: background .2s, color .2s, transform .3s var(--spring);
+}
+.util > button { width: auto; }   /* a direct-child button is itself the grid cell */
+.util > button:hover, .util > .mwrap > button:hover { color: var(--txt); background: var(--key); }
+.util > button:active, .util > .mwrap > button:active { transform: scale(.96); transition-duration: .06s; }
+.util > button.on, .util > .mwrap > button.on, .util > .mwrap > button[aria-expanded="true"] { color: var(--accent-txt); background: var(--accent-soft); }
+.util > #mute.on { color: #ff8a80; background: var(--red-soft); }
+.util .ico { width: 16px; height: 16px; }
+.util .slash { stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset .28s var(--ease-out); }
+.util #mute.on .slash { stroke-dashoffset: 0; }
+.util .chev { width: 11px; height: 11px; opacity: .6; transition: transform .25s var(--ease-out); }
+.util button[aria-expanded="true"] .chev { transform: rotate(180deg); }
+.util .lbl { overflow: hidden; text-overflow: ellipsis; }
+.pips { display: inline-flex; align-items: flex-end; gap: 2px; }
+.util .pips { margin-left: 1px; }
+.util .pips i { display: block; width: 3px; height: var(--h); border-radius: 2px; background: var(--faint); transition: background .2s; }
+.util .pips i.f { background: var(--accent-txt); }
+
+/* Menus open upward from their segment. */
+.menu.vmenu { position: absolute; left: 50%; translate: -50% 0; bottom: calc(100% + 10px); min-width: 156px; transform-origin: bottom center; }
+#voiceMenu { min-width: 188px; left: auto; right: 0; translate: 0 0; transform-origin: bottom right; }   /* rightmost segment: anchor right so it never leaves the card */
+.menu button[aria-checked="true"] { color: var(--accent-txt); }
+#providerMenu button[aria-checked="true"]::after, .menu .vplain[aria-checked="true"]::after, .menu .vlist button.on::after {
+  content: ""; margin-left: auto; width: 15px; height: 15px; background: currentColor; flex: none;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+/* Voice rows: icon + mode word, the current level's pips, and a › that opens the level strip. */
+.menu .vparent, .menu .vplain { padding: 8px 8px 8px 10px; }
+.menu .vparent .ico, .menu .vplain .ico, .menu .vlist .ico { width: 16px; height: 16px; }
+.menu .vparent.sel { color: var(--accent-txt); }
+.menu .vparent[aria-expanded="true"] { background: var(--key-hi); }   /* the row whose flyout is open is the lit row; hovering another row folds it */
+.menu .vparent .pips { margin-left: auto; }
+.menu .vparent .pips i { display: block; width: 4px; height: var(--h); border-radius: 2px; background: var(--faint); transition: background .2s; }
+.menu .vparent .pips i.f { background: var(--accent-txt); }
+.vchev { width: 14px; height: 14px; color: var(--muted); }
+.menu .vparent .vchev { margin-left: auto; }
+.menu .vparent .pips + .vchev { margin-left: 0; }
+.menu .vparent.off { color: var(--muted); }                 /* the voice service is off */
+/* Level strip: a compact flyout to the left of the row — three glyphs, one to three bars filled. */
+.menu.vsub { position: absolute; left: auto; right: calc(100% + 2px); bottom: 0; translate: 0 0; min-width: 0; padding: 4px; transform-origin: right center; }
+.menu .lvls { display: flex; gap: 2px; }
+.menu .lvls button { width: 34px; height: 30px; padding: 0 0 7px; display: flex; align-items: flex-end; justify-content: center; gap: 2px; border-radius: 7px; }
+.menu .lvls button i { display: block; width: 5px; height: var(--h); border-radius: 2px; background: var(--faint); }
+.menu .lvls button i.f { background: var(--muted); }
+.menu .lvls button.on { background: var(--accent-soft); }
+.menu .lvls button.on i.f { background: var(--accent-txt); }
+.menu .vlist { display: flex; flex-direction: column; max-width: 220px; }
+.menu .vlist button { min-width: 120px; padding: 7px 14px 7px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; }
+.menu .vlist button { padding-right: 10px; }
+.menu .vlist button.on { color: var(--accent-txt); }
+.menu .vlist button.on::after { margin-left: 8px; }
+.menu .vlist button.note { color: var(--muted); font-size: 12px; white-space: normal; opacity: 1; }
+
+/* ------------------------------ recents: a bottom sheet ------------------------------ */
+.scrim { position: absolute; inset: 0; z-index: 5; background: rgba(4, 6, 10, .55); opacity: 0; pointer-events: none; transition: opacity .3s var(--ease-out); }
+body.sheet .scrim { opacity: 1; pointer-events: auto; }
+.phone { transition: transform .45s var(--spring); }
+body.sheet .phone { transform: scale(.985); }
+.recents {
+  position: absolute; z-index: 6; left: 12px; right: 12px; bottom: 12px; margin: 0 auto;
+  top: min(var(--sheet-top, 70%), calc(100% - 58px));   /* resting: just under the dialer card; at least the header shows */
+  display: flex; flex-direction: column; padding: 12px var(--pad) 10px; cursor: pointer;
+  transition: top .45s var(--spring), box-shadow .3s;
+}
+.recents.open { top: var(--sheet-open, max(12px, 22%)); cursor: default; box-shadow: 0 -12px 48px -16px rgba(0, 0, 0, .9), var(--shadow-card); }
+.rhead { display: flex; align-items: center; gap: 8px; padding: 0 2px 8px; flex: none; cursor: pointer; }
+.rchev { width: 18px; height: 18px; color: var(--txt-2); transition: transform .4s var(--spring); }
+.recents.open .rchev { transform: rotate(180deg); }
+.rtitle { font-size: 15px; font-weight: 600; letter-spacing: -.015em; }
+.rcount { font-size: 11.5px; font-weight: 600; color: var(--muted); background: rgba(255, 255, 255, .06); padding: 1px 7px; border-radius: 999px; min-width: 22px; text-align: center; }
+.rcount:empty { display: none; }
+.rclear {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 5px; background: transparent; border: 0; color: var(--muted);
+  font-size: 12.5px; font-weight: 500; padding: 5px 9px; border-radius: 999px; cursor: pointer; transition: background .2s, color .2s;
+}
+.rclear .mi { width: 14px; height: 14px; }
+.rclear:hover { background: var(--key); color: var(--txt); }
+.rlist {
+  list-style: none; margin: 0 -6px; padding: 0; flex: 1 1 auto; min-height: 0; overflow: hidden; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--line-2) transparent;
+  -webkit-mask-image: linear-gradient(#000 calc(100% - 28px), transparent); mask-image: linear-gradient(#000 calc(100% - 28px), transparent);   /* the peek fades out */
+}
+.recents.open .rlist { overflow-y: auto; -webkit-mask-image: none; mask-image: none; }
+.rrow {
+  display: grid; grid-template-columns: 34px 1fr auto; gap: 12px; align-items: center; width: 100%;
+  background: transparent; border: 0; color: var(--txt); text-align: left; padding: 8px; border-radius: 14px; cursor: pointer;
+  animation: row-in .32s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 28ms); transition: background .15s;
+}
+.rrow:hover { background: var(--card-2); }
+.rrow:active { background: var(--key); }
+.ric { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: rgba(139, 147, 166, .14); color: var(--muted); }
+.ric svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ric.ok { background: var(--green-soft); color: var(--green); }
+.ric.miss { background: var(--amber-soft); color: var(--amber); }
+.ric.fail { background: var(--red-soft); color: var(--red); }
+.ric.in { background: var(--accent-soft); color: var(--accent-txt); }
+.rmain { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.rname { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rsub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rmeta { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex: none; }
+.rwhen { font-size: 12px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rdur { font-size: 11.5px; font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rdur.ok { color: var(--green); }
+.rdur.miss { color: var(--amber); }
+.rdur.fail { color: var(--red); }
+.rempty { padding: 14px 8px 16px; font-size: 12.5px; color: var(--muted); text-align: center; }
+.rday { font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); padding: 10px 8px 4px; font-weight: 600; }
+
+/* ------------------------------ motion ------------------------------ */
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes live { 0%, 100% { box-shadow: 0 0 0 0 rgba(48, 209, 88, .55); } 60% { box-shadow: 0 0 0 5px rgba(48, 209, 88, 0); } }
+@keyframes din { from { opacity: 0; transform: translateY(10px) scale(.85); } }
+@keyframes swap { from { opacity: 0; transform: translateY(6px); } }
+@keyframes ready { 0% { transform: scale(1); opacity: .6; } 100% { transform: scale(1.16); opacity: 0; } }   /* +5 px at 68 px: inside the row gap */
+@keyframes ring { 0% { transform: scale(1); opacity: .8; } 100% { transform: scale(1.24); opacity: 0; } }   /* +8 px at 68 px: inside the row gap */
+@keyframes menu-in { from { opacity: 0; scale: .92; } }
+@keyframes row-in { from { opacity: 0; transform: translateY(6px); } }
+@keyframes shake { 10%, 90% { transform: translateX(-1px); } 20%, 80% { transform: translateX(2px); } 30%, 50%, 70% { transform: translateX(-3px); } 40%, 60% { transform: translateX(3px); } }
+@keyframes wipe { 0% { opacity: 1; } 35% { opacity: .15; } 100% { opacity: 1; } }
+@keyframes hold { from { --hold: 0%; } to { --hold: 100%; } }
+
+@media (max-width: 350px) {
+  .util { grid-template-columns: repeat(3, auto); }   /* a very narrow panel: content-sized segments rather than truncated labels */
+}
+@media (max-height: 700px) {
+  :root { --pad: 14px; }
+  .bar { margin-bottom: 8px; }
+  .display { min-height: 88px; padding: 10px 16px 8px; }
+  .pad, .util { margin-top: 10px; }
+}
+@media (max-height: 540px) {   /* a panel too short even for the smallest keypad scrolls instead of stacking the sheet */
+  body { overflow-y: auto; }
+  .recents, .recents.open { position: static; margin-top: 12px; top: auto; box-shadow: var(--shadow-card); }
+  .rlist { overflow-y: auto; max-height: 40vh; mask-image: none; -webkit-mask-image: none; }
+  .scrim, body.sheet .phone { display: none; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+}

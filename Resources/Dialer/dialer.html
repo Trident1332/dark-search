@@ -1,0 +1,136 @@
+<!doctype html>
+<!-- Otto's dialer (web-dialer/extension/dialer.html), as Search shows it in its side panel. search.js stands in for Chrome; see Dialer.swift. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Dialer</title>
+<link rel="stylesheet" href="dialer.css">
+<link rel="stylesheet" href="search.css">
+</head>
+<body>
+  <main class="phone" data-state="idle">
+    <header class="bar">
+      <div class="brand"><img src="icons/icon32.png" alt="" width="22" height="22"><span>Dialer</span></div>
+      <div class="status" role="status" aria-live="polite"><span class="dot" id="dot"></span><span id="stat">Starting…</span></div>
+      <button class="gear" id="gear" type="button" title="Settings" aria-label="Settings">
+        <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+    </header>
+
+    <div class="display">
+      <div class="who" id="who"></div>
+      <div class="num" id="num"></div>
+      <div class="sub"><span id="sub" aria-live="polite"></span><span class="timer" id="timer"></span></div>
+    </div>
+
+    <div class="setup" id="setup" hidden>
+      <p>The dialer isn't set up yet. Settings › Dialer takes your phone server's WebSocket address, its domain, and the seat it should sign in as.</p>
+      <button type="button" id="setupBtn">Open Settings › Dialer</button>
+    </div>
+
+    <div class="pad" id="pad" role="group" aria-label="Keypad"></div>
+
+    <div class="row">
+      <button class="call" id="call" type="button" title="Call" aria-label="Call">
+        <svg class="hs" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384"/></svg>
+      </button>
+      <button class="hang" id="hang" type="button" title="Hang up" aria-label="Hang up" inert>
+        <svg class="hs" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384"/></svg>
+      </button>
+      <button class="back" id="back" type="button" title="Delete (hold to clear)" aria-label="Delete">
+        <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/></svg>
+      </button>
+    </div>
+
+    <div class="util" role="toolbar" aria-label="Call options">
+      <button id="mute" type="button" title="Mute your microphone">
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19v3"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/><path class="slash" pathLength="1" d="m3 3 18 18"/></svg>
+        <span class="lbl" id="muteLbl">Mute</span>
+      </button>
+      <div class="mwrap">
+        <button id="provider" type="button" title="Number the call goes out on" aria-haspopup="menu" aria-expanded="false">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><rect x="8" y="11" width="8" height="6" rx="1"/><path d="M11 11v6"/></svg>
+          <span class="lbl" id="providerLbl">Numero</span>
+          <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="menu vmenu" id="providerMenu" hidden role="menu" aria-label="Number">
+          <button type="button" role="menuitemradio" data-provider="numero" aria-checked="true">Numero</button>
+          <button type="button" role="menuitemradio" data-provider="telicall" aria-checked="false">Telicall</button>
+        </div>
+      </div>
+      <div class="mwrap">
+        <button id="voice" type="button" title="Voice changer — what the other side hears on calls you place. Dial 9199 to hear yourself." aria-haspopup="menu" aria-expanded="false">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path id="voiceIco" d="M2 10v3M6 6v11M10 3v18M14 8v7M18 5v13M22 10v3"/></svg>
+          <span class="lbl" id="voiceLbl">Voice</span>
+          <span class="pips" id="voicePips" hidden aria-hidden="true"><i style="--h:5px"></i><i style="--h:8px"></i><i style="--h:11px"></i></span>
+          <svg class="chev" id="voiceChev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <div class="menu vmenu" id="voiceMenu" hidden role="menu" aria-label="Voice">
+          <button type="button" class="vplain" role="menuitemradio" data-voice="" aria-checked="true"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>Off</button>
+          <button type="button" class="vparent" data-sub="voiceDeep" data-mode="deep" role="menuitem" aria-haspopup="menu" aria-expanded="false">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12C5.5 4 8.5 4 12 12s6.5 8 10 0"/></svg>Deep
+            <span class="pips" aria-hidden="true"><i style="--h:5px"></i><i style="--h:8px"></i><i style="--h:11px"></i></span>
+            <svg class="vchev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+          <div class="menu vmenu vsub" id="voiceDeep" hidden role="menu" aria-label="Deep level">
+            <div class="lvls">
+              <button type="button" role="menuitemradio" data-voice="-3" aria-checked="false" aria-label="Deep, level 1" title="Deep · level 1"><i class="f" style="--h:6px"></i><i style="--h:10px"></i><i style="--h:14px"></i></button>
+              <button type="button" role="menuitemradio" data-voice="-5" aria-checked="false" aria-label="Deep, level 2" title="Deep · level 2"><i class="f" style="--h:6px"></i><i class="f" style="--h:10px"></i><i style="--h:14px"></i></button>
+              <button type="button" role="menuitemradio" data-voice="-8" aria-checked="false" aria-label="Deep, level 3" title="Deep · level 3"><i class="f" style="--h:6px"></i><i class="f" style="--h:10px"></i><i class="f" style="--h:14px"></i></button>
+            </div>
+          </div>
+          <button type="button" class="vparent" data-sub="voiceLight" data-mode="light" role="menuitem" aria-haspopup="menu" aria-expanded="false">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12c1.2-5 2.3-5 3.5 0s2.3 5 3.5 0 2.3-5 3.5 0 2.3 5 3.5 0 2.3-5 3.5 0 2.3 5 3.5 0"/></svg>Light
+            <span class="pips" aria-hidden="true"><i style="--h:5px"></i><i style="--h:8px"></i><i style="--h:11px"></i></span>
+            <svg class="vchev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+          <div class="menu vmenu vsub" id="voiceLight" hidden role="menu" aria-label="Light level">
+            <div class="lvls">
+              <button type="button" role="menuitemradio" data-voice="2" aria-checked="false" aria-label="Light, level 1" title="Light · level 1"><i class="f" style="--h:6px"></i><i style="--h:10px"></i><i style="--h:14px"></i></button>
+              <button type="button" role="menuitemradio" data-voice="4" aria-checked="false" aria-label="Light, level 2" title="Light · level 2"><i class="f" style="--h:6px"></i><i class="f" style="--h:10px"></i><i style="--h:14px"></i></button>
+              <button type="button" role="menuitemradio" data-voice="6" aria-checked="false" aria-label="Light, level 3" title="Light · level 3"><i class="f" style="--h:6px"></i><i class="f" style="--h:10px"></i><i class="f" style="--h:14px"></i></button>
+            </div>
+          </div>
+          <button type="button" class="vplain" role="menuitemradio" data-voice="female" aria-checked="false"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 8a5 5 0 1 1-10 0 5 5 0 0 1 10 0M20 21a8 8 0 0 0-16 0"/></svg>Female</button>
+          <button type="button" class="vparent" data-sub="voiceMac" data-mode="mac" role="menuitem" aria-haspopup="menu" aria-expanded="false" title="Voices converted on this Mac by the Ottocaller voice service">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2zM20.054 15.987H3.946"/></svg>Mac
+            <svg class="vchev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+          <div class="menu vmenu vsub" id="voiceMac" hidden role="menu" aria-label="Mac voices">
+            <div class="vlist" id="voiceMacList"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <div class="scrim" id="scrim"></div>
+  <section class="recents" id="recents" hidden aria-label="Recent calls">
+    <div class="rhead" id="rhead" role="button" tabindex="0" aria-expanded="false" aria-controls="rlist" title="Show recent calls">
+      <span class="rtitle">Recents</span>
+      <span class="rcount" id="rcount"></span>
+      <svg class="rchev" viewBox="0 0 24 24" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
+      <button class="rclear" id="rclear" type="button" title="Clear the call log">
+        <svg class="mi" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Clear
+      </button>
+    </div>
+    <ul class="rlist" id="rlist"></ul>
+  </section>
+  <audio id="remote" autoplay></audio>
+
+  <div id="numMenu" class="menu" hidden role="menu">
+    <button type="button" data-act="paste" role="menuitem"><svg class="mi" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 14h10"/><path d="M16 4h2a2 2 0 0 1 2 2v1.344"/><path d="m17 18 4-4-4-4"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 1.793-1.113"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg>Paste</button>
+    <button type="button" data-act="copy" role="menuitem"><svg class="mi" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>Copy</button>
+    <button type="button" data-act="selectall" role="menuitem"><svg class="mi" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 21h1"/><path d="M14 3h1"/><path d="M19 3a2 2 0 0 1 2 2"/><path d="M21 14v1"/><path d="M21 19a2 2 0 0 1-2 2"/><path d="M21 9v1"/><path d="M3 14v1"/><path d="M3 9v1"/><path d="M5 21a2 2 0 0 1-2-2"/><path d="M5 3a2 2 0 0 0-2 2"/><path d="M7 12h10"/><path d="M7 16h6"/><path d="M7 8h8"/><path d="M9 21h1"/><path d="M9 3h1"/></svg>Select all</button>
+  </div>
+
+  <script src="search.js"></script>
+  <script src="vendor/phone.min.js"></script>
+  <script src="vendor/sip.min.js"></script>
+  <script src="macvoice.js"></script>
+  <script src="calls.js"></script>
+  <script src="dialer.js"></script>
+</body>
+</html>

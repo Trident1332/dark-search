@@ -96,6 +96,10 @@ enum SettingsIndex {
         .init(id: "proxyprivacy", page: .proxy, title: "Privacy", icon: "hand.raised"),
         .init(id: "tor", page: .proxy, title: "Tor", icon: "network.badge.shield.half.filled"),
 
+        .init(id: "dialer", page: .dialer, title: "Calls", icon: "phone"),
+        .init(id: "dialerline", page: .dialer, title: "Phone line", icon: "server.rack"),
+        .init(id: "dialersites", page: .dialer, title: "Click-to-call", icon: "globe"),
+
         .init(id: "mouse", page: .keyboard, title: "Mouse and trackpad", icon: "computermouse"),
 
         .init(id: "updates", page: .about, title: "Updates", icon: "arrow.triangle.2.circlepath"),
@@ -374,6 +378,35 @@ enum SettingsIndex {
               title: "Match the proxy's time zone", detail: "Pages use the time zone reported by the proxy's location",
               more: "Date and Intl use the proxy location's time zone. UTC timestamps stay unchanged. Existing pages and workers restart when the time zone changes. Your Mac's time zone is never changed.",
               keys: ["proxy.timeZone"], words: ["time zone", "timezone", "date", "intl", "utc", "clock", "location", "restart", "worker"], parent: "proxy.on"),
+        // Dialer
+        .init(id: "dialer.on", group: "dialer", icon: "phone",
+              title: "Call phone numbers from Search", detail: "Right-click a number on a page to call it, and a keypad in the side panel",
+              more: "Otto's dialer, built in: a softphone that signs in to your FreeSWITCH phone server over a WebSocket and carries the call's sound through WebRTC, shown in the side panel. A tel: link opens there too, and otto's own pages can start a call. The dialer connects to the phone server directly, never through Settings › Proxy: a call's sound can't take a proxy's route.",
+              keys: ["dialer.on"], words: ["dialer", "phone", "call", "softphone", "sip", "freeswitch", "otto", "ottocaller", "keypad", "tel", "voip"]),
+        .init(id: "dialer.open", group: "dialer", icon: "sidebar.right",
+              title: "The dialer", detail: "In the side panel, beside the page. ⇧⌘K, or View › Show Dialer",
+              words: ["panel", "keypad", "open", "show"], parent: "dialer.on"),
+        .init(id: "dialer.autodial", group: "dialer", icon: "phone.arrow.up.right",
+              title: "Call as soon as a number arrives", detail: "Off, the number is loaded into the keypad and you press Call",
+              keys: ["dialer.autodial"], words: ["autodial", "automatic", "right-click", "confirm"], parent: "dialer.on"),
+        .init(id: "dialer.region", group: "dialer", icon: "globe.europe.africa",
+              title: "Default country", detail: "For numbers written without a country code",
+              keys: ["dialer.region"], words: ["country", "region", "code", "international", "national"], parent: "dialer.on"),
+        .init(id: "dialer.server", group: "dialerline", icon: "server.rack",
+              title: "Phone server", detail: "Your FreeSWITCH's WebSocket address, and its SIP domain",
+              more: "The WebSocket the dialer signs in through, wss://sip.example.com:7443, and the domain the seat is registered under. Whoever runs the phone line has both; otto's Settings › Dialer shows them too.",
+              keys: ["dialer.wss", "dialer.domain"], words: ["websocket", "wss", "domain", "sip", "server", "address"], kind: .wide, parent: "dialer.on"),
+        .init(id: "dialer.seat", group: "dialerline", icon: "person.badge.key",
+              title: "Seat", detail: "The extension the dialer signs in as. Its password is kept in your keychain, never in the settings file",
+              keys: ["dialer.user"], words: ["extension", "seat", "user", "password", "keychain", "1001"], kind: .wide, parent: "dialer.on"),
+        .init(id: "dialer.status", group: "dialerline", icon: "circle.dotted",
+              title: "Status", detail: "Opens with the dialer",
+              words: ["registered", "connected", "status", "signed in"], parent: "dialer.on"),
+        .init(id: "dialer.sites", group: "dialersites", icon: "globe",
+              title: "Sites that may use the dialer", detail: "Pages on these sites can start a call, set the dialer up and take the call log, as otto's do",
+              more: "The same bridge otto's extension offers, on the sites you list: a click on a number in otto's leads table places the call, and every finished call is handed back for the lead's timeline. A site here can also set the dialer up, as otto does the first time it opens with a dialer there.",
+              keys: ["dialer.sites"], words: ["otto", "sites", "origins", "click to call", "leads", "bridge"], parent: "dialer.on"),
+
         .init(id: "onion.on", group: "tor", icon: "network.badge.shield.half.filled",
               title: "Open onion websites", detail: "Onion tabs use Tor; other tabs keep their existing connection",
               more: "Opens .onion addresses in isolated temporary Tor tabs. Everything those tabs load, including redirects and downloads, stays on Tor. Extensions, direct peer connections and physical location are blocked, and dates use UTC. When Use a proxy is on, Tor connects through that proxy. HTTPS connections to the proxy are not supported yet; Search reports the error instead. Search keeps its own browser fingerprint.",
@@ -491,6 +524,8 @@ enum SettingsIndex {
         case "sidebar.hides", "layout.cards", "pins.list": return prefs.sidebar
         case "toolbar.left": return !prefs.sidebar
         case "onion.connection": return prefs.onionEnabled
+        case "dialer.open", "dialer.autodial", "dialer.region", "dialer.server", "dialer.seat", "dialer.status", "dialer.sites":
+            return prefs.dialerOn
         case "proxy.profiles": return prefs.proxyOn && !prefs.proxyBlocks && Profiles.shared.several
         case "proxy.bypass": return prefs.proxyOn && !prefs.proxyBlocks
         case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test",
@@ -507,6 +542,8 @@ enum SettingsIndex {
         case "toolbar.left": return "Only with the tabs across the top"
         case "sidebar.roomy": return "Only with titles in the column"
         case "onion.connection": return "Only with Open onion websites on"
+        case "dialer.open", "dialer.autodial", "dialer.region", "dialer.server", "dialer.seat", "dialer.status", "dialer.sites":
+            return "Only with the dialer on"
         case "proxy.profiles": return "Only with a proxy on, Persistent connection off and more than one profile"
         case "proxy.bypass": return "Only with a proxy on and Persistent connection off"
         case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test",
@@ -683,6 +720,9 @@ extension SettingsIndex {
             "proxy.calls": (prefs.proxyOn && prefs.proxyBlocks) || prefs.proxyHidesCalls,
             "proxy.timeZone": prefs.proxyMatchesTimeZone,
             "onion.on": prefs.onionEnabled,
+            "dialer.on": prefs.dialerOn,
+            "dialer.autodial": prefs.dialerAutodial,
+            "dialer.region": prefs.dialerRegion,
             "always": [
                 "splitView": prefs.splitView, "tabs.groups": prefs.usesTabGroups,
                 "panel.sites": prefs.sitesInPanel, "translate": PageTranslator.enabled,
@@ -723,6 +763,24 @@ extension SettingsIndex {
         case "onion.on":
             guard let on = value as? Bool else { return false }
             prefs.onionEnabled = on
+        case "dialer.on":
+            guard let on = value as? Bool else { return false }
+            prefs.dialerOn = on
+        case "dialer.autodial":
+            guard let on = value as? Bool else { return false }
+            prefs.dialerAutodial = on
+        case "dialer.region":
+            guard let region = value as? String, region.count == 2 else { return false }
+            prefs.dialerRegion = region.uppercased()
+        case "dialer.wss":
+            guard let text = value as? String else { return false }
+            prefs.dialerWSS = text
+        case "dialer.domain":
+            guard let text = value as? String else { return false }
+            prefs.dialerDomain = text
+        case "dialer.user":
+            guard let text = value as? String else { return false }
+            prefs.dialerUser = text
         default:
             return false
         }
