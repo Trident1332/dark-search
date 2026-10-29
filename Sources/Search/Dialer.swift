@@ -856,7 +856,9 @@ struct DialerRegionPicker: View {
         }
         .labelsHidden()
         .pickerStyle(.menu)
-        .frame(maxWidth: 200)
+        // Room for the country's whole name, however narrow the row: the
+        // words beside it wrap first.
+        .frame(minWidth: 150, maxWidth: 200)
     }
 }
 

@@ -23,8 +23,11 @@
   --shadow-seg: 0 1px 2px rgba(0, 0, 0, .08), 0 0 0 1px rgba(0, 0, 0, .03);
   --shadow-sheet: 0 -8px 32px -16px rgba(0, 0, 0, .25);
   --shadow-menu: 0 10px 30px -12px rgba(0, 0, 0, .3), 0 0 0 1px rgba(0, 0, 0, .04);
-  /* The keys, without the page's header above them: the card is about 200 px + 5.8 keys tall. */
-  --key-size: clamp(48px, min(calc((100vh - 290px) / 5.8), calc((100vw - 120px) / 3)), 68px);
+  /* The keys fill the height left by everything else, as Otto sizes them, up to 68 px: here
+   * that is the body's padding (22), the readout (96), the keypad's and the toolbar's margins
+   * (24), the toolbar (40), and under it Recents' margin (16), heading (24) and first call (56). */
+  --fixed: 278px;
+  --key-size: clamp(48px, min(calc((100vh - var(--fixed)) / 5.8), calc((100vw - 120px) / 3)), 68px);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -41,11 +44,11 @@
   }
 }
 
-body { font: 400 13px/1.4 var(--font); padding: 10px 12px 12px; }
+body { font: 400 13px/1.4 var(--font); padding: 10px 12px 12px; overflow-y: auto; }   /* to the calls under the keypad */
 :focus-visible { outline: 2px solid var(--muted); outline-offset: 2px; }
 
 /* The card is the panel: no border, no shadow, the page's white. */
-.phone { background: transparent; border: 0; border-radius: 0; padding: 0; box-shadow: none; }
+.phone { flex: none; background: transparent; border: 0; border-radius: 0; padding: 0; box-shadow: none; }   /* never squashed: the page scrolls instead */
 .bar { display: none; }
 
 /* Readout. Calling: amber, as a connection that isn't settled; on a call: green. */
@@ -101,23 +104,52 @@ body { font: 400 13px/1.4 var(--font); padding: 10px 12px 12px; }
 .menu .lvls button.on i.f { background: var(--txt); }
 .menu .vlist button.on { color: var(--txt); }
 
-/* Recents: a sheet on the page's white with a hairline, sliding up over the keys. */
-.scrim { background: var(--scrim); }
-.recents { background: var(--bg); border: 1px solid var(--line); box-shadow: var(--shadow-sheet); }
-.recents.open { box-shadow: var(--shadow-sheet); }
-.rtitle { font-size: 12.5px; font-weight: 600; }
-.rcount { background: var(--key); color: var(--muted); font-size: 11px; }
-.rclear { font-size: 11.5px; }
+/* Recents: under the keypad, as a Settings page stacks its groups — a small heading with the
+ * count and Clear, the calls in a card, the page scrolling to the rest — rather than Otto's
+ * sheet sliding up over the keys, which had nowhere good to rest in a panel this shape: a bar
+ * alone, a clipped peek, or a box mostly empty. The script still marks the section open and
+ * closed (a press on its heading); here that changes nothing to see. */
+.scrim, body.sheet .scrim { display: none; }
+body.sheet .phone { transform: none; }
+.recents, .recents.open {
+  position: static; top: auto; flex: none; width: 100%; max-width: 392px; margin: 16px 0 0; padding: 0;
+  background: transparent; border: 0; border-radius: 0; box-shadow: none; cursor: default; transition: none;
+}
+.rhead { height: auto; padding: 0 2px 6px; gap: 6px; cursor: default; }
+.rhead:focus-visible { outline: none; }
+.rchev { display: none; }
+.rtitle { font-size: 10.5px; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; color: var(--txt); opacity: .62; }
+.rcount { font-size: 10.5px; font-weight: 600; color: var(--muted); background: transparent; padding: 0; min-width: 0; }
+.rclear { font-size: 11.5px; padding: 3px 8px; margin-right: -8px; }
 .rclear:hover { background: var(--key); color: var(--txt); }
-.rrow { border-radius: 8px; }
+.rlist, .recents.open .rlist {
+  flex: none; margin: 0; max-height: none; overflow: hidden; -webkit-mask-image: none; mask-image: none;
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--r-card);
+}
+.rlist:has(> .rempty) { background: transparent; border: 0; }
+.rlist > li + li { border-top: 1px solid var(--line); }
+.rday { padding: 7px 10px 1px; font-size: 10px; letter-spacing: .5px; color: var(--muted); }
+.rrow { grid-template-columns: 26px 1fr auto; gap: 10px; padding: 8px 10px; border-radius: 0; }
 .rrow:hover { background: var(--card-2); }
 .rrow:active { background: var(--key-hi); }
-.ric { background: var(--key); color: var(--muted); }
-.ric.in { background: var(--key); color: var(--txt); }
+.ric { width: 26px; height: 26px; border-radius: 7px; background: var(--card-2); color: var(--muted); }
+.ric svg { width: 13px; height: 13px; }
+.ric.in { background: var(--card-2); color: var(--txt); }
 .rname { font-size: 13px; font-weight: 500; }
 .rsub, .rwhen, .rdur { font-size: 11.5px; }
-.rday { color: var(--muted); }
-.rempty { font-size: 12px; }
+.rempty { padding: 2px 2px 0; font-size: 12px; text-align: left; }
 
 /* The line's dot, should the header ever show: amber while calling, as the panel's line has it. */
 .dot.calling { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
+
+/* A shorter panel: Otto's tighter readout and margins, which this sheet's own rules above
+ * would otherwise override, and the keys sized for them. */
+@media (max-height: 700px) {
+  :root { --fixed: 266px; }
+  .display { min-height: 88px; padding: 10px 16px 8px; }
+  .pad, .util { margin-top: 10px; }
+}
+
+/* Not set up yet: the note above the keys takes its own height, about 130 px, so the keys make
+ * room for it; its words may wrap to more, and the page scrolls then. */
+:root:has(#setup:not([hidden])) { --fixed: 408px; }

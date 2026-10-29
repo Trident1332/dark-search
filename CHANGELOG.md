@@ -32,6 +32,8 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Fixed
 
+- Settings beside the side panel: in a tab narrower than 600 points, the rail folds to its icons, each named on hover, with the glass alone above them for Find a setting (⌘F, or a press on it, unfolds the rail with the field ready), so the rows keep their width rather than wrapping their titles and cutting their controls short, as they did with the dialer open in a middling window.
+- The dialer's Recents are a section under the keypad now, as a Settings page stacks its groups: a small heading with the count and Clear, the calls in a card, the page scrolling to the rest. Otto's sheet, sliding up over the keys, had nowhere good to rest in a panel this shape: a middling window had it showing a day's heading with nothing under it. The keys are sized to what is left above the first call, and a dialer not set up yet makes room for its note.
 - A failed website, icon or background request stays a local failure while the proxy is healthy; Search checks the proxy endpoint before suspending the browser. Confirmed proxy and authentication failures still block the route.
 - Extensions cannot see or restore recently closed Tor tabs, including mixed close batches. Browsing-data cleanup preserves excluded cookie domains and rejects scopes WebKit cannot represent before removing any data.
 - Separate temporary Tor stores use separate SOCKS circuit-isolation keys. Page downloads and auxiliary fetches keep their originating store's key when the route is rebuilt.
