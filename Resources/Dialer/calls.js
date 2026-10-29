@@ -76,7 +76,7 @@
   function record(c, endedAt) {
     var started = Number(c.at) || 0, answered = c.answeredAt ? Number(c.answeredAt) : null;
     var ended = Number(endedAt) || Date.now();
-    return {
+    var out = {
       id: String(c.id || newId()),
       number: plainNumber(c.number),
       name: String(c.name || "").slice(0, 80),
@@ -88,6 +88,12 @@
       outcome: outcome(c),
       ref: cleanRef(c.ref)
     };
+    if (!c.telicallLine && (c.numeroLine === "us" || c.numeroLine === "ca") && /^\+1[2-9]\d{2}[2-9]\d{6}$/.test(c.fromNumber || "")) {
+      out.numeroLine = c.numeroLine; out.fromNumber = c.fromNumber;
+    } else if (!c.numeroLine && c.telicallLine === "uk" && /^\+44[1-9]\d{8,9}$/.test(c.fromNumber || "")) {
+      out.telicallLine = "uk"; out.fromNumber = c.fromNumber;
+    }
+    return out;
   }
 
   // What the background worker accepts into the outbox: a well-formed record of an external call, or null.
@@ -97,7 +103,7 @@
     if (!id || id.length > 80 || !external(r.number) || OUTCOMES.indexOf(r.outcome) < 0) return null;
     var started = Number(r.startedAt), ended = Number(r.endedAt), answered = r.answeredAt == null ? null : Number(r.answeredAt);
     if (!isFinite(started) || !isFinite(ended) || (answered !== null && !isFinite(answered))) return null;
-    return {
+    var out = {
       id: id,
       number: plainNumber(r.number),
       name: String(r.name || "").slice(0, 80),
@@ -109,6 +115,12 @@
       outcome: r.outcome,
       ref: cleanRef(r.ref)
     };
+    if (!r.telicallLine && (r.numeroLine === "us" || r.numeroLine === "ca") && /^\+1[2-9]\d{2}[2-9]\d{6}$/.test(r.fromNumber || "")) {
+      out.numeroLine = r.numeroLine; out.fromNumber = r.fromNumber;
+    } else if (!r.numeroLine && r.telicallLine === "uk" && /^\+44[1-9]\d{8,9}$/.test(r.fromNumber || "")) {
+      out.telicallLine = "uk"; out.fromNumber = r.fromNumber;
+    }
+    return out;
   }
 
   /* ---- the outbox: an array of records, newest last ---- */

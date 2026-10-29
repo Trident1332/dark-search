@@ -315,6 +315,7 @@ enum Browsers {
 
     static func closing(_ window: NSWindow) {
         guard !quitting, let browser = browser(for: window) else { return }
+        browser.dropDialer()
         browser.cancelFileImport()
         browser.cancelDisplay()
         // A popup goes, and isn't one ⇧⌘T brings back.

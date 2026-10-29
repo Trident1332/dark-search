@@ -1,4 +1,6 @@
 import AppKit
+import AVFoundation
+import Network
 import Security
 import SwiftUI
 import WebKit
@@ -22,9 +24,9 @@ import WebKit
 // keypad. Off until Settings › Dialer turns it on; the line's details live
 // there, the seat's password in the keychain (DialerPassword).
 //
-// The page connects to the phone server directly, never through Settings ›
-// Proxy: a call's sound can't take a proxy's route, and the dialer is a
-// thing reached for on purpose, not a page that happens to load.
+// With a proxy enabled, signaling uses a mandatory proxy route and audio uses
+// only the phone server's TURN relay through a native, proxied TLS tunnel.
+// Ordinary websites retain their separate peer-connection protection.
 
 /// Settings › Dialer, as the dialer takes them.
 struct DialerSetup: Equatable {
@@ -36,8 +38,11 @@ struct DialerSetup: Equatable {
     var region = "GB"
     /// A number handed over is called at once; off, it waits on the keypad.
     var autodial = true
-    /// Hosts whose pages may use the dialer, as otto's do.
+    /// Exact origins whose pages may use the dialer.
     var sites: [String] = Dialer.defaultSites
+    var numeroUS = ""
+    var numeroCA = ""
+    var telicallUK = ""
 
     var trimmedWSS: String { wss.trimmingCharacters(in: .whitespacesAndNewlines) }
     var trimmedDomain: String { domain.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -59,31 +64,72 @@ struct DialerSetup: Equatable {
 final class Dialer: ObservableObject {
     static let shared = Dialer()
 
-    /// The sites otto's extension bridges out of the box: otto itself, and a
-    /// copy running on this Mac.
-    nonisolated static let defaultSites = ["otto.investigate.agency", "localhost", "127.0.0.1"]
+    /// Local development servers require an explicit origin grant.
+    nonisolated static let defaultSites = ["https://otto.investigate.agency"]
 
     /// What the page reads as its connection (chrome.storage.local's keys).
-    nonisolated static let configKeys = ["wss", "domain", "user", "password", "autodial", "region"]
+    nonisolated static let configKeys = ["wss", "domain", "user", "password", "autodial", "region", "numeroUS", "numeroCA", "telicallUK"]
     /// What the page keeps for itself: recent calls, the trunk and the voice
     /// it was left on, and the calls otto hasn't taken yet.
-    nonisolated static let pageKeys = ["history", "provider", "voice", "callOutbox"]
+    nonisolated static let pageKeys = ["history", "provider", "voice", "callOutbox", "numeroLine"]
     /// Finished calls otto hasn't taken, newest last, at most this many.
     nonisolated static let outboxMost = 50
 
     private(set) var setup = DialerSetup()
+    private let pages = NSHashTable<DialerPage>.weakObjects()
+    private var policyObservers: [NSObjectProtocol] = []
 
-    private init() {}
+    private init() {
+        for name in [Proxy.routeChanged, Onion.stateChanged] {
+            policyObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.policyChanged() }
+            })
+        }
+        policyObservers.append(NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stopPages() }
+        })
+    }
+
+    var blockedReason: String? {
+        if Proxy.shared.waiting {
+            return "The proxy connection isn't ready. Open Proxy settings and Poke to reconnect before calling."
+        }
+        if Onion.shared.hasTabs {
+            return "The dialer is unavailable while Tor tabs are open. Calls cannot use Tor."
+        }
+        return nil
+    }
+
+    private func policyChanged() {
+        // An established call cannot keep using a former route after any
+        // proxy or Tor transition, even when both routes are healthy.
+        stopPages(immediately: true)
+        objectWillChange.send()
+    }
+
+    private func stopPages(immediately: Bool = false) {
+        for page in pages.allObjects {
+            if immediately { page.release(immediately: true) }
+            if let browser = page.browser, browser.dialerPage === page { browser.dropDialer() }
+            else { page.release() }
+        }
+    }
+
+    func track(_ page: DialerPage) { pages.add(page) }
+    func untrack(_ page: DialerPage) { pages.remove(page) }
 
     /// Settings changed. Off: every window's dialer goes. A changed line:
     /// every page signs in again, as the extension does when its options
     /// are saved.
     func take(_ new: DialerSetup) {
         let old = setup
+        var new = new
+        new.sites = DialerOrigin.normalized(new.sites)
         setup = new
         guard old != new else { return }
-        if old.on, !new.on {
-            for browser in Browsers.all { browser.dropDialer() }
+        if old.on != new.on || old.sites != new.sites { Tab.refreshDialerBridge() }
+        if !new.on {
+            stopPages()
             objectWillChange.send()
             return
         }
@@ -91,6 +137,9 @@ final class Dialer: ObservableObject {
         if old.connection != new.connection { changed += ["wss", "domain", "user"] }
         if old.region != new.region { changed.append("region") }
         if old.autodial != new.autodial { changed.append("autodial") }
+        if old.numeroUS != new.numeroUS { changed.append("numeroUS") }
+        if old.numeroCA != new.numeroCA { changed.append("numeroCA") }
+        if old.telicallUK != new.telicallUK { changed.append("telicallUK") }
         if !changed.isEmpty { for browser in Browsers.all { browser.dialerPage?.settingsChanged(changed) } }
         objectWillChange.send()
     }
@@ -133,15 +182,16 @@ final class Dialer: ObservableObject {
 
     // MARK: - sites
 
-    /// A host whose pages may use the dialer: one of the sites listed, as
-    /// typed, case aside.
-    func allows(host: String?) -> Bool {
-        guard setup.on, let host = host?.lowercased(), !host.isEmpty else { return false }
-        return setup.sites.contains { $0.lowercased() == host }
+    func allows(scheme: String, host: String, port: Int) -> Bool {
+        setup.on && DialerOrigin.allows(setup.sites, scheme: scheme, host: host, port: port)
     }
 
-    /// A site as the list keeps it: its host alone.
-    nonisolated static func site(_ typed: String) -> String { ProxySetup.domain(typed) }
+    func allows(url: URL) -> Bool {
+        guard let scheme = url.scheme, let host = url.host() else { return false }
+        return allows(scheme: scheme, host: host, port: url.port ?? 0)
+    }
+
+    nonisolated static func site(_ typed: String) -> String { DialerOrigin.parse(typed)?.string ?? "" }
 
     // MARK: - what the page keeps
 
@@ -158,6 +208,9 @@ final class Dialer: ObservableObject {
             case "password": out[key] = DialerPassword.read(setup) ?? ""
             case "autodial": out[key] = setup.autodial
             case "region": out[key] = setup.region
+            case "numeroUS": out[key] = DialerNumero.value(setup.numeroUS)
+            case "numeroCA": out[key] = DialerNumero.value(setup.numeroCA)
+            case "telicallUK": out[key] = DialerTelicall.value(setup.telicallUK)
             default: if Dialer.pageKeys.contains(key), let value = pageValue(key) { out[key] = value }
             }
         }
@@ -168,10 +221,14 @@ final class Dialer: ObservableObject {
     /// keychain's to write, never the page's.
     func set(_ values: [String: Any]) {
         for (key, value) in values where Dialer.pageKeys.contains(key) { setPageValue(key, value) }
+        let shared = ["provider", "numeroLine"].filter { values[$0] != nil }
+        if !shared.isEmpty { for page in pages.allObjects { page.settingsChanged(shared) } }
     }
 
     func remove(_ keys: [String]) {
         for key in keys where Dialer.pageKeys.contains(key) { Store.settings.removeObject(forKey: "dialer.page." + key) }
+        let shared = ["provider", "numeroLine"].filter { keys.contains($0) }
+        if !shared.isEmpty { for page in pages.allObjects { page.settingsChanged(shared) } }
     }
 
     func pageValue(_ key: String) -> Any? {
@@ -239,6 +296,17 @@ final class Dialer: ObservableObject {
             "durationSec": max(0, (finite(r["durationSec"]) ?? 0).rounded()), "outcome": outcome,
         ]
         out["ref"] = cleanRef(r["ref"]) ?? NSNull()
+        let numeroAbsent = r["numeroLine"] == nil || r["numeroLine"] is NSNull || (r["numeroLine"] as? String) == ""
+        let telicallAbsent = r["telicallLine"] == nil || r["telicallLine"] is NSNull || (r["telicallLine"] as? String) == ""
+        if telicallAbsent, let value = r["numeroLine"] as? String, let line = DialerNumero(rawValue: value),
+           let number = DialerNumero.number(r["fromNumber"] as? String ?? "") {
+            out["numeroLine"] = line.rawValue
+            out["fromNumber"] = number
+        } else if numeroAbsent, r["telicallLine"] as? String == "uk",
+                  let number = DialerTelicall.number(r["fromNumber"] as? String ?? "") {
+            out["telicallLine"] = "uk"
+            out["fromNumber"] = number
+        }
         return out
     }
 
@@ -278,8 +346,8 @@ final class Dialer: ObservableObject {
         else { return }
         for browser in Browsers.all {
             for tab in browser.tabs {
-                guard let web = tab.built, let address = tab.address,
-                      ["http", "https"].contains(address.scheme?.lowercased() ?? ""), allows(host: address.host())
+                guard !tab.shy, !tab.usesTor, let web = tab.built, let address = tab.address,
+                      allows(url: address)
                 else { continue }
                 web.evaluateJavaScript("window.__searchDialerSite && window.__searchDialerSite.calls(\(json))", in: nil, in: Web.world) { _ in }
             }
@@ -298,18 +366,23 @@ final class Dialer: ObservableObject {
             if clean.count == 2 { prefs.dialerRegion = clean }
         }
         if let autodial = config["autodial"] as? Bool { prefs.dialerAutodial = autodial }
-        if let provider = config["provider"] as? String { setPageValue("provider", provider == "telicall" ? "telicall" : "numero") }
+        if let number = config["numeroUS"] as? String { prefs.dialerNumeroUS = number }
+        if let number = config["numeroCA"] as? String { prefs.dialerNumeroCA = number }
+        if let number = config["telicallUK"] as? String { prefs.dialerTelicallUK = number }
+        if let provider = config["provider"] as? String { set(["provider": provider == "telicall" ? "telicall" : "numero"]) }
+        if let value = config["numeroLine"] as? String, let line = DialerNumero(rawValue: value) { set(["numeroLine": line.rawValue]) }
         if let password = config["password"] as? String, !password.isEmpty,
            DialerPassword.save(password, for: prefs.dialerSetup) {
             passwordChanged()
         }
     }
 
-    /// The line as otto reads it back (getConfig): the keys the extension
-    /// shows, the password among them, as its own options page would.
+    /// Websites can inspect the line's non-secret settings, never its password.
     func configForSites() -> [String: Any] {
-        var out = values(Dialer.configKeys)
+        var out = values(Dialer.configKeys.filter { $0 != "password" })
+        out["passwordSaved"] = DialerPassword.kept(setup)
         out["provider"] = pageValue("provider") ?? "numero"
+        out["numeroLine"] = pageValue("numeroLine") ?? "us"
         out["updatesUrl"] = ""
         return out
     }
@@ -345,8 +418,8 @@ enum DialerPassword {
     /// What the keychain answered this launch, per seat: the password, or
     /// nil for a refusal. Asked once. The keychain puts its question — its
     /// sheet for the login password — for every build it doesn't know, and
-    /// an ad-hoc signed build is a new one to it every time it is built;
-    /// asked on every read, it came with every reconnect, and a Deny only
+    /// a local signing certificate can produce a new partition hash after
+    /// each build. Asked on every read, it came with every reconnect, and a Deny only
     /// had the page ask again, thousands of times (feedback, 29 Oct 2026).
     /// Saving or forgetting the password starts afresh.
     nonisolated(unsafe) private static var answered: [String: String?] = [:]
@@ -367,7 +440,7 @@ enum DialerPassword {
         asked[kSecReturnData as String] = true
         asked[kSecMatchLimit as String] = kSecMatchLimitOne
         var out: CFTypeRef?
-        let status = SecItemCopyMatching(asked as CFDictionary, &out)
+        let status = KeychainAccess.copyMatching(asked as CFDictionary, &out)
         guard status == errSecSuccess,
               let data = out as? Data, let password = String(data: data, encoding: .utf8), !password.isEmpty
         else {
@@ -381,7 +454,16 @@ enum DialerPassword {
         return password
     }
 
-    static func kept(_ setup: DialerSetup) -> Bool { read(setup) != nil }
+    static func kept(_ setup: DialerSetup) -> Bool {
+        guard !setup.trimmedUser.isEmpty else { return false }
+        if Store.testing { return rehearsal[account(setup)] != nil }
+        // Settings redraws frequently, including while another page is open.
+        // Checking presence must never read the protected value or show a dialog.
+        var query = identity(setup)
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        return KeychainAccess.copyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
 
     @discardableResult
     static func save(_ password: String, for setup: DialerSetup) -> Bool {
@@ -391,7 +473,7 @@ enum DialerPassword {
         let data = Data(password.utf8)
         let query = identity(setup)
         let update: [String: Any] = [kSecValueData as String: data]
-        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        let status = KeychainAccess.update(query as CFDictionary, update as CFDictionary)
         if status == errSecSuccess {
             answered[account(setup)] = password
             return true
@@ -401,7 +483,7 @@ enum DialerPassword {
         add[kSecValueData as String] = data
         add[kSecAttrLabel as String] = service
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else { return false }
+        guard KeychainAccess.add(add as CFDictionary, nil) == errSecSuccess else { return false }
         answered[account(setup)] = password
         return true
     }
@@ -410,8 +492,48 @@ enum DialerPassword {
     static func forget(_ setup: DialerSetup) -> Bool {
         answered.removeValue(forKey: account(setup))
         if Store.testing { rehearsal[account(setup)] = nil; return true }
-        let status = SecItemDelete(identity(setup) as CFDictionary)
+        let status = KeychainAccess.delete(identity(setup) as CFDictionary)
         return status == errSecSuccess || status == errSecItemNotFound
+    }
+}
+
+/// OS permission is requested from Search itself, only when a call asks for
+/// its microphone. A test run uses WebKit's mock device and never prompts TCC.
+@MainActor
+enum DialerMicrophone {
+    enum RecoveryChoice: Equatable { case allow, cancel, openSettings }
+
+    struct TestingGate {
+        var status: @MainActor () -> AVAuthorizationStatus
+        var request: @MainActor () async -> Bool
+        var recover: @MainActor (AVAuthorizationStatus) async -> RecoveryChoice = { _ in .cancel }
+        var openSettings: @MainActor () -> Void = {}
+    }
+
+    static var testingGate: TestingGate?
+
+    static func status() -> AVAuthorizationStatus {
+        if Store.testing { return testingGate?.status() ?? .authorized }
+        return AVCaptureDevice.authorizationStatus(for: .audio)
+    }
+
+    static func request() async -> Bool {
+        switch status() {
+        case .authorized: return true
+        case .notDetermined:
+            if Store.testing { return await testingGate?.request() ?? false }
+            return await withCheckedContinuation { continuation in
+                AVCaptureDevice.requestAccess(for: .audio) { continuation.resume(returning: $0) }
+            }
+        default: return false
+        }
+    }
+
+    static func openSettings() {
+        if Store.testing { testingGate?.openSettings(); return }
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+            NSWorkspace.shared.open(url)
+        }
     }
 }
 
@@ -426,22 +548,43 @@ enum DialerPassword {
 final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply {
     static let handler = "dialer"
 
-    let web: WKWebView
+    @Published private(set) var web: WKWebView
     weak var browser: Browser?
     /// What the page's status line says, and the kind its dot shows (reg,
     /// err, calling, oncall), and the card's state (idle, calling, incall).
     @Published private(set) var status = (text: "Starting…", kind: "", state: "idle")
     /// The page's scripts have run: a number can be handed to it directly.
     private(set) var ready = false
+    private(set) var visible = false
+    private(set) var released = false
+    private var closed = false
     /// The page has read what was waiting at its start.
     private var started = false
     /// A number handed over before the page could take it (storage.session's
     /// pendingDial, as the extension's worker leaves one).
     private var pending: [String: Any]?
     private var crashes: [Date] = []
+    private var microphoneRevision = 0
+    private var microphoneRecoveryID: UUID?
+    private var microphoneRecoveryAlert: NSAlert?
+    private var microphoneRecoveryReply: ((DialerMicrophone.RecoveryChoice) -> Void)?
+    private var protectedRoute: [String: Any] = ["mode": "blocked", "error": "Preparing the protected call route…"]
+    private var routeGeneration = 0
+    private var routeTask: Task<Void, Never>?
+    private var routeRenewal: Task<Void, Never>?
+    private var relayTunnel: DialerProxyTunnel?
 
     init(browser: Browser) {
         self.browser = browser
+        web = Self.makeWeb()
+        super.init()
+        attachWeb()
+        Dialer.shared.track(self)
+        prepareCallRoute()
+        load()
+    }
+
+    private static func makeWeb() -> WKWebView {
         let configuration = WKWebViewConfiguration()
         // Nothing to keep: the page's state lives in Search's settings.
         configuration.websiteDataStore = .nonPersistent()
@@ -455,18 +598,136 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         // page keeps its registration: never throttled or suspended.
         configuration.preferences.inactiveSchedulingPolicy = .none
         if #available(macOS 15.4, *), Store.testing { ExtensionCapture.mockDevices(configuration.preferences) }
-        web = WKWebView(frame: NSRect(x: 0, y: 0, width: 380, height: 640), configuration: configuration)
-        super.init()
-        configuration.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: DialerPage.handler)
+        return WKWebView(frame: NSRect(x: 0, y: 0, width: 380, height: 640), configuration: configuration)
+    }
+
+    private func attachWeb() {
+        web.configuration.userContentController.addScriptMessageHandler(self, contentWorld: .page, name: DialerPage.handler)
         web.navigationDelegate = self
         web.uiDelegate = self
         web.allowsMagnification = false
         web.allowsBackForwardNavigationGestures = false
         Web.inspectable(web)
+    }
+
+    private func replaceWeb() {
+        microphoneRevision += 1
+        cancelMicrophoneRecovery()
+        let window = web.window
+        let isContentView = window?.contentView === web
+        web.setMicrophoneCaptureState(.none)
+        web.configuration.userContentController.removeScriptMessageHandler(forName: DialerPage.handler, contentWorld: .page)
+        web.navigationDelegate = nil
+        web.uiDelegate = nil
+        ProxyTimeZone.close(web)
+        web.removeFromSuperview()
+        web = Self.makeWeb()
+        if Proxy.shared.setup.routes {
+            web.configuration.websiteDataStore.proxyConfigurations = [Proxy.shared.configuration(forTest: true)]
+        }
+        attachWeb()
+        if isContentView { window?.contentView = web }
+    }
+
+    private func prepareCallRoute() {
+        routeGeneration += 1
+        let generation = routeGeneration
+        routeTask?.cancel()
+        routeRenewal?.cancel()
+        relayTunnel?.close()
+        relayTunnel = nil
+        guard Proxy.shared.setup.routes else {
+            web.configuration.websiteDataStore.proxyConfigurations = []
+            protectedRoute = ["mode": "direct"]
+            return
+        }
+        // The dialer never inherits website exceptions or optional failover.
+        // Install this before the local page can create its first WebSocket.
+        var proxy = Proxy.shared.configuration(forTest: true)
+        proxy.allowFailover = false
+        proxy.excludedDomains = []
+        web.configuration.websiteDataStore.proxyConfigurations = [proxy]
+        protectedRoute = ["mode": "blocked", "error": "Connecting through the proxy…"]
+        let setup = Dialer.shared.setup
+        guard setup.complete else { return }
+        let revision = Proxy.shared.revision
+        routeTask = Task { [weak self] in
+            do {
+                let endpoint = try DialerRelayEndpoint(wss: setup.trimmedWSS)
+                guard let password = DialerPassword.read(setup), !password.isEmpty else {
+                    throw DialerRelayError.message("Allow access to your saved phone-server login in Dialer settings")
+                }
+                let ticket = try await DialerRelayRequest.fetch(endpoint: endpoint, user: setup.trimmedUser,
+                                                               password: password, proxy: proxy)
+                try Task.checkCancellation()
+                guard let self, !self.released, self.routeGeneration == generation,
+                      Proxy.shared.revision == revision, Dialer.shared.setup.connection == setup.connection
+                else { return }
+                let relay = try ticket.validated(for: endpoint)
+                let tunnel = DialerProxyTunnel(host: relay.host, port: relay.port, proxy: proxy) { [weak self] error in
+                    guard let self, self.routeGeneration == generation else { return }
+                    self.failCallRoute(error)
+                }
+                self.relayTunnel = tunnel
+                let port = try await tunnel.start()
+                try Task.checkCancellation()
+                guard !self.released, self.routeGeneration == generation, Proxy.shared.revision == revision else {
+                    tunnel.close()
+                    return
+                }
+                self.protectedRoute = ["mode": "proxy", "revision": "\(revision):\(generation)",
+                    "turnURL": "turn:127.0.0.1:\(port)?transport=tcp", "username": relay.username,
+                    "credential": relay.credential, "expiresAt": ticket.expiresAt]
+                self.settingsChanged(["protectedRoute"])
+                self.renewCallRoute(before: ticket.expiresAt, generation: generation)
+            } catch is CancellationError { return }
+            catch {
+                guard let self, !self.released, self.routeGeneration == generation else { return }
+                let message = (error as? DialerRelayError)?.localizedDescription
+                    ?? "The protected call route couldn't connect. Check Proxy settings and try the dialer again."
+                self.failCallRoute(message)
+            }
+        }
+    }
+
+    private func renewCallRoute(before expiresAt: Double, generation: Int) {
+        routeRenewal = Task { [weak self] in
+            let delay = max(1, expiresAt - Date().timeIntervalSince1970 - 90)
+            try? await Task.sleep(for: .seconds(delay))
+            while !Task.isCancelled, let self, !self.released, self.routeGeneration == generation {
+                // Existing TURN allocations retain their authenticated key.
+                // Rotate before the next call without interrupting this one.
+                if self.status.state == "idle" {
+                    self.replaceWeb()
+                    self.prepareCallRoute()
+                    self.load()
+                    return
+                }
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
+    }
+
+    private func failCallRoute(_ message: String) {
+        guard !released else { return }
+        routeGeneration += 1
+        routeTask?.cancel()
+        routeRenewal?.cancel()
+        relayTunnel?.close()
+        relayTunnel = nil
+        protectedRoute = ["mode": "blocked", "error": message]
+        pending = nil
+        web.setMicrophoneCaptureState(.none)
+        // Stop existing signaling and media immediately; the replacement
+        // local page may display the error but cannot start any connection.
+        replaceWeb()
+        status = (message, "err", "idle")
         load()
+        Dialer.shared.statusChanged()
     }
 
     private func load() {
+        guard !released, Dialer.shared.setup.on, Dialer.shared.blockedReason == nil else { return }
         guard let page = Dialer.page, let files = Dialer.files else {
             status = ("The dialer's files are missing", "err", "idle")
             return
@@ -477,13 +738,168 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     }
 
     /// Let go: a call in progress ends with it.
-    func release() {
-        hangUp()
-        web.stopLoading()
+    func release(immediately: Bool = false) {
+        if released {
+            if immediately || Dialer.shared.blockedReason != nil { finishRelease() }
+            return
+        }
+        let canFinishRecords = !immediately && ready && Dialer.shared.blockedReason == nil
+        released = true
+        routeGeneration += 1
+        routeTask?.cancel()
+        routeRenewal?.cancel()
+        relayTunnel?.close()
+        relayTunnel = nil
+        microphoneRevision += 1
+        cancelMicrophoneRecovery()
+        pending = nil
+        visible = false
+        ready = false
+        web.setMicrophoneCaptureState(.none)
+        web.removeFromSuperview()
+        if canFinishRecords {
+            // The microphone is already stopped. Give a responsive page one
+            // turn to file its last call, with a deadline if JavaScript stalls.
+            web.evaluateJavaScript("window.__searchDialer && window.__searchDialer.shutdown(); void 0") { [self] _, _ in
+                finishRelease()
+            }
+            Task { [self] in
+                try? await Task.sleep(for: .milliseconds(100))
+                finishRelease()
+            }
+        } else {
+            // A protected route cannot wait for page JavaScript.
+            finishRelease()
+        }
+    }
+
+    private func finishRelease() {
+        guard !closed else { return }
+        closed = true
+        ProxyTimeZone.close(web)
         web.configuration.userContentController.removeScriptMessageHandler(forName: DialerPage.handler, contentWorld: .page)
         web.navigationDelegate = nil
         web.uiDelegate = nil
-        web.removeFromSuperview()
+        Dialer.shared.untrack(self)
+    }
+
+    func setVisible(_ shown: Bool) {
+        guard !released else { return }
+        visible = shown
+        if !shown {
+            microphoneRevision += 1
+            cancelMicrophoneRecovery()
+            pending = nil
+            web.setMicrophoneCaptureState(.none)
+        }
+        if ready { pushVisibility() }
+    }
+
+    private func pushVisibility() {
+        web.evaluateJavaScript("window.__searchDialer && window.__searchDialer.setVisible(\(visible ? "true" : "false"))") { _, _ in }
+    }
+
+    private var mayRequestMicrophone: Bool {
+        !released && visible && Dialer.shared.setup.on && Dialer.shared.blockedReason == nil
+            && mediaRouteReady
+            && browser?.dialerPage === self && browser?.dialerShown == true
+            && (Store.testing || web.window?.isVisible == true)
+    }
+
+    private var mediaRouteReady: Bool {
+        if !Proxy.shared.setup.routes { return protectedRoute["mode"] as? String == "direct" }
+        return protectedRoute["mode"] as? String == "proxy" && relayTunnel?.port != nil
+            && (protectedRoute["expiresAt"] as? Double ?? 0) > Date().timeIntervalSince1970
+    }
+
+    /// Called by the local page's explicit Call path, never a permission
+    /// query or page load. The OS response cannot revive a hidden old call.
+    func requestMicrophonePermission() async -> Bool {
+        guard mayRequestMicrophone else { return false }
+        let revision = microphoneRevision
+        focusMicrophoneWindow()
+        let granted = await DialerMicrophone.request()
+        guard granted, revision == microphoneRevision, mayRequestMicrophone else { return false }
+        focusMicrophoneWindow()
+        return true
+    }
+
+    private func focusMicrophoneWindow() {
+        if !Store.testing, let window = web.window, window.isVisible {
+            NSApp.activate()
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(web)
+        }
+    }
+
+    /// A failed media request needs a fresh user decision. An existing OS
+    /// grant is reported honestly: the sheet asks to retry this call.
+    func recoverMicrophonePermission() async -> Bool {
+        guard mayRequestMicrophone, microphoneRecoveryID == nil else { return false }
+        let revision = microphoneRevision
+        let id = UUID()
+        microphoneRecoveryID = id
+        defer { if microphoneRecoveryID == id { microphoneRecoveryID = nil } }
+        focusMicrophoneWindow()
+        let status = DialerMicrophone.status()
+        if status == .notDetermined {
+            let granted = await DialerMicrophone.request()
+            guard granted, microphoneRecoveryID == id, revision == microphoneRevision, mayRequestMicrophone else { return false }
+            focusMicrophoneWindow()
+            return true
+        }
+        let choice = await microphoneRecoveryChoice(status, id: id)
+        guard microphoneRecoveryID == id, revision == microphoneRevision, mayRequestMicrophone else { return false }
+        if choice == .openSettings {
+            DialerMicrophone.openSettings()
+            return false
+        }
+        guard status == .authorized, choice == .allow, DialerMicrophone.status() == .authorized else { return false }
+        focusMicrophoneWindow()
+        return true
+    }
+
+    private func microphoneRecoveryChoice(_ status: AVAuthorizationStatus, id: UUID) async -> DialerMicrophone.RecoveryChoice {
+        guard microphoneRecoveryID == id, mayRequestMicrophone else { return .cancel }
+        if Store.testing { return await DialerMicrophone.testingGate?.recover(status) ?? .cancel }
+        guard let window = web.window, window.isVisible, window.attachedSheet == nil else { return .cancel }
+        let alert = NSAlert()
+        if status == .authorized {
+            alert.messageText = "Allow microphone and retry this call?"
+            alert.informativeText = "Search has macOS microphone permission, but the call could not open it. Allow Search to try again for this call."
+            alert.addButton(withTitle: "Allow and Retry")
+        } else {
+            alert.messageText = "Microphone access is blocked"
+            alert.informativeText = "Allow Search in System Settings › Privacy & Security › Microphone, then try the call again."
+            alert.addButton(withTitle: "Open Microphone Settings")
+        }
+        alert.addButton(withTitle: "Cancel")
+        return await withCheckedContinuation { continuation in
+            microphoneRecoveryAlert = alert
+            microphoneRecoveryReply = { continuation.resume(returning: $0) }
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard let self, self.microphoneRecoveryID == id else { return }
+                let reply = self.microphoneRecoveryReply
+                self.microphoneRecoveryReply = nil
+                self.microphoneRecoveryAlert = nil
+                let choice: DialerMicrophone.RecoveryChoice = response == .alertFirstButtonReturn
+                    ? (status == .authorized ? .allow : .openSettings) : .cancel
+                reply?(choice)
+            }
+        }
+    }
+
+    private func cancelMicrophoneRecovery() {
+        microphoneRecoveryID = nil
+        let alert = microphoneRecoveryAlert
+        let reply = microphoneRecoveryReply
+        microphoneRecoveryAlert = nil
+        microphoneRecoveryReply = nil
+        if let alert {
+            if let parent = alert.window.sheetParent { parent.endSheet(alert.window, returnCode: .cancel) }
+            alert.window.orderOut(nil)
+        }
+        reply?(.cancel)
     }
 
     // MARK: - numbers in
@@ -492,6 +908,7 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     /// one. Handed straight to the page once it listens; before then it
     /// waits where the page looks first (storage.session's pendingDial).
     func dial(_ number: String, name: String = "", ref: [String: Any]? = nil) {
+        guard !released, visible, Dialer.shared.setup.on, Dialer.shared.blockedReason == nil else { return }
         var request: [String: Any] = ["number": number, "name": String(name.prefix(80)), "at": Int(Date().timeIntervalSince1970 * 1000)]
         if let ref { request["ref"] = ref }
         pending = request
@@ -499,7 +916,7 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     }
 
     private func deliver() {
-        guard ready, started, let pending else { return }
+        guard !released, visible, ready, started, let pending else { return }
         var message = pending
         message["type"] = "dialer:dial"
         guard JSONSerialization.isValidJSONObject(message), let data = try? JSONSerialization.data(withJSONObject: message),
@@ -510,7 +927,19 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
 
     /// Settings changed: the page hears what, and reads the rest again.
     func settingsChanged(_ keys: [String]) {
-        let values = Dialer.shared.values(keys)
+        guard !released else { return }
+        if keys.contains(where: { ["wss", "domain", "user", "password"].contains($0) }) {
+            replaceWeb()
+            prepareCallRoute()
+            load()
+            return
+        }
+        if keys.contains(where: { ["wss", "domain", "user", "password", "numeroUS", "numeroCA", "telicallUK", "provider", "numeroLine"].contains($0) }) {
+            microphoneRevision += 1
+            cancelMicrophoneRecovery()
+        }
+        var values = Dialer.shared.values(keys)
+        if keys.contains("protectedRoute") { values["protectedRoute"] = protectedRoute }
         var changes: [String: Any] = [:]
         for key in keys { changes[key] = ["newValue": values[key] ?? ""] }
         guard JSONSerialization.isValidJSONObject(changes), let data = try? JSONSerialization.data(withJSONObject: changes),
@@ -521,6 +950,10 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
 
     /// A call in progress ends; nothing else changes.
     func hangUp() {
+        pending = nil
+        microphoneRevision += 1
+        cancelMicrophoneRecovery()
+        guard !released else { return }
         web.evaluateJavaScript("window.__searchDialer && window.__searchDialer.hangup()") { _, _ in }
     }
 
@@ -536,8 +969,38 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     nonisolated func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage,
                                            replyHandler: @escaping (Any?, String?) -> Void) {
         MainActor.assumeIsolated {
-            guard message.frameInfo.isMainFrame, let body = message.body as? [String: Any], let op = body["op"] as? String
+            guard !closed, message.webView === web, message.frameInfo.isMainFrame,
+                  message.frameInfo.request.url?.standardizedFileURL == Dialer.page?.standardizedFileURL,
+                  let body = message.body as? [String: Any], let op = body["op"] as? String
             else { return replyHandler(nil, "not for here") }
+            if released {
+                // Only final records may drain; no settings or credentials
+                // are accessible after the page has been released.
+                if op == "message", let msg = body["msg"] as? [String: Any], msg["type"] as? String == "call-ended",
+                   let count = Dialer.shared.fileCall(msg["record"]) {
+                    return replyHandler(["reply": ["ok": true, "pending": count]], nil)
+                }
+                if op == "set", let values = body["values"] as? [String: Any], let history = values["history"] {
+                    Dialer.shared.set(["history": history])
+                    return replyHandler(["ok": true], nil)
+                }
+                return replyHandler(nil, "the dialer has closed")
+            }
+            guard Dialer.shared.setup.on, Dialer.shared.blockedReason == nil else { return replyHandler(nil, "the dialer is unavailable") }
+            if op == "microphone.request" || op == "microphone.recover" {
+                let revision = microphoneRevision
+                Task { @MainActor [weak self, weak requestingWeb = web] in
+                    guard let self, requestingWeb === self.web, revision == self.microphoneRevision else {
+                        return replyHandler(["state": "denied"], nil)
+                    }
+                    let granted: Bool
+                    if op == "microphone.recover" { granted = await self.recoverMicrophonePermission() }
+                    else { granted = await self.requestMicrophonePermission() }
+                    let current = requestingWeb === self.web && revision == self.microphoneRevision
+                    replyHandler(["state": granted && current ? "granted" : "denied"], nil)
+                }
+                return
+            }
             replyHandler(answer(op, body), nil)
         }
     }
@@ -546,9 +1009,17 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         let dialer = Dialer.shared
         switch op {
         case "get":
-            return ["values": dialer.values(body["keys"] as? [String])]
+            let keys = body["keys"] as? [String]
+            var values = dialer.values(keys)
+            if keys == nil || keys!.contains("protectedRoute") { values["protectedRoute"] = protectedRoute }
+            return ["values": values]
         case "set":
-            dialer.set(body["values"] as? [String: Any] ?? [:])
+            let values = body["values"] as? [String: Any] ?? [:]
+            if values["provider"] != nil || values["numeroLine"] != nil {
+                microphoneRevision += 1
+                cancelMicrophoneRecovery()
+            }
+            dialer.set(values)
             return ["ok": true]
         case "remove":
             dialer.remove(body["keys"] as? [String] ?? [])
@@ -581,11 +1052,17 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
             dialer.explainMicrophone(in: browser)
             return ["ok": true]
         case "status":
+            if protectedRoute["mode"] as? String == "blocked", dialer.setup.complete {
+                status = (protectedRoute["error"] as? String ?? "The protected call route is unavailable", "err", "idle")
+                dialer.statusChanged()
+                return ["ok": true]
+            }
             status = (body["text"] as? String ?? "", body["kind"] as? String ?? "", body["state"] as? String ?? "idle")
             dialer.statusChanged()
             return ["ok": true]
         case "ready":
             ready = true
+            pushVisibility()
             deliver()
             return ["ok": true]
         default:
@@ -595,9 +1072,19 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
 
     // MARK: - WebKit
 
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard !released, webView === web else { return completionHandler(.cancelAuthenticationChallenge, nil) }
+        if Proxy.authenticate(challenge, completionHandler: completionHandler) { return }
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
+            completionHandler(.performDefaultHandling, nil)
+        } else { completionHandler(.cancelAuthenticationChallenge, nil) }
+    }
+
     /// The page's own file, and nothing else: a link in it goes nowhere.
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard !released, webView === web else { return decisionHandler(.cancel) }
         guard let url = navigationAction.request.url else { return decisionHandler(.cancel) }
         if navigationAction.targetFrame?.isMainFrame != true { return decisionHandler(.allow) }
         if url.isFileURL, let files = Dialer.files, url.standardizedFileURL.path.hasPrefix(files.standardizedFileURL.path) {
@@ -615,7 +1102,10 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
                  initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
-        guard frame.isMainFrame, type == .microphone, webView.url?.isFileURL == true else { return decisionHandler(.deny) }
+        guard !released, webView === web, visible, mediaRouteReady, Dialer.shared.setup.on, Dialer.shared.blockedReason == nil,
+              frame.isMainFrame, type == .microphone,
+              frame.request.url?.standardizedFileURL == Dialer.page?.standardizedFileURL
+        else { return decisionHandler(.deny) }
         decisionHandler(.grant)
     }
 
@@ -627,6 +1117,7 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
 
     /// Its process gone: made again, twice a minute at most.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard !released, webView === web else { return }
         let now = Date()
         crashes = crashes.filter { now.timeIntervalSince($0) < 60 } + [now]
         guard crashes.count <= 2 else { status = ("The dialer stopped", "err", "idle"); return }
@@ -642,13 +1133,20 @@ extension Browser {
 
     /// The dialer into this window's side panel, in place of whatever is
     /// there. Only with the dialer on, and never in a pop-up window.
-    func showDialer() {
-        guard prefs.dialerOn, !isPopup else { return }
+    @discardableResult
+    func showDialer() -> Bool {
+        guard prefs.dialerOn, !isPopup else { return false }
+        if let reason = Dialer.shared.blockedReason {
+            announce(reason)
+            return false
+        }
         if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
         if sidePanel != .dialer { SidePanelPages.shared.drop(in: self) }
         if dialerPage == nil { dialerPage = DialerPage(browser: self) }
         sidePanel = .dialer
         sidePanelShown = true
+        dialerPage?.setVisible(true)
+        return true
     }
 
     /// View › Show Dialer, and the key: up, or away again.
@@ -657,10 +1155,11 @@ extension Browser {
     }
 
     /// A number to call: the dialer comes up and takes it.
-    func call(_ number: String, name: String = "", ref: [String: Any]? = nil) {
-        guard prefs.dialerOn else { return }
-        showDialer()
+    @discardableResult
+    func call(_ number: String, name: String = "", ref: [String: Any]? = nil) -> Bool {
+        guard showDialer() else { return false }
         dialerPage?.dial(number, name: name, ref: ref)
+        return true
     }
 
     /// The dialer turned off, or the window going: its page is let go.
@@ -684,9 +1183,14 @@ struct DialerPanelView: View {
                 DialerLine(browser: browser, page: page)
             }
             Rectangle().fill(Palette.hairline).frame(height: 1)
-            PanelPage(web: browser.dialerPage?.web)
+            if let page = browser.dialerPage { DialerContent(page: page) }
         }
     }
+}
+
+private struct DialerContent: View {
+    @ObservedObject var page: DialerPage
+    var body: some View { PanelPage(web: page.web) }
 }
 
 private struct DialerLine: View {
@@ -835,6 +1339,60 @@ struct DialerSeatFields: View {
     }
 }
 
+/// Owned outbound numbers, labelled by their provider rather than the
+/// destination's default country, and kept apart from the SIP seat's login.
+struct DialerPhoneFields: View {
+    @ObservedObject var prefs: Preferences
+
+    private var invalidNumero: Bool {
+        [prefs.dialerNumeroUS, prefs.dialerNumeroCA].contains {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && DialerNumero.number($0) == nil
+        }
+    }
+
+    private var invalidTelicall: Bool {
+        !prefs.dialerTelicallUK.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && DialerTelicall.number(prefs.dialerTelicallUK) == nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            DialerField(label: "US") {
+                TextField("+1 …", text: $prefs.dialerNumeroUS).autocorrectionDisabled()
+                    .accessibilityLabel("US number on Numero")
+                provider("Numero")
+            }
+            DialerField(label: "Canada") {
+                TextField("+1 …", text: $prefs.dialerNumeroCA).autocorrectionDisabled()
+                    .accessibilityLabel("Canada number on Numero")
+                provider("Numero")
+            }
+            DialerField(label: "UK") {
+                TextField("+44 …", text: $prefs.dialerTelicallUK).autocorrectionDisabled()
+                    .accessibilityLabel("UK number on Telicall")
+                provider("Telicall")
+            }
+            if invalidNumero {
+                Text("Enter a complete US or Canadian number, including its area code")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.unsafe)
+            }
+            if invalidTelicall {
+                Text("Enter the UK number with +44 and no national 0 after the country code")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.unsafe)
+            }
+        }
+        .padding(.leading, SettingsPanel.textInset)
+        .padding(.trailing, 14)
+        .padding(.bottom, 11)
+    }
+
+    private func provider(_ name: String) -> some View {
+        Text(name).font(.system(size: 11)).foregroundStyle(Palette.muted).fixedSize()
+    }
+}
+
 /// Default country: every country the Mac knows, by name.
 struct DialerRegionPicker: View {
     @ObservedObject var prefs: Preferences
@@ -871,7 +1429,7 @@ struct DialerSitesList: View {
     var body: some View {
         if draft != nil {
             DialerField(label: "Site") {
-                TextField("otto.example.com", text: Binding(get: { draft ?? "" }, set: { draft = $0 }))
+                TextField("https://otto.example.com or http://localhost:3000", text: Binding(get: { draft ?? "" }, set: { draft = $0 }))
                     .autocorrectionDisabled()
                     .focused($typing)
                     .onSubmit(add)

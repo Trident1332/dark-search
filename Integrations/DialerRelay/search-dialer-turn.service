@@ -1,0 +1,30 @@
+[Unit]
+Description=Search TLS-only TURN relay restricted to its FreeSWITCH host
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=turnserver
+Group=turnserver
+UMask=0077
+RuntimeDirectory=search-dialer-turn
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/turnserver -c /etc/search-dialer-relay/turnserver.conf
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,32 @@
+[Unit]
+Description=Search seat-authenticated expiring TURN credential issuer
+After=network.target
+
+[Service]
+Type=simple
+User=search-dialer-relay
+Group=www-data
+UMask=0077
+RuntimeDirectory=search-dialer-relay
+RuntimeDirectoryMode=0750
+LoadCredential=seat.xml:/root/telicall/fs/conf/directory/default/1001.xml
+LoadCredential=turn-secret:/etc/search-dialer-relay/turn-secret
+ExecStart=/usr/bin/python3 /usr/local/lib/search-dialer-relay/issuer.py --socket /run/search-dialer-relay/issuer.sock --user 1001 --host sip.investigate.agency --ttl 3600
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -75,8 +75,8 @@ struct ProxySetup: Equatable {
     var blocks = true
     /// A mark beside the address while pages take the route.
     var shows = true
-    /// Peer connections are off while the proxy is on: a call can't go
-    /// through a proxy, so one would have shown the Mac's own address.
+    /// Website peer connections are off while the proxy is on. The bundled
+    /// dialer has its own mandatory proxy route and relay-only media policy.
     var hidesCalls = true
     /// Use the exit location's IANA time zone in WebKit processes.
     var matchesTimeZone = true
@@ -161,6 +161,8 @@ final class Proxy: ObservableObject {
     /// didn't take the ones it was given. Cleared when credentials change
     /// or the proxy is confirmed to be working again.
     @Published private(set) var refused = false
+    /// Local Keychain access failed before the proxy could be authenticated.
+    @Published private(set) var credentialIssue: String?
     /// Where sites see you from, from the last successful test: "Frankfurt,
     /// Germany", or just the address. For the address bar.
     @Published private(set) var place: String?
@@ -179,6 +181,7 @@ final class Proxy: ObservableObject {
 
     private var task: Task<Void, Never>?
     private var testID: UUID?
+    private var credentialUnlock: (id: UUID, setup: ProxySetup, task: Task<Void, Never>)?
     private var probe: Task<Void, Never>?
     /// A page just failed: one look at the proxy, to tell its fault from
     /// the site's before saying so.
@@ -244,6 +247,7 @@ final class Proxy: ObservableObject {
         }
         cancelTest()
         check = .untried
+        credentialIssue = nil
         if fresh.on != before.on || fresh.kind != before.kind || fresh.trimmedHost != before.trimmedHost
             || fresh.portOrUsual != before.portOrUsual || fresh.signsIn != before.signsIn || fresh.user != before.user {
             place = nil
@@ -271,6 +275,7 @@ final class Proxy: ObservableObject {
     func passwordChanged() {
         cancelTest()
         check = .untried
+        credentialIssue = nil
         place = nil
         countryCode = nil
         refused = false
@@ -286,6 +291,8 @@ final class Proxy: ObservableObject {
     }
 
     private func cancelTest() {
+        credentialUnlock?.task.cancel()
+        credentialUnlock = nil
         testID = nil
         task?.cancel()
         task = nil
@@ -296,6 +303,13 @@ final class Proxy: ObservableObject {
         let route = setup.routes ? configuration() : nil
         let credentials = setup.routes ? ProxyCredentials(setup: setup, revision: revision,
             password: setup.signsIn ? ProxyPassword.read(setup) : nil) : nil
+        if setup.routes, setup.signsIn, credentials?.password == nil {
+            let issue = ProxyPassword.failureMessage(setup)
+            credentialIssue = issue
+            if check != .testing { check = .failed(issue) }
+        } else {
+            credentialIssue = nil
+        }
         Proxy.snapshotLock.lock()
         Proxy.snapshot = route
         Proxy.snapshotRevision = revision
@@ -415,7 +429,12 @@ final class Proxy: ObservableObject {
         case .http: made = ProxyConfiguration(httpCONNECTProxy: endpoint)
         case .https: made = ProxyConfiguration(httpCONNECTProxy: endpoint, tlsOptions: NWProtocolTLS.Options())
         }
-        if setup.signsIn, !setup.user.isEmpty, let password = ProxyPassword.read(setup), !password.isEmpty {
+        if setup.signsIn {
+            guard !setup.user.isEmpty, let password = ProxyPassword.read(setup), !password.isEmpty else {
+                var blocked = ProxyConfiguration(httpCONNECTProxy: .hostPort(host: "missing-proxy.invalid", port: 9))
+                blocked.allowFailover = false
+                return blocked
+            }
             made.applyCredential(username: setup.user, password: password)
         }
         // Network treats rejected preapplied credentials as a failed route
@@ -530,8 +549,12 @@ final class Proxy: ObservableObject {
         Task { @MainActor in
             guard shared.revision == credentials.revision else { return }
             if isAuthenticationFailure(error) {
-                shared.authenticationFailed(credentials.setup.signsIn ? ProxyAuthentication.rejected : ProxyAuthentication.missing,
-                                            revision: credentials.revision)
+                if credentials.setup.signsIn, credentials.password == nil {
+                    shared.credentialFailed(ProxyPassword.failureMessage(credentials.setup), revision: credentials.revision)
+                } else {
+                    shared.authenticationFailed(credentials.setup.signsIn ? ProxyAuthentication.rejected : ProxyAuthentication.missing,
+                                                revision: credentials.revision)
+                }
             } else if looksLikeProxyTrouble(error), shared.setup.persistent {
                 shared.confirmFailure(error, tab: nil)
             }
@@ -547,11 +570,50 @@ final class Proxy: ObservableObject {
         if setup.persistent { connectionFailed(message) }
     }
 
+    private func credentialFailed(_ message: String, revision: Int) {
+        guard setup.routes, self.revision == revision else { return }
+        credentialIssue = message
+        refused = false
+        place = nil
+        countryCode = nil
+        check = .failed(message)
+        if setup.persistent { connectionFailed(message) }
+    }
+
     // MARK: - the connection
 
     /// Manual and automatic checks use the real authenticated route, without
     /// bypasses or failover. The location service sees the proxy exit IP.
-    func test(configuration base: URLSessionConfiguration = .ephemeral, target: URL = Proxy.whereAmI) {
+    func test(configuration base: URLSessionConfiguration = .ephemeral, target: URL = Proxy.whereAmI,
+              allowCredentialPrompt: Bool = false) {
+        if !allowCredentialPrompt, credentialUnlock != nil { return }
+        if allowCredentialPrompt, setup.routes, setup.complete, setup.signsIn, !setup.user.isEmpty {
+            if credentialUnlock?.setup == setup { return }
+            cancelTest()
+            check = .testing
+            let id = UUID()
+            let selected = setup
+            let expectedRevision = revision
+            let unlocking = Task { [weak self] in
+                let password = await Task.detached(priority: .userInitiated) {
+                    ProxyPassword.read(selected, allowCredentialPrompt: true)
+                }.value
+                guard !Task.isCancelled, let self, self.credentialUnlock?.id == id,
+                      self.revision == expectedRevision, self.setup == selected else { return }
+                self.credentialUnlock = nil
+                if let password {
+                    Proxy.snapshotLock.lock()
+                    let current = Proxy.savedCredentials
+                    Proxy.snapshotLock.unlock()
+                    if current?.setup != selected || current?.revision != self.revision || current?.password != password {
+                        self.reroute()
+                    }
+                }
+                self.test(configuration: base, target: target)
+            }
+            credentialUnlock = (id, selected, unlocking)
+            return
+        }
         cancelTest()
         guard setup.routes else { check = .failed("Turn on Use a proxy before testing the connection"); return }
         guard setup.complete else {
@@ -560,7 +622,7 @@ final class Proxy: ObservableObject {
             return
         }
         if setup.signsIn, setup.user.isEmpty || ProxyPassword.read(setup)?.isEmpty != false {
-            authenticationFailed(ProxyAuthentication.missing, revision: revision)
+            credentialFailed(ProxyPassword.failureMessage(setup), revision: revision)
             return
         }
         check = .testing
@@ -764,9 +826,9 @@ final class Proxy: ObservableObject {
     }
 
     private func automaticCheck() {
-        guard setup.routes, task == nil else { return }
+        guard setup.routes, task == nil, credentialUnlock == nil else { return }
         guard let target = Store.testing ? automaticTarget : Proxy.whereAmI else { return }
-        test(target: target)
+        test(target: target, allowCredentialPrompt: false)
     }
 
     /// CFNetwork's errors, whose proxy ones (306, 310) carry no NSURLError.
@@ -820,6 +882,7 @@ final class Proxy: ObservableObject {
         guard setup.applies(to: profile), Proxy.looksLikeProxyTrouble(error) else { return }
         if Proxy.isAuthenticationFailure(error) {
             if let tab { failedTabs.add(tab) }
+            if let credentialIssue { tab?.failure = credentialIssue; return }
             authenticationFailed(setup.signsIn ? ProxyAuthentication.rejected : ProxyAuthentication.missing, revision: revision)
             tab?.failure = Proxy.refusedMessage
             return
@@ -871,6 +934,7 @@ final class Proxy: ObservableObject {
         suspectedTabs.removeAllObjects()
         dropped = false
         refused = false
+        credentialIssue = nil
         stopProbe()
         cameBack()
     }
@@ -1007,7 +1071,53 @@ private final class Once: @unchecked Sendable {
 /// in a test run, in memory. Never in the settings file.
 enum ProxyPassword {
     private static let label = Store.world.map { "Search (\($0))" } ?? "Search"
-    nonisolated(unsafe) private static var rehearsal: [String: String] = [:]
+    private static let lock = NSLock()
+    private static let mutationLock = NSLock()
+
+    private struct Identity: Hashable {
+        let label: String
+        let host: String
+        let port: UInt16
+        let kind: String
+        let user: String
+    }
+    private enum Scope: Hashable { case presence, quiet, interactive }
+    private struct Lookup: Hashable { let identity: Identity; let scope: Scope }
+    private enum Answer {
+        case password(String), present, missing, unavailable(OSStatus), pending, stale
+    }
+    private struct Ticket { let id: UUID; let epoch: Int; let backend: Int }
+    private struct Mutation { let id: UUID; let items: [Identity] }
+
+    nonisolated(unsafe) private static var rehearsal: [Identity: String] = [:]
+    nonisolated(unsafe) private static var passwords: [Identity: String] = [:]
+    nonisolated(unsafe) private static var answers: [Lookup: Answer] = [:]
+    nonisolated(unsafe) private static var pending: [Lookup: UUID] = [:]
+    nonisolated(unsafe) private static var epochs: [Identity: Int] = [:]
+    nonisolated(unsafe) private static var mutating: [Identity: UUID] = [:]
+    nonisolated(unsafe) private static var backendRevision = 0
+    nonisolated(unsafe) private static var testingQuery: (([String: Any]) -> (OSStatus, Data?))?
+
+    /// A synthetic Security backend, effective only in an isolated test run.
+    static func useKeychainForTesting(_ query: (([String: Any]) -> (OSStatus, Data?))?) {
+        guard Store.testing else { return }
+        locked {
+            testingQuery = query
+            backendRevision += 1
+            passwords.removeAll(); answers.removeAll(); pending.removeAll(); mutating.removeAll()
+        }
+    }
+
+    private static func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    private static func key(_ setup: ProxySetup) -> Identity {
+        Identity(label: label, host: setup.trimmedHost.lowercased(), port: setup.portOrUsual,
+                 kind: setup.kind.rawValue, user: setup.user)
+    }
 
     private static func identity(_ setup: ProxySetup) -> [String: Any] {
         [kSecClass as String: kSecClassInternetPassword,
@@ -1018,12 +1128,6 @@ enum ProxyPassword {
          kSecAttrLabel as String: label]
     }
 
-    private static func key(_ setup: ProxySetup) -> String { "\(setup.user)@\(setup.name)/\(setup.kind.rawValue)" }
-
-    /// HTTP and HTTPS differ only in transport to the same proxy. A saved
-    /// account may be reused across that switch, but never across servers,
-    /// ports, usernames, Search labels, or the SOCKS protocol. Prefer the
-    /// selected transport's password when both have one.
     private static func candidates(_ setup: ProxySetup) -> [ProxySetup] {
         guard setup.kind != .socks5 else { return [setup] }
         var alternate = setup
@@ -1032,73 +1136,183 @@ enum ProxyPassword {
         return [setup, alternate]
     }
 
-    static func read(_ setup: ProxySetup) -> String? {
+    /// Background/startup reads never present Keychain UI. Only an explicit
+    /// Poke may ask, once per identity for this launch, including a refusal.
+    static func read(_ setup: ProxySetup, allowCredentialPrompt: Bool = false) -> String? {
         guard !setup.user.isEmpty, setup.complete else { return nil }
+        let scope: Scope = allowCredentialPrompt ? .interactive : .quiet
         for candidate in candidates(setup) {
-            if Store.testing {
-                if let password = rehearsal[key(candidate)] { return password }
-                continue
-            }
-            var asked = identity(candidate)
-            asked[kSecReturnData as String] = true
-            asked[kSecMatchLimit as String] = kSecMatchLimitOne
-            var out: CFTypeRef?
-            if SecItemCopyMatching(asked as CFDictionary, &out) == errSecSuccess,
-               let data = out as? Data, let password = String(data: data, encoding: .utf8), !password.isEmpty {
-                return password
+            switch lookup(candidate, scope: scope) {
+            case .password(let password): return password
+            case .missing: continue
+            default: return nil // A refusal is never permission to try another protected item.
             }
         }
         return nil
     }
 
-    /// Kept, or taken out when empty.
+    /// No lock is held while Security talks to its daemon or the person.
+    /// A second synchronous reader fails closed while a lookup is pending.
+    private static func lookup(_ setup: ProxySetup, scope: Scope) -> Answer {
+        let item = key(setup)
+        let lookup = Lookup(identity: item, scope: scope)
+        var ticket: Ticket?
+        let cached: Answer? = locked {
+            if mutating[item] != nil { return .pending }
+            if let password = passwords[item] { return scope == .presence ? .present : .password(password) }
+            if let answer = answers[lookup] { return answer }
+            if pending.keys.contains(where: { $0.identity == item }) { return .pending }
+            let made = Ticket(id: UUID(), epoch: epochs[item] ?? 0, backend: backendRevision)
+            pending[lookup] = made.id
+            ticket = made
+            return nil
+        }
+        if let cached { return cached }
+        guard let ticket else { return .pending }
+        var query = identity(setup)
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        query[kSecUseAuthenticationUI as String] = scope == .interactive ? kSecUseAuthenticationUIAllow : kSecUseAuthenticationUIFail
+        if scope == .presence { query[kSecReturnAttributes as String] = true }
+        else { query[kSecReturnData as String] = true }
+        let result: (OSStatus, Data?)
+        let backend = locked { testingQuery }
+        if Store.testing, let backend { result = backend(query) }
+        else if Store.testing {
+            let password = locked { rehearsal[item] }
+            result = password.map { (errSecSuccess, scope == .presence ? nil : Data($0.utf8)) } ?? (errSecItemNotFound, nil)
+        } else if scope == .presence {
+            result = (KeychainAccess.copyMatching(query as CFDictionary, nil), nil)
+        } else {
+            var out: CFTypeRef?
+            let status = KeychainAccess.copyMatching(query as CFDictionary, &out)
+            result = (status, out as? Data)
+        }
+        let answer: Answer
+        if result.0 == errSecItemNotFound { answer = .missing }
+        else if result.0 != errSecSuccess { answer = .unavailable(result.0) }
+        else if scope == .presence { answer = .present }
+        else if let data = result.1, let password = String(data: data, encoding: .utf8), !password.isEmpty { answer = .password(password) }
+        else { answer = .unavailable(errSecDecode) }
+        return locked {
+            if pending[lookup] == ticket.id { pending.removeValue(forKey: lookup) }
+            guard (epochs[item] ?? 0) == ticket.epoch, backendRevision == ticket.backend, mutating[item] == nil else { return .stale }
+            answers[lookup] = answer
+            if scope == .interactive {
+                // A later explicit refusal supersedes a stale background
+                // "missing" result; it must never unlock the alternate slot.
+                answers[Lookup(identity: item, scope: .quiet)] = answer
+                answers.removeValue(forKey: Lookup(identity: item, scope: .presence))
+            }
+            if case .password(let password) = answer { passwords[item] = password }
+            return answer
+        }
+    }
+
+    /// Settings asks only for attributes, with UI forbidden, and never waits
+    /// for an in-flight credential approval to finish.
+    static func kept(_ setup: ProxySetup) -> Bool {
+        guard !setup.user.isEmpty, setup.complete else { return false }
+        for candidate in candidates(setup) {
+            switch lookup(candidate, scope: .presence) {
+            case .present, .password: return true
+            case .missing: continue
+            default: return false
+            }
+        }
+        return false
+    }
+
+    static func failureMessage(_ setup: ProxySetup) -> String {
+        locked {
+            for candidate in candidates(setup) {
+                let item = key(candidate)
+                let interactive = answers[Lookup(identity: item, scope: .interactive)]
+                let answer = interactive ?? answers[Lookup(identity: item, scope: .quiet)]
+                switch answer {
+                case .unavailable(let status):
+                    if [errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled].contains(status) {
+                        return interactive == nil
+                            ? "Poke to allow access to the saved proxy password"
+                            : "Access to the saved proxy password wasn't allowed. Save it again or restart Search to retry"
+                    }
+                    return "The saved proxy password couldn't be read. Save it again"
+                case .pending:
+                    return "Waiting for access to the saved proxy password"
+                case .missing: continue
+                default: break
+                }
+            }
+            return ProxyAuthentication.missing
+        }
+    }
+
+    private static func beginMutation(_ setup: ProxySetup) -> Mutation {
+        let mutation = Mutation(id: UUID(), items: candidates(setup).map(key))
+        locked {
+            for item in mutation.items {
+                epochs[item, default: 0] += 1
+                passwords[item] = nil
+                answers = answers.filter { $0.key.identity != item }
+                mutating[item] = mutation.id
+            }
+        }
+        return mutation
+    }
+
+    private static func endMutation(_ mutation: Mutation, password: (Identity, String)? = nil, forgotten: Bool = false) -> Bool {
+        locked {
+            guard mutation.items.allSatisfy({ mutating[$0] == mutation.id }) else { return false }
+            for item in mutation.items {
+                epochs[item, default: 0] += 1
+                mutating.removeValue(forKey: item)
+                passwords[item] = nil
+                answers = answers.filter { $0.key.identity != item }
+                if forgotten {
+                    for scope in [Scope.presence, .quiet, .interactive] { answers[Lookup(identity: item, scope: scope)] = .missing }
+                }
+            }
+            if let (item, value) = password { passwords[item] = value }
+            return true
+        }
+    }
+
     @discardableResult
     static func save(_ password: String, for setup: ProxySetup) -> Bool {
         guard !setup.user.isEmpty, setup.complete else { return false }
         if password.isEmpty { return forget(setup) }
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        let mutation = beginMutation(setup)
+        let saved: Bool
         if Store.testing {
-            rehearsal[key(setup)] = password
-            return true
+            locked { rehearsal[key(setup)] = password }
+            saved = true
+        } else {
+            let fields: [String: Any] = [kSecValueData as String: Data(password.utf8), kSecAttrLabel as String: label]
+            let status = KeychainAccess.update(identity(setup) as CFDictionary, fields as CFDictionary)
+            if status == errSecSuccess { saved = true }
+            else if status == errSecItemNotFound {
+                var fresh = identity(setup).merging(fields) { _, new in new }
+                fresh[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
+                saved = KeychainAccess.add(fresh as CFDictionary, nil) == errSecSuccess
+            } else { saved = false }
         }
-        guard let data = password.data(using: .utf8) else { return false }
-        let fields: [String: Any] = [kSecValueData as String: data, kSecAttrLabel as String: label]
-        let status = SecItemUpdate(identity(setup) as CFDictionary, fields as CFDictionary)
-        if status == errSecSuccess { return true }
-        guard status == errSecItemNotFound else { return false }
-        var fresh = identity(setup).merging(fields) { _, new in new }
-        fresh[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
-        return SecItemAdd(fresh as CFDictionary, nil) == errSecSuccess
+        let published = endMutation(mutation, password: saved ? (key(setup), password) : nil)
+        return saved && published
     }
 
     @discardableResult
     static func forget(_ setup: ProxySetup) -> Bool {
-        // Forget the logical HTTP proxy account in both transport slots;
-        // otherwise deleting one would make the other password reappear.
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        let mutation = beginMutation(setup)
         var forgotten = true
         for candidate in candidates(setup) {
-            if Store.testing {
-                rehearsal[key(candidate)] = nil
-                continue
-            }
-            let status = SecItemDelete(identity(candidate) as CFDictionary)
-            if status != errSecSuccess && status != errSecItemNotFound { forgotten = false }
+            if Store.testing { locked { rehearsal[key(candidate)] = nil }; continue }
+            let status = KeychainAccess.delete(identity(candidate) as CFDictionary)
+            if status != errSecSuccess && status != errSecItemNotFound { forgotten = false; break }
         }
-        return forgotten
-    }
-
-    /// Whether a password is kept for what is set, without reading it.
-    static func kept(_ setup: ProxySetup) -> Bool {
-        guard !setup.user.isEmpty, setup.complete else { return false }
-        for candidate in candidates(setup) {
-            if Store.testing {
-                if rehearsal[key(candidate)] != nil { return true }
-                continue
-            }
-            var asked = identity(candidate)
-            asked[kSecReturnAttributes as String] = true
-            asked[kSecMatchLimit as String] = kSecMatchLimitOne
-            if SecItemCopyMatching(asked as CFDictionary, nil) == errSecSuccess { return true }
-        }
-        return false
+        let published = endMutation(mutation, forgotten: forgotten)
+        return forgotten && published
     }
 }

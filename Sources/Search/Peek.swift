@@ -20,7 +20,7 @@ extension Browser {
         // same sign-ins as the tab it came from rather than the front
         // window's; a private tab's peek is private, with a store of its own.
         let page = Tab(shy: tab.shy,
-                       configuration: tab.usesTor ? Web.configuration(shy: true, store: tab.store) : tab.shy ? Web.configuration(shy: true) : Web.configuration(space: spaceID))
+                       configuration: Web.configuration(forNewTabFrom: tab, space: spaceID))
         prepare(page)
         page.go(to: url)
         withAnimation(Motion.settle) {

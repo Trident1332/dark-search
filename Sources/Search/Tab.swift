@@ -83,8 +83,8 @@ enum Web {
 
     /// `space`: the space the tab belongs to, when it is not the one on
     /// screen — a parked row made ahead of time (see Spaces.swift).
-    /// `store`: a shy tab's own, for one opened from it — a link followed
-    /// out of a private page is still signed in to whatever that page was.
+    /// `store`: an existing session, kept when rebuilding the same tab or
+    /// opening another ordinary Tor page. New private tabs get fresh stores.
     static func configuration(shy: Bool = false, space: UUID? = nil, store: WKWebsiteDataStore? = nil) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         // The real store, not the ephemeral one: staying signed in between
@@ -143,6 +143,18 @@ enum Web {
         inspector(config.preferences)
         NativePiP.allow(config.preferences)
         return config
+    }
+
+    /// A new tab keeps its source's privacy and route, with a session of its
+    /// own when private. Passing the source store here would also pass its
+    /// support chat, sign-ins and website storage to the new tab.
+    @MainActor static func configuration(forNewTabFrom source: Tab, space: UUID) -> WKWebViewConfiguration {
+        if source.shy {
+            let fresh = WKWebsiteDataStore.nonPersistent()
+            return configuration(shy: true, space: space,
+                                 store: source.usesTor ? Onion.shared.store(for: fresh) : fresh)
+        }
+        return configuration(shy: source.usesTor, space: space, store: source.usesTor ? source.store : nil)
     }
 
     /// What a page may not play until it is clicked or a key pressed: sound,
@@ -1108,12 +1120,7 @@ final class Tab: ObservableObject, Identifiable {
         controller.addUserScript(
             WKUserScript(source: DialRelay.watch, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: Web.world)
         )
-        if Shared.prefs.dialerOn, !Shared.prefs.dialerSites.isEmpty {
-            controller.addUserScript(
-                WKUserScript(source: DialerSiteRelay.script(hosts: Shared.prefs.dialerSites), injectionTime: .atDocumentStart,
-                             forMainFrameOnly: true, in: Web.world)
-            )
-        }
+        controller.addUserScript(dialerBridgeScript())
         // Every frame, in Search's world: a paused video gives the media keys
         // back (see MediaKeys.swift).
         controller.addUserScript(
@@ -1193,6 +1200,33 @@ final class Tab: ObservableObject, Identifiable {
         controller.addUserScript(
             WKUserScript(source: Veiling.style(css), injectionTime: .atDocumentStart, forMainFrameOnly: true, in: Web.world)
         )
+    }
+
+    /// Updated grants apply to the document already open and to later
+    /// documents in the same view. A reload alone never rebuilds its scripts.
+    static func refreshDialerBridge() {
+        for tab in proxyTabs.allObjects { tab.refreshDialerBridge() }
+    }
+
+    func refreshDialerBridge() {
+        guard let web = built else { return }
+        let controller = web.configuration.userContentController
+        let kept = controller.userScripts.filter {
+            !$0.source.contains(DialerSiteRelay.scriptMarker)
+                && !$0.source.contains("window.__searchDialerSite")
+        }
+        controller.removeAllUserScripts()
+        kept.forEach(controller.addUserScript)
+        let script = dialerBridgeScript()
+        controller.addUserScript(script)
+        web.evaluateJavaScript(script.source, in: nil, in: Web.world) { _ in }
+    }
+
+    private func dialerBridgeScript() -> WKUserScript {
+        let setup = Dialer.shared.setup
+        let grants = setup.on && !shy && !usesTor ? setup.sites : []
+        return WKUserScript(source: DialerSiteRelay.script(hosts: grants), injectionTime: .atDocumentStart,
+                            forMainFrameOnly: true, in: Web.world)
     }
 
     /// The same stylesheet, for the page that is already up.
@@ -1422,6 +1456,29 @@ final class Tab: ObservableObject, Identifiable {
         web.open(url)
         // Back, from a page that came out of one of Search's own, goes there.
         steps()
+    }
+
+    /// A private popup cannot use WebKit's related-view configuration: that
+    /// would share its opener's session. Transfer the request, including a
+    /// form's body, but leave the opener's credentials and referrer behind.
+    func openPrivatePopup(_ original: URLRequest) {
+        guard shy, let url = original.url else { return }
+        setAddressOptimistically(url)
+        let method = original.httpMethod?.uppercased() ?? "GET"
+        guard ["GET", "HEAD"].contains(method) || original.httpBody != nil || original.httpBodyStream != nil else {
+            failure = "Open this page in the private tab before submitting the form. Its request body could not be transferred safely"
+            return
+        }
+        var request = original
+        for header in ["Cookie", "Cookie2", "Authorization", "Proxy-Authorization", "Referer"] {
+            request.setValue(nil, forHTTPHeaderField: header)
+        }
+        if usesTor || OnionAddress.isOnion(url) { openOnion(request); return }
+        guard !proxyPaused else {
+            failure = "Wait for the proxy connection before opening this private popup"
+            return
+        }
+        if url.isFileURL { web.open(url) } else { web.load(request) }
     }
 
     /// Brought back from the last session: everything the row needs to draw it,

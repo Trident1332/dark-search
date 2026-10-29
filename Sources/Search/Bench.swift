@@ -107,7 +107,7 @@ final class Bench {
         static var given: Bool {
             var asked = query
             asked[kSecReturnAttributes as String] = true
-            let status = SecItemCopyMatching(asked as CFDictionary, nil)
+            let status = KeychainAccess.copyMatching(asked as CFDictionary, nil)
             return status == errSecSuccess || status == errSecMissingEntitlement
         }
 
@@ -115,14 +115,14 @@ final class Bench {
             var item = query
             item[kSecValueData as String] = Data("on".utf8)
             item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            let status = SecItemAdd(item as CFDictionary, nil)
+            let status = KeychainAccess.add(item as CFDictionary, nil)
             if status != errSecSuccess, status != errSecDuplicateItem, status != errSecMissingEntitlement {
                 NSLog("Bench: the switch left no mark (%d)", status)
             }
         }
 
         static func revoke() {
-            SecItemDelete(query as CFDictionary)
+            KeychainAccess.delete(query as CFDictionary)
         }
     }
 

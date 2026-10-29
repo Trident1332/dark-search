@@ -207,13 +207,36 @@ def main():
         sv.cmd({"do": "go", "id": private, "url": sv.BASE + "/opener"}); time.sleep(1)
         evaluate(private, "document.cookie='fixture=private;path=/';true")
         tap(private, "#sized")
-        t.ok("private popup shares only its private opener's sign-ins", evaluate(private, "messages.some(m => m.cookie.includes('fixture=private'))") is True and "fixture=ordinary" in evaluate(page, "document.cookie"))
         private_child = child(2)
+        t.ok("private popup starts with independent sign-ins",
+             evaluate(private_child, "document.cookie", 2) == ""
+             and "fixture=private" in evaluate(private, "document.cookie")
+             and "fixture=ordinary" in evaluate(page, "document.cookie"))
+        t.ok("private popup cannot reach the page that opened it",
+             evaluate(private_child, "window.opener === null", 2) is True
+             and evaluate(private, "popup === null && messages.length === 0") is True)
+        evaluate(private_child, "document.cookie='fixture=popup;path=/';true", 2)
         tap(private_child, "#link", 2, mods=["cmd"])
         linked = next(tab for tab in tabs() if urlparse(tab["url"]).path == "/modified-from-popup" and tab["shy"])
-        t.ok("modified private popup link keeps its private store", "fixture=private" in evaluate(linked["id"], "document.cookie"))
+        t.ok("modified private popup link starts another independent session",
+             evaluate(linked["id"], "document.cookie") == ""
+             and "fixture=popup" in evaluate(private_child, "document.cookie", 2)
+             and "fixture=private" in evaluate(private, "document.cookie"))
         sv.cmd({"do":"press", "window":2, "code":17, "chars":"t", "mods":["cmd"]})
         t.ok("new tab from a private popup goes to the browser privately", len(tabs(2)) == 1 and any(tab["shy"] and tab["active"] and not tab["url"] for tab in tabs()))
+        first_blank = next(tab["id"] for tab in tabs() if tab["active"])
+        sv.sp("private")
+        second_blank = next(tab["id"] for tab in tabs() if tab["active"])
+        t.ok("opening another private tab preserves both blank tabs",
+             first_blank != second_blank
+             and all(any(tab["id"] == item and tab["shy"] and not tab["url"] for tab in tabs())
+                     for item in (first_blank, second_blank)))
+        sv.cmd({"do": "go", "id": first_blank, "url": sv.BASE + "/first-blank"}); time.sleep(1)
+        evaluate(first_blank, "document.cookie='fixture=first-blank;path=/';true")
+        sv.cmd({"do": "go", "id": second_blank, "url": sv.BASE + "/second-blank"}); time.sleep(1)
+        t.ok("blank private tabs keep separate sign-ins after navigation",
+             evaluate(second_blank, "document.cookie") == ""
+             and "fixture=first-blank" in evaluate(first_blank, "document.cookie"))
         sv.cmd({"do": "windows", "action": "close", "n": 2})
 
         sv.cmd({"do": "ui", "spaces": True})

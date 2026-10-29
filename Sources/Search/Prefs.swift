@@ -724,15 +724,31 @@ final class Preferences: ObservableObject {
     @Published var dialerAutodial: Bool {
         didSet { store.set(dialerAutodial, forKey: "dialer.autodial"); routeDialer() }
     }
-    /// Sites whose pages may use the dialer, as otto's do.
+    /// Exact origins whose pages may use the dialer.
     @Published var dialerSites: [String] {
-        didSet { store.set(dialerSites, forKey: "dialer.sites"); routeDialer() }
+        didSet {
+            let normalized = DialerOrigin.normalized(dialerSites)
+            if dialerSites != normalized { dialerSites = normalized; return }
+            store.set(dialerSites, forKey: "dialer.sites")
+            routeDialer()
+        }
+    }
+
+    @Published var dialerNumeroUS: String {
+        didSet { store.set(dialerNumeroUS, forKey: "dialer.numero.us"); routeDialer() }
+    }
+    @Published var dialerNumeroCA: String {
+        didSet { store.set(dialerNumeroCA, forKey: "dialer.numero.ca"); routeDialer() }
+    }
+    @Published var dialerTelicallUK: String {
+        didSet { store.set(dialerTelicallUK, forKey: "dialer.telicall.uk"); routeDialer() }
     }
 
     /// The settings as the dialer takes them.
     var dialerSetup: DialerSetup {
         DialerSetup(on: dialerOn, wss: dialerWSS, domain: dialerDomain, user: dialerUser,
-                    region: dialerRegion, autodial: dialerAutodial, sites: dialerSites)
+                    region: dialerRegion, autodial: dialerAutodial, sites: dialerSites,
+                    numeroUS: dialerNumeroUS, numeroCA: dialerNumeroCA, telicallUK: dialerTelicallUK)
     }
 
     private func routeDialer() { Dialer.shared.take(dialerSetup) }
@@ -954,7 +970,11 @@ final class Preferences: ObservableObject {
         dialerUser = store.string(forKey: "dialer.user") ?? ""
         dialerRegion = store.string(forKey: "dialer.region") ?? "GB"
         dialerAutodial = store.object(forKey: "dialer.autodial") as? Bool ?? true
-        dialerSites = store.stringArray(forKey: "dialer.sites") ?? Dialer.defaultSites
+        dialerSites = DialerOrigin.normalized(store.stringArray(forKey: "dialer.sites") ?? Dialer.defaultSites)
+        dialerNumeroUS = store.string(forKey: "dialer.numero.us") ?? ""
+        dialerNumeroCA = store.string(forKey: "dialer.numero.ca") ?? ""
+        dialerTelicallUK = store.string(forKey: "dialer.telicall.uk") ?? ""
+        store.set(dialerSites, forKey: "dialer.sites")
         // Before the first page is loaded: the shared store takes the route
         // now, and every other store as it is made (see Proxy.apply).
         Proxy.shared.take(proxySetup)

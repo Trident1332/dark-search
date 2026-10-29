@@ -94,22 +94,8 @@
     } }
   };
 
-  /* The microphone. In Chrome the dialer checks the Permissions API before a call and sends you
-   * to a page that asks, since a side panel can't. Here the panel is Search's own page and
-   * Search grants it the microphone itself (DialerPage, Dialer.swift); macOS asks once, the
-   * first time, for Search as a whole. So the check answers "granted", and a call goes straight
-   * to getUserMedia. A microphone macOS refuses still fails there, and the dialer's own handling
-   * takes over (needMic → chrome.tabs.create → Search's explanation). */
-  try {
-    var permissions = navigator.permissions;
-    var query = permissions && permissions.query ? permissions.query.bind(permissions) : null;
-    if (permissions) {
-      permissions.query = function (desc) {
-        if (desc && desc.name === "microphone") return Promise.resolve({ state: "granted", onchange: null });
-        return query ? query(desc) : Promise.reject(new TypeError("unsupported"));
-      };
-    }
-  } catch (e) { /* leave it */ }
+  // Call asks Search for OS microphone permission explicitly. Ordinary
+  // Permissions API queries keep their original meaning and never prompt.
 
   /* ---- what the display says, for Search's panel line and for tests ---- */
   function report() {
@@ -128,14 +114,38 @@
     report();
   }
 
+  // Native visibility may arrive before dialer.js has finished loading. Keep it until
+  // the call controller binds; a new page starts hidden and cannot open the microphone.
+  var lifecycle = null, visible = false, shutDown = false;
   window.__searchDialer = {
     deliver: deliver,
     changed: changed,
-    hangup: function () {
-      var hang = document.getElementById("hang");
-      if (!hang || hang.inert) return false;
-      hang.click();
-      return true;
+    requestMicrophone: function () {
+      if (!visible || shutDown) return Promise.resolve({ state: "denied" });
+      return ask({ op: "microphone.request" }).then(function (reply) {
+        return { state: reply && reply.state === "granted" ? "granted" : "denied" };
+      }, function () { return { state: "denied" }; });
+    },
+    recoverMicrophone: function () {
+      if (!visible || shutDown) return Promise.resolve({ state: "denied" });
+      return ask({ op: "microphone.recover" }).then(function (reply) {
+        return { state: reply && reply.state === "granted" ? "granted" : "denied" };
+      }, function () { return { state: "denied" }; });
+    },
+    bindLifecycle: function (controller) {
+      lifecycle = controller;
+      if (shutDown) return lifecycle.shutdown();
+      return lifecycle.setVisible(visible);
+    },
+    setVisible: function (value) {
+      visible = !!value && !shutDown;
+      if (!visible) buffered = [];
+      return lifecycle ? lifecycle.setVisible(visible) : false;
+    },
+    hangup: function () { buffered = []; return lifecycle ? lifecycle.hangup() : false; },
+    shutdown: function () {
+      shutDown = true; visible = false; buffered = [];
+      return lifecycle ? lifecycle.shutdown() : false;
     },
     state: function () {
       var stat = document.getElementById("stat"), num = document.getElementById("num"), who = document.getElementById("who");

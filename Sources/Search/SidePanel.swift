@@ -87,6 +87,7 @@ extension Browser {
         else { return .notHere }
         let content = SidePanelContent.page(extensionID: context.uniqueIdentifier, url: url, tab: tab)
         guard SidePanelPages.shared.load(url, from: context, in: self) else { return .noPanel }
+        if case .dialer = sidePanel { dialerPage?.setVisible(false) }
         if let tab { SidePanelPages.shared.bind(content, to: tab, in: self) }
         sidePanel = content
         sidePanelShown = true
@@ -124,6 +125,7 @@ extension Browser {
             return true
         }
         if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
+        if case .dialer = sidePanel { dialerPage?.setVisible(false) }
         SidePanelPages.shared.loadSite(url, space: spaceID, in: self)
         sidePanel = .site(url: url, space: spaceID)
         sidePanelShown = true
@@ -175,7 +177,7 @@ extension Browser {
     /// stays, signed in, but a call in progress ends with the panel.
     func closeSidePanel() {
         if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
-        if case .dialer = sidePanel { dialerPage?.hangUp() }
+        if case .dialer = sidePanel { dialerPage?.setVisible(false) }
         SidePanelPages.shared.drop(in: self)
         sidePanelShown = false
         sidePanel = nil

@@ -86,23 +86,25 @@ final class DialerTests: XCTestCase {
         XCTAssertTrue(setup.complete)
         setup.user = " "
         XCTAssertFalse(setup.complete)
-        XCTAssertEqual(Dialer.site("https://Otto.Example.com:8080/leads"), "otto.example.com")
-        XCTAssertEqual(Dialer.defaultSites, ["otto.investigate.agency", "localhost", "127.0.0.1"])
+        XCTAssertEqual(Dialer.site("https://Otto.Example.com:8080"), "https://otto.example.com:8080")
+        XCTAssertEqual(Dialer.site("https://otto.example.com/leads"), "")
+        XCTAssertEqual(Dialer.defaultSites, ["https://otto.investigate.agency"])
     }
 
     @MainActor func testSitesAreAllowedOnlyWhileOnAndListed() {
         let prefs = Shared.prefs
         let was = (prefs.dialerOn, prefs.dialerSites)
         defer { prefs.dialerOn = was.0; prefs.dialerSites = was.1 }
-        prefs.dialerSites = ["otto.example.com", "localhost"]
+        prefs.dialerSites = ["https://otto.example.com", "http://localhost:3000"]
         prefs.dialerOn = false
-        XCTAssertFalse(Dialer.shared.allows(host: "otto.example.com"))
+        XCTAssertFalse(Dialer.shared.allows(scheme: "https", host: "otto.example.com", port: 443))
         prefs.dialerOn = true
-        XCTAssertTrue(Dialer.shared.allows(host: "Otto.Example.com"))
-        XCTAssertTrue(Dialer.shared.allows(host: "localhost"))
-        XCTAssertFalse(Dialer.shared.allows(host: "evil.example.com"))
-        XCTAssertFalse(Dialer.shared.allows(host: "sub.otto.example.com"))
-        XCTAssertFalse(Dialer.shared.allows(host: nil))
+        XCTAssertTrue(Dialer.shared.allows(scheme: "https", host: "Otto.Example.com", port: 443))
+        XCTAssertTrue(Dialer.shared.allows(scheme: "http", host: "localhost", port: 3000))
+        XCTAssertFalse(Dialer.shared.allows(scheme: "http", host: "localhost", port: 3001))
+        XCTAssertFalse(Dialer.shared.allows(scheme: "http", host: "otto.example.com", port: 80))
+        XCTAssertFalse(Dialer.shared.allows(scheme: "https", host: "evil.example.com", port: 443))
+        XCTAssertFalse(Dialer.shared.allows(scheme: "https", host: "sub.otto.example.com", port: 443))
     }
 
     @MainActor func testThePasswordStaysWithItsSeat() {
@@ -161,7 +163,8 @@ final class DialerTests: XCTestCase {
         XCTAssertFalse(prefs.dialerAutodial)
         XCTAssertEqual(DialerPassword.read(prefs.dialerSetup), "pw")
         let config = Dialer.shared.configForSites()
-        XCTAssertEqual(config["password"] as? String, "pw")
+        XCTAssertNil(config["password"])
+        XCTAssertEqual(config["passwordSaved"] as? Bool, true)
         XCTAssertEqual(config["provider"] as? String, "telicall")
         Dialer.shared.takeConfig(["region": "united kingdom"])
         XCTAssertEqual(prefs.dialerRegion, "US")

@@ -32,6 +32,10 @@
 
     <div class="pad" id="pad" role="group" aria-label="Keypad"></div>
 
+    <div class="incoming" id="incoming" hidden role="group" aria-label="Incoming call">
+      <button id="answer" type="button">Answer</button>
+      <button id="decline" type="button">Decline</button>
+    </div>
     <div class="row">
       <button class="call" id="call" type="button" title="Call" aria-label="Call">
         <svg class="hs" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384"/></svg>
@@ -56,8 +60,10 @@
           <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
         </button>
         <div class="menu vmenu" id="providerMenu" hidden role="menu" aria-label="Number">
-          <button type="button" role="menuitemradio" data-provider="numero" aria-checked="true">Numero</button>
-          <button type="button" role="menuitemradio" data-provider="telicall" aria-checked="false">Telicall</button>
+          <button id="numeroDefault" type="button" role="menuitemradio" data-provider="numero" aria-checked="true">Numero</button>
+          <button id="numeroUS" type="button" role="menuitemradio" data-provider="numero-us" aria-checked="false" hidden>Numero US</button>
+          <button id="numeroCA" type="button" role="menuitemradio" data-provider="numero-ca" aria-checked="false" hidden>Numero Canada</button>
+          <button id="telicallUK" type="button" role="menuitemradio" data-provider="telicall" aria-checked="false">Telicall</button>
         </div>
       </div>
       <div class="mwrap">
