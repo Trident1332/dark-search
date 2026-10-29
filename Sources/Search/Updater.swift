@@ -96,7 +96,7 @@ final class Updater: ObservableObject {
 
         var message: String? {
             switch self {
-            case .upToDate: return "Search is up to date"
+            case .upToDate: return "\(Brand.name) is up to date"
             case .available: return nil
             case .failed(let why): return "Couldn't check for updates. \(why)"
             }
@@ -204,10 +204,10 @@ final class Updater: ObservableObject {
     func checkByHand() {
         switch stage {
         case .ready(let next):
-            say?("Search \(next.version) is ready — relaunch to use it")
+            say?("\(Brand.name) \(next.version) is ready — relaunch to use it")
             return
         case .fetching(let next):
-            say?("Search \(next.version) is downloading")
+            say?("\(Brand.name) \(next.version) is downloading")
             return
         default: break
         }
@@ -256,14 +256,14 @@ final class Updater: ObservableObject {
             case .waiting(let known) where known == found: break
             case .none, .offered, .waiting:
                 stage = .waiting(found)
-                say?("Search \(found.version) is out — choose Install Update in the Search menu")
+                say?("\(Brand.name) \(found.version) is out — choose Install Update in the \(Brand.name) menu")
             }
         }
     }
 
     /// The disk image, when the bundle can't be swapped where it is: fetched
     /// by Search itself, never through a web page, and opened only if its
-    /// hash is the signed feed's and its signature is Office Commun's.
+    /// hash is the signed feed's and its signature matches the release key.
     @Published private(set) var fetchingDisk = false
     /// What a test run decided about a disk image, for the bench.
     static var diskVerdict = ""
@@ -271,7 +271,7 @@ final class Updater: ObservableObject {
     func openDisk() {
         guard case .offered(let release) = stage, !fetchingDisk else { return }
         fetchingDisk = true
-        say?("Downloading Search \(release.version)")
+        say?("Downloading \(Brand.name) \(release.version)")
         Task.detached(priority: .utility) {
             let result: Result<URL, Error>
             do { result = .success(try await Swap.disk(release)) } catch { result = .failure(error) }
@@ -283,7 +283,7 @@ final class Updater: ObservableObject {
                     if Store.testing { Updater.diskVerdict = "verified" } else { NSWorkspace.shared.open(dmg) }
                 case .failure(let error):
                     Updater.diskVerdict = "refused: \(error)"
-                    say?("That download didn't check out — get Search from github.com/\(Updater.repository)/releases")
+                    say?("That download didn't check out — get \(Brand.name) from github.com/\(Updater.repository)/releases")
                 }
             }
         }
@@ -306,7 +306,7 @@ final class Updater: ObservableObject {
         case .none, .offered, .waiting: break
         }
         stage = .fetching(release)
-        say?("Search \(release.version) is downloading")
+        say?("\(Brand.name) \(release.version) is downloading")
         Task.detached(priority: .utility) {
             let worked: Bool
             do {
@@ -323,8 +323,8 @@ final class Updater: ObservableObject {
         guard case .fetching(let fetching) = stage, fetching == release else { return }
         stage = worked ? .ready(release) : .offered(release)
         say?(worked
-            ? "Search \(release.version) is ready — it's there the next time you open it"
-            : "Search \(release.version) is out — choose Download Update in the Search menu")
+            ? "\(Brand.name) \(release.version) is ready — it's there the next time you open it"
+            : "\(Brand.name) \(release.version) is out — choose Download Update in the \(Brand.name) menu")
     }
 
     /// Quit, and come back as the new one. A shell waits for this process
@@ -356,7 +356,7 @@ final class Updater: ObservableObject {
     }
 
     private static func fetch() async throws -> Release {
-        // The feed as Office Commun signed it: appcast.json.zip, next to the
+        // The feed signed with this fork's release key: appcast.json.zip, next to the
         // plain one older builds read, holding the same file with its code
         // signature (build.sh). Only what comes out of it, checked, is read:
         // a feed a server or a hijacked answer made up is no feed at all.
@@ -622,7 +622,7 @@ private enum Swap {
         guard let expected = release.dmgSha256 else { throw Refused.hash }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("search-disk-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let dmg = folder.appendingPathComponent("Search \(release.version).dmg")
+        let dmg = folder.appendingPathComponent("\(Brand.name) \(release.version).dmg")
         try await download(release.dmg, to: dmg)
         guard try digest(of: dmg) == expected else { throw Refused.hash }
         var code: SecStaticCode?

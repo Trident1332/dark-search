@@ -84,8 +84,8 @@ struct Page: View {
 
             if tab.proxyPaused && tab.isWeb {
                 Trouble(message: proxy.dropped || proxy.refused
-                        ? "Search is offline until the proxy reconnects. See Settings › Proxy."
-                        : "Connecting to the proxy. Search stays offline until the connection is verified.") {
+                        ? "Dark Search is offline until the proxy reconnects. See Settings › Proxy."
+                        : "Connecting to the proxy. Dark Search stays offline until the connection is verified.") {
                     proxy.test()
                 }
             }

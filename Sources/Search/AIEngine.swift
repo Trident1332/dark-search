@@ -306,7 +306,7 @@ final class AIEngine: ObservableObject {
                 throw Stopped(why: "The engine's signature doesn't hold up. Remove it in Settings › AI and download it again.")
             }
             guard let modelFD = checked.1 else {
-                throw Stopped(why: "The model isn't the one Search expects. Remove it in Settings › AI and download it again.")
+                throw Stopped(why: "The model isn't the one Dark Search expects. Remove it in Settings › AI and download it again.")
             }
             defer { close(modelFD) }
             try spawn(engine, modelFD: modelFD)

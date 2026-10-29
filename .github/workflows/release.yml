@@ -2,7 +2,7 @@
 # built by build.sh, signed with the fork's release key (Updater.signer), and
 # published as the repository's latest GitHub release. The browser reads
 # releases/latest/download/appcast.json.zip at launch and every hour, and
-# Search › Check for Updates… reads it at once.
+# Dark Search › Check for Updates reads it at once.
 #
 # Two repository secrets hold the key:
 #   SIGNING_P12           the key and its certificate, as a base64 .p12
@@ -78,7 +78,11 @@ jobs:
           SIGNER="$(sed -n 's/.*static let signer = "\([0-9a-f]*\)".*/\1/p' Sources/Search/Updater.swift)"
           [ ${#SIGNER} -eq 40 ] || { echo "no signer in Updater.swift" >&2; exit 1; }
           codesign --verify --strict --deep \
-            -R="identifier \"com.officecommun.search\" and certificate leaf = H\"$SIGNER\"" build/Search.app
+            -R="identifier \"com.officecommun.search\" and certificate leaf = H\"$SIGNER\"" "build/Dark Search.app"
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' 'build/Search.app/Contents/Info.plist')" = "Dark Search" ]
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' 'build/Search.app/Contents/Info.plist')" = "$VERSION" ]
+          cmp "build/Dark Search.zip" build/Search.zip
+          cmp "build/Dark Search.dmg" build/Search.dmg
           CHECK="$(mktemp -d)"
           ditto -x -k build/appcast.json.zip "$CHECK"
           codesign --verify \
@@ -96,8 +100,9 @@ jobs:
             git log -1 --format=%B
           } > "$RUNNER_TEMP/notes.md"
           gh release create "$TAG" \
+            "build/Dark Search.zip" "build/Dark Search.dmg" \
             build/Search.zip build/Search.dmg build/appcast.json build/appcast.json.zip \
-            --title "Search $VERSION ($TAG)" \
+            --title "Dark Search $VERSION ($TAG)" \
             --notes-file "$RUNNER_TEMP/notes.md" \
             --target "$GITHUB_SHA" \
             --latest

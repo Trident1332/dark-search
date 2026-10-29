@@ -156,7 +156,7 @@ struct PasswordsPanel: View {
     private var tally: String {
         let passwords = browser.saved.count == 1 ? "1 password" : "\(browser.saved.count) passwords"
         let notes = browser.notes.count == 1 ? "1 note" : "\(browser.notes.count) notes"
-        return "\(passwords) · \(notes) · in your keychain, under Search"
+        return "\(passwords) · \(notes) · in your keychain"
     }
 
     // MARK: - open
@@ -363,7 +363,7 @@ struct PasswordsPanel: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.muted)
             }
-            Text("macOS asks once for that browser's keychain key. Nothing is changed there; everything lands in your own keychain, under Search.")
+            Text("macOS asks once for that browser's keychain key. Nothing is changed there; everything lands in your own keychain.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(Palette.muted)
                 .fixedSize(horizontal: false, vertical: true)

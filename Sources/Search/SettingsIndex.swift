@@ -115,14 +115,14 @@ enum SettingsIndex {
     static let items: [SettingsItem] = ([
         // General
         .init(id: "general.default", group: "browser", icon: "link.badge.plus",
-              title: "Open links from other apps", detail: "Make Search the browser Mail, Slack and the rest send links to",
+              title: "Open links from other apps", detail: "Make Dark Search the browser Mail, Slack and the rest send links to",
               words: ["default browser"]),
         .init(id: "general.import", group: "browser", icon: "square.and.arrow.down.on.square",
               title: "Bring things over", detail: "Bookmarks, history, passwords and extensions from another browser",
               more: "From another browser on this Mac, or from a file it exported. Nothing leaves your Mac.",
               words: ["import", "chrome", "safari", "arc", "migrate"]),
         .init(id: "quit.confirm", group: "browser", icon: "power",
-              title: "Confirm before quitting", detail: "Ask before ⌘Q or Quit Search closes the browser",
+              title: "Confirm before quitting", detail: "Ask before ⌘Q or Quit Dark Search closes the browser",
               keys: ["quit.confirm"], words: ["quit", "cmd q"]),
         .init(id: "downloads.folder", group: "downloads", icon: "folder",
               title: "Save to", detail: "", keys: ["downloads"], words: ["download folder"]),
@@ -203,7 +203,7 @@ enum SettingsIndex {
               keys: ["tabs.sleep", SleepPace.key], words: ["memory", "discard", "suspend", "ram"], kind: .wide),
         .init(id: "tabs.close.after", group: "memory", icon: "timer",
               title: "Close tabs you leave alone", detail: "Pinned, named and grouped tabs stay. ⇧⌘T brings one back",
-              more: "Counted from when you last left the tab, while Search is quit too. Private tabs, sound, calls and anything typed stay.",
+              more: "Counted from when you last left the tab, while Dark Search is quit too. Private tabs, sound, calls and anything typed stay.",
               keys: ["tabs.close.after"], words: ["auto close", "archive", "clean up"]),
         .init(id: "tabs.shortcuts", group: "tabbar", icon: "command",
               title: "Show tab numbers while ⌘ is held", detail: "Which tab each ⌘1–9 selects",
@@ -225,7 +225,7 @@ enum SettingsIndex {
               title: "Site shortcuts", detail: "A word before your search sends it to that site: \"yt cats\"",
               keys: ["search.keywords"], words: ["keyword", "bang"]),
         .init(id: "links.little", group: "links", icon: "rectangle.on.rectangle",
-              title: "Open links from other apps in a small window", detail: "To read and close, or keep with Open in Search (⌘O)",
+              title: "Open links from other apps in a small window", detail: "To read and close, or keep with Open in Dark Search (⌘O)",
               keys: ["links.little"], words: ["little arc", "mini window"]),
         .init(id: "reader.twins", group: "reading", icon: "doc.text",
               title: "Read the site's own Markdown", detail: "When a page has a Markdown copy, reading mode shows that",
@@ -236,11 +236,11 @@ enum SettingsIndex {
               more: "A small switch in its corner makes an article light, dark or as the window is, kept for the next one.",
               keys: ["reader.follows"], words: ["reader", "dark"]),
         .init(id: "float.style", group: "video", icon: "pip",
-              title: "The floating video", detail: "Search's own window, or macOS's picture in picture",
-              more: "Search's window floats a video without a click and keeps its page alive in it. Picture in picture is the one Safari uses, with the system's controls.",
+              title: "The floating video", detail: "Dark Search's own window, or macOS's picture in picture",
+              more: "Dark Search's window floats a video without a click and keeps its page alive in it. Picture in picture is the one Safari uses, with the system's controls.",
               keys: ["float.style"], words: ["pip", "picture in picture", "mini player"]),
         .init(id: "float.own", group: "video", icon: "pip.exit",
-              title: "Float the video on its own", detail: "A playing video comes out when you leave its tab, or Search",
+              title: "Float the video on its own", detail: "A playing video comes out when you leave its tab, or Dark Search",
               more: "It goes back into its tab when you return. ⇧⌘P still floats one by hand.",
               keys: ["float.leave", "float.away"], words: ["pip", "picture in picture", "switch apps"], kind: .wide),
         .init(id: "media.click", group: "video", icon: "play.slash",
@@ -275,7 +275,7 @@ enum SettingsIndex {
               words: ["profile", "accounts", "work", "personal"]),
         .init(id: "pins.keep", group: "pins", icon: "pin.circle",
               title: "Pins keep their site", detail: "Links elsewhere open over the pin, and ⌘W takes it back home",
-              more: "As in Arc and Safari: a link from a pin to another site opens in a peek over it, and a pin closed with ⌘W, or left open when Search quits, comes back at the page it was pinned at.",
+              more: "As in Arc and Safari: a link from a pin to another site opens in a peek over it, and a pin closed with ⌘W, or left open when Dark Search quits, comes back at the page it was pinned at.",
               keys: ["pins.home", "pins.peek"], words: ["pinned tabs", "go home", "reset pin"]),
         .init(id: "pins.list", group: "pins", icon: "list.bullet.rectangle",
               title: "Pinned rows", detail: "Pins as rows under the squares, and Clear over the rest",
@@ -301,7 +301,7 @@ enum SettingsIndex {
               more: "Every Show, Copy and change starts the clock again. The sign-in box under a page still offers the site's accounts while the page is locked: the keychain guards those itself.",
               keys: [VaultLock.lockAfterKey], words: ["touch id", "timeout", "auto-lock", "auto lock", "lock"]),
         .init(id: "vault.hidden", group: "passwords", icon: "eye.slash",
-              title: "Lock when Search is hidden", detail: "Switching to another app locks the page at once",
+              title: "Lock when Dark Search is hidden", detail: "Switching to another app locks the page at once",
               keys: [VaultLock.hiddenKey], words: ["background", "lock", "hidden"]),
         .init(id: "vault.each", group: "passwords", icon: "touchid",
               title: "Ask again for each password", detail: "Touch ID for every Show and Copy, even while the page is open",
@@ -317,7 +317,7 @@ enum SettingsIndex {
               keys: ["passkeys"], words: ["webauthn", "touch id"]),
         .init(id: "passwords.apple", group: "apple", icon: "applelogo",
               title: "Passwords from Apple's Passwords app", detail: "Your Passwords app's accounts under the sign-in box. Unofficial",
-              more: "Search talks to the helper Apple made for its Chrome extension, as that extension. Never in private tabs.",
+              more: "Dark Search talks to the helper Apple made for its Chrome extension, as that extension. Never in private tabs.",
               keys: ["passwords.apple"], words: ["icloud keychain", "apple"]),
 
         // Privacy
@@ -352,7 +352,7 @@ enum SettingsIndex {
 
         // Proxy
         .init(id: "proxy.on", group: "proxy", icon: "arrow.triangle.branch",
-              title: "Use a proxy", detail: "Only Search connects through it. Nothing else on your Mac changes",
+              title: "Use a proxy", detail: "Only Dark Search connects through it. Nothing else on your Mac changes",
               more: "Off, pages take the Mac's own settings from System Settings › Network, a PAC file included. The Mac's settings are never changed from here.",
               keys: ["proxy.on"], words: ["proxy", "socks", "socks5", "tunnel", "vpn", "route", "ip address"]),
         .init(id: "proxy.kind", group: "proxy", icon: "point.3.connected.trianglepath.dotted",
@@ -366,7 +366,7 @@ enum SettingsIndex {
               keys: ["proxy.signsIn", "proxy.user"], words: ["password", "username", "authentication", "keychain"], parent: "proxy.on"),
         .init(id: "proxy.test", group: "connection", icon: "globe",
               title: "Status", detail: "Not tested yet",
-              more: "Poke sends a request through the proxy to ipinfo.io, which answers with the address it saw and where that address is. Persistent connection also checks automatically when Search starts and while recovering a connection. Matching the proxy time zone checks on launch too.",
+              more: "Poke sends a request through the proxy to ipinfo.io, which answers with the address it saw and where that address is. Persistent connection also checks automatically when Dark Search starts and while recovering a connection. Matching the proxy time zone checks on launch too.",
               words: ["poke", "test", "location", "country", "city", "where", "connected"], parent: "proxy.on"),
         .init(id: "proxy.bypass", group: "exceptions", icon: "arrow.uturn.right",
               title: "Don't use the proxy for", detail: "Reached directly instead. A site, or a whole domain with its subdomains",
@@ -375,15 +375,15 @@ enum SettingsIndex {
               title: "Use in all profiles", detail: "Off, only the profile this window is in takes the route",
               keys: ["proxy.profiles"], words: ["profile", "work", "personal"], parent: "proxy.on"),
         .init(id: "proxy.blocks", group: "proxyoptions", icon: "xmark.octagon",
-              title: "Persistent connection", detail: "Reconnects on launch and keeps Search offline until the proxy works",
-              more: "Connects automatically when Search starts and retries if the connection drops. All Search internet traffic stays blocked until the proxy works, or you turn off Persistent connection or Use a proxy. Internet exceptions and profile limits are suspended, video-call protection is required, and physical-location access and external extension helpers are blocked. Pages and workers restart when the route changes; unsent forms may be lost. Nothing else on your Mac changes.",
+              title: "Persistent connection", detail: "Reconnects on launch and keeps Dark Search offline until the proxy works",
+              more: "Connects automatically when Dark Search starts and retries if the connection drops. All Dark Search internet traffic stays blocked until the proxy works, or you turn off Persistent connection or Use a proxy. Internet exceptions and profile limits are suspended, video-call protection is required, and physical-location access and external extension helpers are blocked. Pages and workers restart when the route changes; unsent forms may be lost. Nothing else on your Mac changes.",
               keys: ["proxy.blocks"], words: ["persistent", "connection", "restart", "reconnect", "retry", "automatic", "offline", "kill switch", "fallback", "failover", "leak", "unavailable", "down"], parent: "proxy.on"),
         .init(id: "proxy.shows", group: "proxyoptions", icon: "eye",
               title: "Show the location in the address bar", detail: "A small mark beside the address while pages take the route, amber when it drops",
               keys: ["proxy.shows"], words: ["address bar", "indicator", "mark", "location"], parent: "proxy.on"),
         .init(id: "proxy.calls", group: "proxyprivacy", icon: "video",
               title: "Keep video calls from revealing your address", detail: "Block websites from making direct video calls while the proxy is on",
-              more: "Website calls can send WebRTC traffic outside the browser proxy. With this on, pages can't start a peer connection while the proxy is on. Search's built-in Dialer uses its own protected relay and can still make calls. Persistent connection requires website call protection; otherwise you can turn it off to allow direct website calls.",
+              more: "Website calls can send WebRTC traffic outside the browser proxy. With this on, pages can't start a peer connection while the proxy is on. Dark Search's built-in Dialer uses its own protected relay and can still make calls. Persistent connection requires website call protection; otherwise you can turn it off to allow direct website calls.",
               keys: ["proxy.calls"], words: ["webrtc", "leak", "ip", "video call", "peer"], parent: "proxy.on"),
         .init(id: "proxy.timeZone", group: "proxyprivacy", icon: "clock",
               title: "Match the proxy's time zone", detail: "Pages use the time zone reported by the proxy's location",
@@ -391,7 +391,7 @@ enum SettingsIndex {
               keys: ["proxy.timeZone"], words: ["time zone", "timezone", "date", "intl", "utc", "clock", "location", "restart", "worker"], parent: "proxy.on"),
         // Dialer
         .init(id: "dialer.on", group: "dialer", icon: "phone",
-              title: "Call phone numbers from Search", detail: "Right-click a number on a page to call it, and a keypad in the side panel",
+              title: "Call phone numbers from Dark Search", detail: "Right-click a number on a page to call it, and a keypad in the side panel",
               more: "Otto's dialer, built in: a softphone that signs in to your FreeSWITCH phone server over a WebSocket and carries the call's sound through WebRTC, shown in the side panel. A tel: link opens there too, and approved websites can start a call. With a proxy on, signaling and audio require the protected route through your phone server's relay, including with Persistent connection on. A failed route stops calls. Tor tabs must be closed before calling. Incoming calls wait for you to press Answer.",
               keys: ["dialer.on"], words: ["dialer", "phone", "call", "softphone", "sip", "freeswitch", "otto", "ottocaller", "keypad", "tel", "voip"]),
         .init(id: "dialer.open", group: "dialer", icon: "sidebar.right",
@@ -424,7 +424,7 @@ enum SettingsIndex {
 
         .init(id: "onion.on", group: "tor", icon: "network.badge.shield.half.filled",
               title: "Open onion websites", detail: "Onion tabs use Tor; other tabs keep their existing connection",
-              more: "Opens .onion addresses in isolated temporary Tor tabs. Everything those tabs load, including redirects and downloads, stays on Tor. Extensions, direct peer connections and physical location are blocked, and dates use UTC. When Use a proxy is on, Tor connects through that proxy. HTTPS connections to the proxy are not supported yet; Search reports the error instead. Search keeps its own browser fingerprint.",
+              more: "Opens .onion addresses in isolated temporary Tor tabs. Everything those tabs load, including redirects and downloads, stays on Tor. Extensions, direct peer connections and physical location are blocked, and dates use UTC. When Use a proxy is on, Tor connects through that proxy. HTTPS connections to the proxy are not supported yet; Dark Search reports the error instead. Dark Search keeps its own browser fingerprint.",
               keys: ["onion.on"], words: ["tor", "onion", "hidden services", "temporary", "private", "utc"]),
         .init(id: "onion.connection", group: "tor", icon: "circle.dotted",
               title: "Connection", detail: "Tor starts when you open an onion website",
@@ -448,14 +448,12 @@ enum SettingsIndex {
         .init(id: "updates.version", group: "updates", icon: "arrow.down.app",
               title: "Updates", detail: "Checked every hour on its own", words: ["version", "update"]),
         .init(id: "updates.auto", group: "updates", icon: "arrow.triangle.2.circlepath",
-              title: "Install updates on its own", detail: "Off, Search tells you and waits for Install",
+              title: "Install updates on its own", detail: "Off, Dark Search tells you and waits for Install",
               keys: [Updater.installKey], words: ["automatic updates"]),
-        .init(id: "about.feedback", group: "updates", icon: "envelope",
-              title: "Found something wrong?", detail: "Opens a draft with the version already in it", words: ["bug", "feedback", "report"]),
         .init(id: "about.notes", group: "updates", icon: "sparkles",
               title: "What's new", detail: "Every version's notes, newest first", words: ["release notes", "changelog"]),
         .init(id: "bench", group: "developer", icon: "terminal",
-              title: "Let a script drive Search", detail: "A local socket for testing; its tabs never take over",
+              title: "Let a script drive Dark Search", detail: "A local socket for testing; its tabs never take over",
               more: "Its tabs open beside yours with a flask on them. See ./bench.",
               keys: ["bench"], words: ["automation", "script", "developer"]),
 
@@ -552,7 +550,7 @@ enum SettingsIndex {
     /// What a dimmed dependent row says instead of its own line.
     static func needs(_ item: SettingsItem) -> String {
         switch item.id {
-        case "pages.dusk": return "Only while Search isn't set to Light"
+        case "pages.dusk": return "Only while Dark Search isn't set to Light"
         case "sidebar.roomy": return "Only with titles in the column"
         case "tabs.address": return "Only with the tabs down the side: across the top, the address bar says it"
         case "onion.connection": return "Only with Open onion websites on"

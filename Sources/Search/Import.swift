@@ -209,14 +209,14 @@ enum Chromium {
             }
             if partial {
                 let reason = Self.permissionDenied(failure)
-                    ? "macOS hasn't allowed Search to read all of them."
+                    ? "macOS hasn't allowed Dark Search to read all of them."
                     : failure.localizedDescription
                 return "Some of \(source.name)'s profiles in \(looked) couldn't be read: \(reason) Choose its data folder in Settings › Bring Things Over to allow access for this session."
             }
             if Self.permissionDenied(failure) {
-                return "macOS hasn't allowed Search to read \(source.name)'s data in \(looked). Choose its data folder in Settings › Bring Things Over to allow access for this session."
+                return "macOS hasn't allowed Dark Search to read \(source.name)'s data in \(looked). Choose its data folder in Settings › Bring Things Over to allow access for this session."
             }
-            return "Search couldn't read \(source.name)'s data in \(looked): \(failure.localizedDescription)"
+            return "Dark Search couldn't read \(source.name)'s data in \(looked): \(failure.localizedDescription)"
         }
 
         private static func permissionDenied(_ error: NSError) -> Bool {

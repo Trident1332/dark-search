@@ -143,7 +143,7 @@ enum AIKeys {
         item[kSecValueData as String] = Data(key.utf8)
         item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         item[kSecAttrSynchronizable as String] = false
-        item[kSecAttrLabel as String] = "Search — \(provider.name) key"
+        item[kSecAttrLabel as String] = "Dark Search — \(provider.name) key"
         // The last four, to tell keys apart in Settings without reading one.
         item[kSecAttrComment as String] = String(key.suffix(4))
         switch KeychainAccess.add(item as CFDictionary, nil) {

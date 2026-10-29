@@ -5,11 +5,11 @@
 #
 #   ./build.sh                 debug-free release build, ad-hoc signed: runs here
 #   SEARCH_DEV=1 ./build.sh    the same as a dev build: yellow icon, named for
-#                              the branch (Search-split-view from
+#                              the branch (Dark Search-split-view from
 #                              claude/split-view-4a6927)
 #   SEARCH_DEV=1 SEARCH_FEATURE=name ./build.sh
-#                              the same, named Search-name
-#   ./build.sh release dmg     + build/Search.dmg, build/Search.zip and
+#                              the same, named Dark Search-name
+#   ./build.sh release dmg     + build/Dark Search.dmg, Dark Search.zip and
 #                                build/appcast.json, signed with the release
 #                                key (or a Developer ID) if one is in the
 #                                keychain — what .github/workflows/release.yml
@@ -41,9 +41,9 @@
 #     (SEARCH_SIGN_IDENTITY names it; otherwise the first one found is used)
 #   - a notarytool profile: xcrun notarytool store-credentials "search"
 #     (SEARCH_NOTARY_PROFILE names it; default "search")
-#   - SEARCH_DOWNLOAD_URL, the https folder the three files are served from,
-#     for the appcast. Default https://officecommun.com/search, which is
-#     where Updater.feed in Updater.swift looks.
+#   - SEARCH_DOWNLOAD_URL, the https folder the files are served from.
+#     By default the feed names this build's GitHub release tag; the workflow
+#     supplies the same address explicitly before publishing that release.
 #
 # NOTES.md, next to this script, is what's new: newest release first, one
 # paragraph each. The first paragraph goes into the appcast, and from there
@@ -59,15 +59,19 @@ case "$ARCH" in
   x86_64) OUT="build/intel"; SUBFOLDER="/intel" ;;
   *) echo "SEARCH_ARCH is arm64 or x86_64, not “$ARCH”" >&2; exit 1 ;;
 esac
+# Keep this real path and executable for the existing bench/test tools. The
+# Finder-facing alias and every distributed bundle use the new product name.
 APP="$OUT/Search.app"
-NAME="Search"
+NAME="Dark Search"
+EXECUTABLE="Search"
+BRANDED_APP="$OUT/$NAME.app"
 # Asked for with SEARCH_DEV=1, a dev build, on a yellow plate and named for
-# the feature it's built from: "Search-split-view" in the menu bar, the Dock
+# the feature it's built from: "Dark Search-split-view" in the menu bar, the Dock
 # and ⌘Tab, so it's never taken for the installed app beside it, or for the
 # dev build from another worktree. Only the name people see changes. The
 # bundle id stays, so it shares the real app's settings, and so does the
 # folder, build/Search.app, which fresh.sh and the tests open. Not by
-# default: a plain ./build.sh is also the Search people here use every day
+# default: a plain ./build.sh is also the Dark Search people here use every day
 # and the release candidates. What goes in a DMG or a ZIP is never one.
 case "${SEARCH_DEV:-}" in
   0|1) DEV="$SEARCH_DEV" ;;
@@ -116,7 +120,7 @@ BINARY="$(swift build "${SWIFTFLAGS[@]}" --show-bin-path)/Search"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BINARY" "$APP/Contents/MacOS/$NAME"
+cp "$BINARY" "$APP/Contents/MacOS/$EXECUTABLE"
 # The binary says which SDK it was built with, and AppKit draws the app the
 # way that SDK's macOS drew it: built with the macOS 27 SDK, a Mac on 27 gets
 # 27's window buttons and controls; said to be built with an older one, it
@@ -127,11 +131,13 @@ cp "$BINARY" "$APP/Contents/MacOS/$NAME"
 # put back; the oldest macOS stays as it is.
 SDK="$(xcrun --sdk macosx --show-sdk-version)"
 vtool -set-build-version macos "$MINIMUM" "$SDK" -replace \
-  -output "$APP/Contents/MacOS/$NAME.sdk" "$APP/Contents/MacOS/$NAME"
-mv "$APP/Contents/MacOS/$NAME.sdk" "$APP/Contents/MacOS/$NAME"
+  -output "$APP/Contents/MacOS/$EXECUTABLE.sdk" "$APP/Contents/MacOS/$EXECUTABLE"
+mv "$APP/Contents/MacOS/$EXECUTABLE.sdk" "$APP/Contents/MacOS/$EXECUTABLE"
 # The AppleScript dictionary (Scripting.swift): read-only, tabs' addresses
 # and titles. The plist below points to it.
 cp Search.sdef "$APP/Contents/Resources/"
+# Keep the upstream MIT copyright and permission notice with distributed apps.
+cp LICENSE "$APP/Contents/Resources/LICENSE.txt"
 # The dialer's page (Dialer.swift): Otto's softphone, its scripts, fonts
 # and licences, read from the bundle as files.
 rm -rf "$APP/Contents/Resources/Dialer"
@@ -149,7 +155,7 @@ if [ "$CONFIG" = "release" ]; then
   # Xcode's strip, not whichever is first on the PATH: Homebrew's binutils
   # puts GNU strip there, which leaves a Mach-O the kernel won't load, and
   # the app is killed the moment it opens.
-  xcrun strip -x "$APP/Contents/MacOS/$NAME"
+  xcrun strip -x "$APP/Contents/MacOS/$EXECUTABLE"
 fi
 
 # The icon, drawn fresh each time — it is thirty lines of Swift, not an asset
@@ -195,7 +201,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>$NAME</string>
   <key>CFBundleDisplayName</key><string>$NAME</string>
-  <key>CFBundleExecutable</key><string>$NAME</string>
+  <key>CFBundleExecutable</key><string>$EXECUTABLE</string>
   <key>CFBundleIdentifier</key><string>com.officecommun.search</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
@@ -204,7 +210,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   $ICONNAME
   <key>LSMinimumSystemVersion</key><string>$MINIMUM</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
-  <key>NSHumanReadableCopyright</key><string>© Office Commun · Search</string>
+  <key>NSHumanReadableCopyright</key><string>© Caroline</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppleScriptEnabled</key><true/>
   <key>OSAScriptingDefinition</key><string>Search.sdef</string>
@@ -258,31 +264,27 @@ cat > "$APP/Contents/Info.plist" <<PLIST
        still wants a sentence to put in its own prompt, and touching the APIs
        without one is a crash rather than a refusal. -->
   <key>NSCameraUsageDescription</key>
-  <string>Websites you visit can ask to use your camera. Search asks you the first time each site does and keeps your answer; Settings › Privacy forgets them.</string>
+  <string>Websites you visit can ask to use your camera. Dark Search asks you the first time each site does and keeps your answer; Settings › Privacy forgets them.</string>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Websites you visit can ask to use your microphone. Search asks you the first time each site does and keeps your answer; Settings › Privacy forgets them.</string>
+  <string>Websites you visit can ask to use your microphone. Dark Search asks you the first time each site does and keeps your answer; Settings › Privacy forgets them.</string>
   <!-- Location: the first key is the one macOS has always read; the second
        is the one CoreLocation's requestWhenInUseAuthorization documents.
        Same sentence in both. -->
   <key>NSLocationUsageDescription</key>
-  <string>Websites you visit can ask for your location. Search asks you each time a site does, unless you choose Always allow for it; Settings › Privacy forgets those choices.</string>
+  <string>Websites you visit can ask for your location. Dark Search asks you each time a site does, unless you choose Always allow for it; Settings › Privacy forgets those choices.</string>
   <key>NSLocationWhenInUseUsageDescription</key>
-  <string>Websites you visit can ask for your location. Search asks you each time a site does, unless you choose Always allow for it; Settings › Privacy forgets those choices.</string>
+  <string>Websites you visit can ask for your location. Dark Search asks you each time a site does, unless you choose Always allow for it; Settings › Privacy forgets those choices.</string>
   <key>NSDownloadsFolderUsageDescription</key>
   <string>Files you download are saved to your Downloads folder.</string>
 </dict>
 </plist>
 PLIST
-# A dev build's name, as a localised one: under the icon in the Dock, in
-# ⌘Tab and in Finder, macOS shows the bundle's folder name otherwise. The
-# plain names above stay "Search", matching the folder, since a folder named
-# otherwise reads to macOS as renamed by hand, and then the folder wins.
-if [ "$DEV" = 1 ]; then
-  mkdir -p "$APP/Contents/Resources/en.lproj"
-  printf '"CFBundleDisplayName" = "%s";\n"CFBundleName" = "%s";\n' "$SHOWN" "$SHOWN" \
-    > "$APP/Contents/Resources/en.lproj/InfoPlist.strings"
-  /usr/libexec/PlistBuddy -c "Add :LSHasLocalizedDisplayName bool true" "$APP/Contents/Info.plist"
-fi
+# Finder uses this localized name even for an existing installation whose
+# updater has preserved its old Search.app path. No data or identity moves.
+mkdir -p "$APP/Contents/Resources/en.lproj"
+printf '"CFBundleDisplayName" = "%s";\n"CFBundleName" = "%s";\n' "$SHOWN" "$SHOWN" \
+  > "$APP/Contents/Resources/en.lproj/InfoPlist.strings"
+/usr/libexec/PlistBuddy -c "Add :LSHasLocalizedDisplayName bool true" "$APP/Contents/Info.plist"
 
 # Signing. This fork's release key, "Dark Search Release Signing", when it is
 # in a keychain here — the one certificate Updater.signer trusts, so a build
@@ -335,8 +337,17 @@ else
   [ "$STEP" != "app" ] && echo "no Developer ID certificate found — the DMG will only open on this Mac" >&2
 fi
 
-echo "built: $APP as $SHOWN ($VERSION, $ARCH, build $BUILD)"
+rm -rf "$BRANDED_APP"
+ln -s Search.app "$BRANDED_APP"
+echo "built: $BRANDED_APP as $SHOWN ($VERSION, $ARCH, build $BUILD)"
 [ "$STEP" = "app" ] && exit 0
+
+# The test path stays internal; downloads contain a real Dark Search.app.
+PACKAGE="$OUT/package"
+rm -rf "$PACKAGE"
+mkdir -p "$PACKAGE"
+PACKAGED_APP="$PACKAGE/$NAME.app"
+ditto "$APP" "$PACKAGED_APP"
 
 # The disk image: the app beside a shortcut to Applications, on a white
 # window with an arrow between them — drawn by Installer/background.swift and
@@ -356,14 +367,14 @@ if [ -x "$DMGBUILD" ] \
   && tiffutil -cathidpicheck "$ART/background.png" "$ART/background@2x.png" -out "$ART/background.tiff" >/dev/null 2>&1
 then
   "$DMGBUILD" -s Installer/dmg.py \
-    -D app="$APP" -D background="$ART/background.tiff" -D icon="$APP/Contents/Resources/AppIcon.icns" \
+    -D app="$PACKAGED_APP" -D background="$ART/background.tiff" -D icon="$APP/Contents/Resources/AppIcon.icns" \
     "$NAME" "$DMG" >/dev/null
 else
   echo "note: no dmgbuild — a plain disk image, without its window laid out" >&2
   STAGE="build/dmg"
   rm -rf "$STAGE"
   mkdir -p "$STAGE"
-  cp -R "$APP" "$STAGE/"
+  cp -R "$PACKAGED_APP" "$STAGE/"
   ln -s /Applications "$STAGE/Applications"
   hdiutil create -volname "$NAME" -srcfolder "$STAGE" -ov -format UDZO -quiet "$DMG"
   rm -rf "$STAGE"
@@ -376,7 +387,7 @@ echo "packed: $DMG"
 # checks before opening it.
 ZIP="$OUT/$NAME.zip"
 rm -f "$ZIP"
-ditto -c -k --keepParent "$APP" "$ZIP"
+ditto -c -k --keepParent "$PACKAGED_APP" "$ZIP"
 SHA="$(shasum -a 256 "$ZIP" | cut -d' ' -f1)"
 echo "packed: $ZIP"
 
@@ -384,7 +395,7 @@ echo "packed: $ZIP"
 # characters JSON minds escaped, is the line under the version in Settings.
 # Written last — after notarisation has stapled its ticket to the DMG, which
 # changes it — so the DMG's hash is the one people download.
-BASE="${SEARCH_DOWNLOAD_URL:-https://officecommun.com/search}"
+BASE="${SEARCH_DOWNLOAD_URL:-https://github.com/Trident1332/dark-search/releases/download/v$VERSION-$BUILD}"
 BASE="${BASE%/}$SUBFOLDER"
 NOTES=""
 if [ -f NOTES.md ]; then
@@ -415,13 +426,18 @@ write_engine() {
 write_appcast() {
   local DMGSHA
   DMGSHA="$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
+  # Do this after stapling as well: compatibility links must serve exactly
+  # the final signed/notarised files named by the feed.
+  rm -f "$OUT/Search.zip" "$OUT/Search.dmg"
+  ln "$ZIP" "$OUT/Search.zip"
+  ln "$DMG" "$OUT/Search.dmg"
   write_engine
   cat > "$OUT/appcast.json" <<JSON
 {
   "version": "$VERSION",
   "build": $BUILD,
-  "url": "$BASE/$NAME.zip",
-  "dmg": "$BASE/$NAME.dmg",
+  "url": "$BASE/Dark%20Search.zip",
+  "dmg": "$BASE/Dark%20Search.dmg",
   "sha256": "$SHA",
   "dmgSha256": "$DMGSHA",
   "notes": "$NOTES",

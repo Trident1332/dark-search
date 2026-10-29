@@ -394,8 +394,8 @@ final class Dialer: ObservableObject {
     func explainMicrophone(in browser: Browser?) {
         guard !Store.testing else { return }
         let alert = NSAlert()
-        alert.messageText = "Search needs the microphone"
-        alert.informativeText = "Allow Search under System Settings › Privacy & Security › Microphone, then call again."
+        alert.messageText = "Dark Search needs the microphone"
+        alert.informativeText = "Allow Dark Search under System Settings › Privacy & Security › Microphone, then call again."
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Cancel")
         let open = { if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") { NSWorkspace.shared.open(url) } }
@@ -866,11 +866,11 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         let alert = NSAlert()
         if status == .authorized {
             alert.messageText = "Allow microphone and retry this call?"
-            alert.informativeText = "Search has macOS microphone permission, but the call could not open it. Allow Search to try again for this call."
+            alert.informativeText = "Dark Search has macOS microphone permission, but the call could not open it. Allow Dark Search to try again for this call."
             alert.addButton(withTitle: "Allow and Retry")
         } else {
             alert.messageText = "Microphone access is blocked"
-            alert.informativeText = "Allow Search in System Settings › Privacy & Security › Microphone, then try the call again."
+            alert.informativeText = "Allow Dark Search in System Settings › Privacy & Security › Microphone, then try the call again."
             alert.addButton(withTitle: "Open Microphone Settings")
         }
         alert.addButton(withTitle: "Cancel")

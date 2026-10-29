@@ -1,6 +1,6 @@
 # Changelog
 
-What changes in Search from one version to the next, newest first.
+What changes in Dark Search from one version to the next, newest first.
 
 **Unreleased** gathers what is done since the last version, as it lands:
 every fix and every addition gets its line the day it is merged. When a
@@ -13,6 +13,7 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Added
 
+- Dark Search 1.1.0, by Caroline: a new D-shaped lens mark in About and the app icon, with matching browser, installer and release branding. Existing profiles, passwords, settings and signed updates remain compatible.
 - An address bar under the tabs, laid out as Chrome's is: back, forward, reload and home at its left, the page's address in a field across the middle — the domain in ink, the path dim, the lock or the proxy's flag before it — with the bookmark button at the field's end, and the browser's menu behind three dots at the right, the downloads button and any extension buttons before them. The menu holds what the menu bar does, as Chrome's does: New Tab, New Window and New Private Tab; Passwords, History, Downloads, Bookmarks and Clear Browsing Data; a Zoom row with the page's size, minus, plus and full screen; Print, Translate Page, Find on Page, Reading Mode, Save and Share and More Tools; Help and Settings — each with its key as set in Settings › Keyboard. The three dots stand in the column's foot too, with the tabs down the side. The row's far end is empty now, and the Settings switch that moved back, forward and reload to the left is retired: they are always there. The tab you're on says its title across the top, as Chrome's do, the bar saying where its page is; Show the address on the tab you're on is for the column, which has no bar.
 - Dialer lists your US and Canadian Numero numbers and UK Telicall number together, with a choice before calling and the configured number kept in Recents and call records. The Number menu shows each line as its country's flag, drawn flat like the flags in Settings › Proxy, a middle dot and the number. Numero uses explicit server routes, with a FreeSWITCH generator that maps its two lines to server-approved caller IDs and blocks fallback between them.
 - The Passwords page (⌥⌘L) is a password manager now, opened with Touch ID or your Mac's password and locked until then. One Touch ID opens it for five minutes (Settings › Passwords › Lock after: a minute, five, fifteen or an hour), the clock starting again with every use; it locks on its own when that runs out, when the Mac sleeps, when the screen locks, and, with Lock when Search is hidden on, the moment another app is in front. While it is open, Show and Copy ask nothing more, unless Ask again for each password is on. Beside the list: the account picked, with its name, password, a note of your own kept encrypted with it, when it was kept, and Open for the site; Change Password… makes a new one here, as long and of whatever kinds you say, with Copy and Use; Notes of your own, kept in the keychain as Keychain Access keeps its secure notes, for the Wi-Fi password and the recovery codes behind a login; Recently used; and Checkup, which reads every password once when you press Check and says which are weak, which are used on more than one account, and which came from a page sent in the clear, each with a way to a new password. Nothing leaves the Mac, and nothing new is written to disk: everything is a keychain item of Search's, as before.
@@ -34,6 +35,7 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Fixed
 
+- The browser menu uses one native outline around its rounded corners and arrow. About no longer shows the feedback row.
 - Every new private tab starts with its own cookies, sign-ins and website storage, including duplicates, links, split panes and popups. Navigating within a tab keeps its session; private popups open independently of their source page.
 - Settings beside the side panel: in a tab narrower than 600 points, the rail folds to its icons, each named on hover, with the glass alone above them for Find a setting (⌘F, or a press on it, unfolds the rail with the field ready), so the rows keep their width rather than wrapping their titles and cutting their controls short, as they did with the dialer open in a middling window.
 - The dialer's Recents are a section under the keypad now, as a Settings page stacks its groups: a small heading with the count and Clear, the calls in a card, the page scrolling to the rest. Otto's sheet, sliding up over the keys, had nowhere good to rest in a panel this shape: a middling window had it showing a day's heading with nothing under it. The keys are sized to what is left above the first call, and a dialer not set up yet makes room for its note.

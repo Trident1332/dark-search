@@ -87,7 +87,7 @@ enum ExtensionBrowsingData {
             let requested = Set(what.filter(\.value).map(\.key))
             let unsupported = requested.subtracting(Set(ExtensionBrowsingData.types.keys).union(["history"]))
             guard unsupported.isEmpty else {
-                throw Refused(why: "browsingData cannot remove \(unsupported.sorted().joined(separator: ", ")) in Search")
+                throw Refused(why: "browsingData cannot remove \(unsupported.sorted().joined(separator: ", ")) in Dark Search")
             }
             if let raw = options["originTypes"] {
                 // Omitted originTypes defaults to ordinary sites, but an
@@ -97,7 +97,7 @@ enum ExtensionBrowsingData {
                 guard Set(selection.keys).isSubset(of: ["unprotectedWeb", "protectedWeb", "extension"]),
                       selection["unprotectedWeb"] == true,
                       selection["protectedWeb"] != true, selection["extension"] != true else {
-                    throw Refused(why: "browsingData supports only ordinary website data in Search")
+                    throw Refused(why: "browsingData supports only ordinary website data in Dark Search")
                 }
             }
             let milliseconds: Double
@@ -125,10 +125,10 @@ enum ExtensionBrowsingData {
             removesHistory = requested.contains("history")
             if origins != nil {
                 guard dataTypes.isSubset(of: [WKWebsiteDataTypeCookies]), !removesHistory else {
-                    throw Refused(why: "Search cannot safely scope cache, storage or history removal to exact origins; no data was removed")
+                    throw Refused(why: "Dark Search cannot safely scope cache, storage or history removal to exact origins; no data was removed")
                 }
                 guard milliseconds == 0 else {
-                    throw Refused(why: "Search cannot combine an origin filter with time-scoped cookie removal; no data was removed")
+                    throw Refused(why: "Dark Search cannot combine an origin filter with time-scoped cookie removal; no data was removed")
                 }
             }
         }
@@ -145,7 +145,7 @@ enum ExtensionBrowsingData {
             // Without a suffix classifier, matching only the original host
             // could delete an excluded site's siblings or miss included ones.
             guard let suffix = Passkeys.publicSuffix else {
-                throw Refused(why: "Search could not determine cookie site boundaries safely; no data was removed")
+                throw Refused(why: "Dark Search could not determine cookie site boundaries safely; no data was removed")
             }
             let isSuffix: (String) -> Bool = { suffix($0 as CFString) }
             func site(_ value: String) throws -> String {

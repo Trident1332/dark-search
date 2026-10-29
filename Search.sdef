@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
-<dictionary title="Search Terminology">
+<dictionary title="Dark Search Terminology">
     <!-- Read-only, in Safari's words and codes: a script can ask for the address
          and title of the tabs, and nothing else. Private tabs are not listed.
          count is here because "repeat with t in tabs" asks for it. -->
-    <suite name="Search Suite" code="Srch" description="Windows and their tabs, to read.">
+    <suite name="Dark Search Suite" code="Srch" description="Windows and their tabs, to read.">
         <command name="count" code="corecnte" description="Return the number of elements of a particular class within an object.">
             <cocoa class="NSCountCommand"/>
             <direct-parameter type="specifier" description="The objects to be counted."/>
@@ -13,7 +13,7 @@
             </parameter>
             <result type="integer" description="The count."/>
         </command>
-        <class name="application" code="capp" description="Search.">
+        <class name="application" code="capp" description="Dark Search.">
             <cocoa class="NSApplication"/>
             <element type="window" access="r">
                 <cocoa key="orderedWindows"/>

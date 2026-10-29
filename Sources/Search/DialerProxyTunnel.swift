@@ -164,7 +164,7 @@ final class DialerProxyTunnel {
         let privacy: NWParameters.PrivacyContext
         if let context { privacy = context }
         else {
-            privacy = NWParameters.PrivacyContext(description: "Search protected call")
+            privacy = NWParameters.PrivacyContext(description: "Dark Search protected call")
             privacy.disableLogging()
             privacy.proxyConfigurations = [proxy]
             context = privacy

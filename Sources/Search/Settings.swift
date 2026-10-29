@@ -605,7 +605,7 @@ struct SettingsPanel: View {
     private func detail(of item: SettingsItem) -> String {
         switch item.id {
         case "general.default":
-            return isDefault ? "Search is the default browser on this Mac" : item.detail
+            return isDefault ? "Dark Search is the default browser on this Mac" : item.detail
         case "downloads.folder":
             return prefs.downloads.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
         case "search.engine": return searchDetail
@@ -650,7 +650,7 @@ struct SettingsPanel: View {
         switch proxy.check {
         case .untried:
             if proxy.refused { return "The proxy didn't accept the name or password" }
-            if proxy.dropped { return "The proxy isn't answering. Search tries it again every 15 seconds" }
+            if proxy.dropped { return "The proxy isn't answering. Dark Search tries it again every 15 seconds" }
             return proxy.setup.complete ? "Not tested yet" : "Enter the proxy's address first"
         case .testing: return "Reaching the proxy…"
         case .reached(let ms, _, _):
@@ -1012,7 +1012,6 @@ struct SettingsPanel: View {
         case "note.switcher": Always()
         case "updates.version": versionControl
         case "updates.auto": Switch(on: $prefs.installsUpdates)
-        case "about.feedback": Pill("Send Feedback") { Links.writeFeedback() }
         case "about.notes": Pill("Review") { browser.lead(to: InternalPage(.notes)) }
         case "bench": Switch(on: $prefs.bench)
         default: EmptyView()
@@ -1037,7 +1036,7 @@ struct SettingsPanel: View {
         case "shield":
             if let trouble = shield.trouble {
                 Rule()
-                Line(trouble, "Nothing is being blocked until this clears. Try again, or restart Search") {
+                Line(trouble, "Nothing is being blocked until this clears. Try again, or restart Dark Search") {
                     Pill("Try again") { shield.compile() }
                 }
                 .under()
@@ -1249,7 +1248,7 @@ struct SettingsPanel: View {
     /// Says so when a password manager extension has taken the saving over.
     private var savingDetail: String {
         if #available(macOS 15.4, *), let name = Extensions.shared.passwordSavingTakenBy {
-            return "\(name) does the saving; it asked Search not to offer"
+            return "\(name) does the saving; it asked Dark Search not to offer"
         }
         return "Asked once per site, never again for a site you refuse"
     }
@@ -1269,12 +1268,12 @@ struct SettingsPanel: View {
             Logomark()
                 .fill(Palette.ink, style: FillStyle(eoFill: true))
                 .aspectRatio(Logomark.canvas.width / Logomark.canvas.height, contentMode: .fit)
-                .frame(height: 34)
+                .frame(width: 44, height: 44)
             VStack(alignment: .leading, spacing: 3) {
-                Text("Search")
+                Text(Brand.name)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Palette.ink)
-                Text("by Office Commun · version \(Updater.version)")
+                Text("by \(Brand.author) · version \(Updater.version)")
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.muted)
             }
@@ -1286,9 +1285,9 @@ struct SettingsPanel: View {
     private var versionTitle: String {
         switch updater.stage {
         case .none: return "Updates"
-        case .fetching(let next): return "Search \(next.version) is downloading"
-        case .ready(let next): return "Search \(next.version) is ready"
-        case .offered(let next), .waiting(let next): return "Search \(next.version) is out"
+        case .fetching(let next): return "\(Brand.name) \(next.version) is downloading"
+        case .ready(let next): return "\(Brand.name) \(next.version) is ready"
+        case .offered(let next), .waiting(let next): return "\(Brand.name) \(next.version) is out"
         }
     }
 
@@ -1301,7 +1300,7 @@ struct SettingsPanel: View {
         case .fetching(let next):
             return next.notes ?? "Quietly, in the background. Nothing you have set is touched"
         case .ready(let next):
-            return next.notes ?? "It's there the next time you open Search"
+            return next.notes ?? "It's there the next time you open Dark Search"
         case .offered(let next):
             return next.notes ?? "Open the disk image, the same as the first time"
         case .waiting(let next):

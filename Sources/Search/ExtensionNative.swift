@@ -35,7 +35,7 @@ enum ExtensionNative {
     private static func allowHost() throws {
         _ = routeWatch
         guard !Proxy.shared.setup.persistent else {
-            throw Refused(why: "Native apps are unavailable while Persistent connection is on because their internet connections cannot use Search's proxy.")
+            throw Refused(why: "Native apps are unavailable while Persistent connection is on because their internet connections cannot use Dark Search's proxy.")
         }
         guard !Onion.shared.hasTabs else {
             throw Refused(why: "Native apps are unavailable while Tor tabs are open because their internet connections cannot use Tor.")

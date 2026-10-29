@@ -188,7 +188,7 @@ final class PageTranslator {
             let hint = try? await web.callAsyncJavaScript("return document.documentElement.lang || ''", contentWorld: Web.world) as? String
             let sample = String(first.prefix(400).map(\.plain).joined(separator: "\n").prefix(4000))
             guard let from = PageTranslator.detect(sample, hint: hint) else {
-                throw Failure("Search couldn't tell which language this page is in")
+                throw Failure("Dark Search couldn't tell which language this page is in")
             }
             source = from
             report["source"] = PageTranslator.code(from)
@@ -528,7 +528,7 @@ final class PageTranslator {
             case .unsupportedLanguagePairing, .unsupportedSourceLanguage, .unsupportedTargetLanguage:
                 return "\(language) to \(name(code(to))) can't be translated on this Mac"
             case .unableToIdentifyLanguage:
-                return "Search couldn't tell which language this page is in"
+                return "Dark Search couldn't tell which language this page is in"
             default:
                 break
             }

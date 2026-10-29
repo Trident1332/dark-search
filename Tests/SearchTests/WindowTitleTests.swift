@@ -9,8 +9,8 @@ final class WindowTitleTests: XCTestCase {
     }
 
     func testWindowWithoutAPageTitleIsNamedForTheApp() {
-        XCTAssertEqual(WindowTitle.name(page: "", private: false), "Search")
-        XCTAssertEqual(WindowTitle.name(page: "   ", private: false), "Search")
+        XCTAssertEqual(WindowTitle.name(page: "", private: false), Brand.name)
+        XCTAssertEqual(WindowTitle.name(page: "   ", private: false), Brand.name)
     }
 
     func testPrivateTabNeverGivesItsPageAway() {
