@@ -50,6 +50,7 @@
     ./bench sidepanel dialer [NUMBER [NAME]]  test run: the dialer into the panel, or a number to call (Dialer.swift)
     ./bench ext-remove ID
     ./bench strip PATH [WIDTH]         the row of tabs across the top, drawn off screen to a PNG
+    ./bench dots PATH                  the browser's menu, off the three dots, drawn off screen to a PNG
     ./bench column PATH [HEIGHT]       the column of tabs, drawn off screen to a PNG
     ./bench consent [grant|revoke]     test run: the mark Settings' bench switch leaves in the keychain, in this
                                        world's own account — whether it is there, before and after
@@ -534,6 +535,9 @@ def main(argv):
     elif verb == "pages":
         if len(args) != 1 or args[0] not in ("on", "off"): sys.exit("usage: bench pages on|off")
         request["on"] = args[0] == "on"
+    elif verb == "dots":
+        if len(args) != 1: sys.exit("usage: bench dots PATH")
+        request["path"] = os.path.abspath(args[0])
     elif verb == "picture":
         if len(args) != 1: sys.exit("usage: bench picture PATH")
         request["path"] = os.path.abspath(args[0])

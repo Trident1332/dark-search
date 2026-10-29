@@ -154,9 +154,9 @@ enum SettingsIndex {
               title: "The page as a card", detail: "A little room around the page, with rounded corners",
               more: "Off, the page reaches the window's edges and the column is white with its hairline.",
               keys: ["layout.cards"], words: ["edge to edge", "rounded", "margin"], kind: .wide, parent: "tabs.layout"),
-        .init(id: "toolbar.left", group: "window", icon: "arrow.left.arrow.right",
-              title: "Back, forward and reload on the left", detail: "Beside the window's buttons, before the tabs",
-              keys: ["toolbar.left"], words: ["toolbar", "buttons", "navigation"], parent: "tabs.layout"),
+        .init(id: "note.toolbar", group: "window", icon: "arrow.left.arrow.right",
+              title: "Back, forward and reload on the left", detail: "Always there now, in the address bar under the tabs",
+              keys: ["toolbar.left"], words: ["toolbar", "buttons", "navigation", "address bar"], kind: .note, findOnly: true),
         .init(id: "sidebar.roomy", group: "tablook", icon: "textformat.size.larger",
               title: "Roomier tabs", detail: "Taller rows and larger titles in the column",
               keys: ["sidebar.roomy"], words: ["bigger", "larger", "text size", "accessibility"], parent: "tabs.layout"),
@@ -532,8 +532,7 @@ enum SettingsIndex {
         switch item.id {
         case "pages.dusk": return prefs.look != .light
         case "sidebar.roomy": return prefs.sidebar && !prefs.sideIcons
-        case "sidebar.hides", "layout.cards", "pins.list": return prefs.sidebar
-        case "toolbar.left": return !prefs.sidebar
+        case "sidebar.hides", "layout.cards", "pins.list", "tabs.address": return prefs.sidebar
         case "onion.connection": return prefs.onionEnabled
         case "dialer.open", "dialer.autodial", "dialer.region", "dialer.server", "dialer.seat", "dialer.status", "dialer.sites":
             return prefs.dialerOn
@@ -550,12 +549,12 @@ enum SettingsIndex {
     static func needs(_ item: SettingsItem) -> String {
         switch item.id {
         case "pages.dusk": return "Only while Search isn't set to Light"
-        case "toolbar.left": return "Only with the tabs across the top"
         case "sidebar.roomy": return "Only with titles in the column"
         case "onion.connection": return "Only with Open onion websites on"
         case "dialer.open", "dialer.autodial", "dialer.region", "dialer.server", "dialer.seat", "dialer.status", "dialer.sites":
             return "Only with the dialer on"
         case "proxy.profiles": return "Only with a proxy on, Persistent connection off and more than one profile"
+        case "tabs.address": return "Only with the tabs down the side: across the top, the address bar says it"
         case "proxy.bypass": return "Only with a proxy on and Persistent connection off"
         case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test",
              "proxy.blocks", "proxy.shows", "proxy.calls", "proxy.timeZone":

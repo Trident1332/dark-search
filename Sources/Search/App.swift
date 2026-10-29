@@ -519,8 +519,12 @@ struct ContentView: View {
             }
 
             if !browser.prefs.sidebar, !browser.folded, fullscreenTab == nil {
-                TabBar(browser: browser)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                // The tabs, and the address bar under them (AddressBar.swift).
+                VStack(spacing: 0) {
+                    TabBar(browser: browser)
+                    AddressBar(browser: browser)
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
 
             // The bookmarks bar, under the strip or beside the column's top —
@@ -762,7 +766,7 @@ struct ContentView: View {
                     .contentShape(Rectangle())
                     .onTapGesture { browser.reviewing = false }
                 HiddenPanel(browser: browser)
-                    .padding(.top, Metrics.strip + 8)
+                    .padding(.top, (browser.prefs.sidebar || browser.folded ? Metrics.strip : Metrics.strip + Metrics.bar) + 8)
                     .padding(.trailing, 14)
                     .transition(.scale(scale: 0.97, anchor: .topTrailing).combined(with: .opacity))
             }
@@ -977,11 +981,12 @@ struct ContentView: View {
     }
 
     /// The column has its own corner for the lights, so the page beside it
-    /// starts at the very top; the strip needs a band.
+    /// starts at the very top; the strip and the address bar under it need
+    /// a band.
     private var band: CGFloat {
         guard fullscreenTab == nil else { return 0 }
-        // Folded, the strip is out of the window and the page has its height.
-        return browser.prefs.sidebar || browser.folded ? 0 : Metrics.strip
+        // Folded, both are out of the window and the page has their height.
+        return browser.prefs.sidebar || browser.folded ? 0 : Metrics.strip + Metrics.bar
     }
 
     /// Either visible pane may give its page to WebKit's fullscreen window.

@@ -53,7 +53,7 @@ BEFORE = {
     "links.show": "where links go", "float.flicks": "flick",
 }
 ALWAYS = {"splitView", "tabs.groups", "panel.sites", "translate.pages", "tabs.keepAwake", "search.sites",
-          "pins.shared", "pins.numberBack", "switcher.keys", "links.show", "float.flicks"}
+          "pins.shared", "pins.numberBack", "switcher.keys", "links.show", "float.flicks", "toolbar.left"}
 
 
 def settings(**f): return sv.cmd({"do": "settings", **f})
