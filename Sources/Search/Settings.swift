@@ -37,6 +37,11 @@ struct SettingsPanel: View {
     /// What is typed in Find a setting.
     @State private var query = ""
     @FocusState private var finding: Bool
+    /// How wide the tab is, for folding the rail.
+    @State private var tabWidth: CGFloat = 0
+    /// Find a setting asked for while the rail is folded: the rail unfolds,
+    /// and the field takes the keys once it is there.
+    @State private var seeking = false
     /// A row gone to from a result, lit for a moment.
     @State private var lit: String?
     /// What Set Up Like Arc changed, for Undo.
@@ -102,6 +107,10 @@ struct SettingsPanel: View {
     }
 
     private static let rail: CGFloat = 196
+    /// The rail folded to its icons, in a tab too narrow for both it and
+    /// rows that read: under `roomy` points across, as beside the side panel.
+    private static let foldedRail: CGFloat = 52
+    private static let roomy: CGFloat = 600
     private static let column: CGFloat = 600
     private static let width: CGFloat = 720
     private static let height: CGFloat = 540
@@ -116,7 +125,9 @@ struct SettingsPanel: View {
         Group {
             if drawn { flat } else if asTab { tabbed } else { card }
         }
-        .onChange(of: browser.settingsFind) { _, _ in finding = true }
+        .onChange(of: browser.settingsFind) { _, _ in seek() }
+        .onChange(of: finding) { _, now in if !now && !searching { seeking = false } }
+        .onChange(of: searching) { _, now in if !now && !finding { seeking = false } }
         .onAppear { if let found { query = found } }
     }
 
@@ -150,6 +161,7 @@ struct SettingsPanel: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { tabWidth = $0 }
         .onAppear { follow(asked) }
         .onChange(of: asked) { _, asked in follow(asked) }
         .onChange(of: page) { _, page in
@@ -185,25 +197,48 @@ struct SettingsPanel: View {
     private var hits: [SettingsItem] { SettingsIndex.find(query) }
     private var searching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
 
+    /// The rail is its icons alone: a tab narrower than `roomy`, as beside
+    /// the side panel, and nothing being found.
+    private var folded: Bool {
+        asTab && tabWidth > 0 && tabWidth < SettingsPanel.roomy && !seeking && !finding && !searching
+    }
+
+    /// Find a setting, asked for with ⌘F or the glass on a folded rail: the
+    /// field takes the keys, the rail unfolding first if it must.
+    private func seek() {
+        if folded { seeking = true } else { finding = true }
+    }
+
+    /// The sections down the left, with Find a setting above them. Folded
+    /// (see `folded`): their icons, named on hover, under the glass alone.
     private var pages: some View {
         let counts = Dictionary(grouping: hits, by: \.page).mapValues(\.count)
         return VStack(alignment: .leading, spacing: 2) {
-            Text("Settings")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Palette.ink)
-                .padding(.horizontal, 10)
-                .padding(.top, 14)
-                .padding(.bottom, 10)
-            FindField(text: $query, focus: $finding)
-                .padding(.bottom, 10)
+            if folded {
+                Glass { seek() }
+                    .padding(.top, 14)
+                    .padding(.bottom, 10)
+            } else {
+                Text("Settings")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 14)
+                    .padding(.bottom, 10)
+                FindField(text: $query, focus: $finding)
+                    .padding(.bottom, 10)
+                    // Unfolded for the finding: the field is only now here
+                    // to take the keys, and its text field a moment later.
+                    .onAppear { if seeking { DispatchQueue.main.async { finding = true } } }
+            }
             ForEach(Array(Page.blocks.enumerated()), id: \.offset) { index, block in
                 if index > 0 {
                     Rectangle().fill(Palette.hairline).frame(height: 1)
-                        .padding(.horizontal, 10).padding(.vertical, 7)
+                        .padding(.horizontal, folded ? 6 : 10).padding(.vertical, 7)
                 }
                 ForEach(block) { item in
                     PageRow(page: item, on: !searching && page == item,
-                            count: searching ? counts[item] ?? 0 : nil, slide: slide) {
+                            count: searching ? counts[item] ?? 0 : nil, folded: folded, slide: slide) {
                         query = ""
                         page = item
                         finding = false
@@ -213,14 +248,37 @@ struct SettingsPanel: View {
             Spacer(minLength: 0)
         }
         .padding(8)
-        .frame(width: SettingsPanel.rail, alignment: .leading)
+        .frame(width: folded ? SettingsPanel.foldedRail : SettingsPanel.rail, alignment: .leading)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Palette.wash.opacity(0.45), in: Rectangle())
         // The lit row glides to the section picked; the counts beside the
-        // sections come and go with what is typed.
+        // sections come and go with what is typed; the rail folds and
+        // unfolds with the room it has.
         .animation(Motion.settle, value: page)
+        .animation(Motion.settle, value: folded)
         .animation(Motion.quick, value: searching)
         .animation(Motion.quick, value: hits.map(\.id))
+    }
+
+    /// Find a setting on a folded rail: the glass alone, in the field's
+    /// dress. Pressed, the rail unfolds with the field ready to type in.
+    private struct Glass: View {
+        let act: () -> Void
+
+        var body: some View {
+            Button(action: act) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Palette.muted)
+                    .frame(width: 36, height: 28)
+                    .background(Palette.ground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help("Find a setting   ⌘F")
+            .accessibilityLabel("Find a setting")
+        }
     }
 
     /// Find a setting: the wash, the glass, ⌘F beside it until something
@@ -271,6 +329,8 @@ struct SettingsPanel: View {
         let on: Bool
         /// While searching: how many rows of this section match.
         let count: Int?
+        /// The icon alone, the section's name on hover (see `folded`).
+        let folded: Bool
         let slide: Namespace.ID
         let act: () -> Void
         @State private var hovering = false
@@ -281,18 +341,20 @@ struct SettingsPanel: View {
                     Image(systemName: page.icon)
                         .font(.system(size: 12, weight: .medium))
                         .frame(width: 16)
-                    Text(page.title)
-                        .font(.system(size: 13, weight: on ? .medium : .regular))
-                    Spacer(minLength: 0)
-                    if let count, count > 0 {
-                        Text("\(count)")
-                            .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-                            .foregroundStyle(Palette.ink)
-                            .padding(.horizontal, 6)
-                            .frame(height: 17)
-                            .background(Palette.ground, in: Capsule())
-                            .contentTransition(.numericText())
-                            .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    if !folded {
+                        Text(page.title)
+                            .font(.system(size: 13, weight: on ? .medium : .regular))
+                        Spacer(minLength: 0)
+                        if let count, count > 0 {
+                            Text("\(count)")
+                                .font(.system(size: 10.5, weight: .medium).monospacedDigit())
+                                .foregroundStyle(Palette.ink)
+                                .padding(.horizontal, 6)
+                                .frame(height: 17)
+                                .background(Palette.ground, in: Capsule())
+                                .contentTransition(.numericText())
+                                .transition(.scale(scale: 0.6).combined(with: .opacity))
+                        }
                     }
                 }
                 .foregroundStyle(on ? Palette.ink : (hovering ? Palette.ink.opacity(0.75) : Palette.muted))
@@ -315,6 +377,8 @@ struct SettingsPanel: View {
                 .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .buttonStyle(.plain)
+            .help(folded ? page.title : "")
+            .accessibilityLabel(page.title)
             .onHover { hovering = $0 }
             .animation(Motion.quick, value: hovering)
         }
@@ -380,7 +444,10 @@ struct SettingsPanel: View {
         // Plain buttons and empty space don't take the keys on the Mac, so
         // Find a setting would keep its caret after a click anywhere else.
         .contentShape(Rectangle())
-        .onTapGesture { finding = false }
+        .onTapGesture {
+            finding = false
+            if !searching { seeking = false }
+        }
     }
 
     @ViewBuilder
