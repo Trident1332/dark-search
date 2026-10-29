@@ -680,6 +680,45 @@ final class Preferences: ObservableObject {
         didSet { store.set(onionEnabled, forKey: "onion.on"); Onion.shared.take(enabled: onionEnabled) }
     }
 
+    // MARK: - Settings › Dialer (see Dialer.swift)
+
+    /// Phone numbers on pages can be called, from the side panel. Off
+    /// unless asked for.
+    @Published var dialerOn: Bool {
+        didSet { store.set(dialerOn, forKey: "dialer.on"); routeDialer() }
+    }
+    /// The phone server's WebSocket address and SIP domain, as typed.
+    @Published var dialerWSS: String {
+        didSet { store.set(dialerWSS, forKey: "dialer.wss"); routeDialer() }
+    }
+    @Published var dialerDomain: String {
+        didSet { store.set(dialerDomain, forKey: "dialer.domain"); routeDialer() }
+    }
+    /// The seat alone: the password is the keychain's (DialerPassword).
+    @Published var dialerUser: String {
+        didSet { store.set(dialerUser, forKey: "dialer.user"); routeDialer() }
+    }
+    /// The country numbers written without a code belong to.
+    @Published var dialerRegion: String {
+        didSet { store.set(dialerRegion, forKey: "dialer.region"); routeDialer() }
+    }
+    /// A number handed over is called at once.
+    @Published var dialerAutodial: Bool {
+        didSet { store.set(dialerAutodial, forKey: "dialer.autodial"); routeDialer() }
+    }
+    /// Sites whose pages may use the dialer, as otto's do.
+    @Published var dialerSites: [String] {
+        didSet { store.set(dialerSites, forKey: "dialer.sites"); routeDialer() }
+    }
+
+    /// The settings as the dialer takes them.
+    var dialerSetup: DialerSetup {
+        DialerSetup(on: dialerOn, wss: dialerWSS, domain: dialerDomain, user: dialerUser,
+                    region: dialerRegion, autodial: dialerAutodial, sites: dialerSites)
+    }
+
+    private func routeDialer() { Dialer.shared.take(dialerSetup) }
+
     /// The port as a number: 1 to 65535, or nil for anything else typed.
     var proxyPortNumber: UInt16? {
         let digits = proxyPort.trimmingCharacters(in: .whitespaces)
@@ -888,11 +927,19 @@ final class Preferences: ObservableObject {
         proxyHidesCalls = store.object(forKey: "proxy.calls") as? Bool ?? true
         proxyMatchesTimeZone = store.object(forKey: "proxy.timeZone") as? Bool ?? true
         onionEnabled = store.object(forKey: "onion.on") as? Bool ?? true
+        dialerOn = store.bool(forKey: "dialer.on")
+        dialerWSS = store.string(forKey: "dialer.wss") ?? ""
+        dialerDomain = store.string(forKey: "dialer.domain") ?? ""
+        dialerUser = store.string(forKey: "dialer.user") ?? ""
+        dialerRegion = store.string(forKey: "dialer.region") ?? "GB"
+        dialerAutodial = store.object(forKey: "dialer.autodial") as? Bool ?? true
+        dialerSites = store.stringArray(forKey: "dialer.sites") ?? Dialer.defaultSites
         // Before the first page is loaded: the shared store takes the route
         // now, and every other store as it is made (see Proxy.apply).
         Proxy.shared.take(proxySetup)
         Proxy.shared.apply(to: Store.websites, profile: Profile.personalID)
         Onion.shared.take(enabled: onionEnabled)
+        Dialer.shared.take(dialerSetup)
     }
 
     /// WebKit's text checker takes its orders from the app's standard

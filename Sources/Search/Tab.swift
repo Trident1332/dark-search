@@ -30,7 +30,7 @@ enum Web {
     @MainActor static func release(_ controller: WKUserContentController) {
         for name in [ScrollRelay.name, VeilRelay.name, FormRelay.name, ImageRelay.name, MediaKeys.name,
                      StoreRelay.name, PasskeyRelay.name, MiddleRelay.name, IconRelay.name, PopupGestureRelay.name, DuskRelay.name,
-                     TranslateRelay.name] {
+                     TranslateRelay.name, DialRelay.name, DialerSiteRelay.name] {
             controller.removeScriptMessageHandler(forName: name, contentWorld: world)
             controller.removeScriptMessageHandler(forName: name, contentWorld: .page)
         }
@@ -618,6 +618,8 @@ final class Tab: ObservableObject, Identifiable {
     var onImageMenu: ((Tab, URL) -> Void)?
     /// Where the last image right-clicked came from (see ImageMenu.swift).
     var imageFrame: WKFrameInfo? { images.frame }
+    /// Call <number> was chosen in the page's menu (see DialMenu.swift).
+    var onCall: ((Tab, String) -> Void)?
     var searchName: (() -> String?)?
     var onSearch: ((Tab, String) -> Void)?
     /// "Add to Search" was pressed on the Chrome Web Store page this tab shows.
@@ -641,6 +643,10 @@ final class Tab: ObservableObject, Identifiable {
     private let veils_ = VeilRelay()
     private let forms = FormRelay()
     private let images = ImageRelay()
+    /// What a right-click lands on, for Call <number> (DialMenu.swift), and
+    /// otto's click-to-call on the sites Settings › Dialer lists.
+    private let dial = DialRelay()
+    private let siteDial = DialerSiteRelay()
     private let media = MediaKeys()
     /// Counting down once the page's sound stops, to give the media keys
     /// back (see MediaKeys.swift). One at most.
@@ -899,6 +905,11 @@ final class Tab: ObservableObject, Identifiable {
         web.onMenuClosed = { [weak self] in self?.popupGesture.menuClosed() }
         web.onKeys = { [weak self] in if let self { self.onKeys?(self) } }
         web.searchName = { [weak self] in self?.searchName?() }
+        web.dialNumber = { [weak self] in self?.dial.take() }
+        web.onCall = { [weak self] number in
+            guard let self else { return }
+            self.onCall?(self, number)
+        }
         web.translating = { [weak self] in self.map { $0.translator != nil && $0.translation?.failed != true } ?? false }
         web.onTranslate = { [weak self] in self?.toggleTranslation() }
         web.onSearch = { [weak self] text in
@@ -930,6 +941,8 @@ final class Tab: ObservableObject, Identifiable {
         controller.add(relay, contentWorld: Web.world, name: ScrollRelay.name)
         controller.add(veils_, contentWorld: Web.world, name: VeilRelay.name)
         controller.add(images, contentWorld: Web.world, name: ImageRelay.name)
+        controller.add(dial, contentWorld: Web.world, name: DialRelay.name)
+        controller.addScriptMessageHandler(siteDial, contentWorld: Web.world, name: DialerSiteRelay.name)
         controller.add(media, contentWorld: Web.world, name: MediaKeys.name)
         controller.add(shop, contentWorld: Web.world, name: StoreRelay.name)
         controller.add(iconChanges, contentWorld: Web.world, name: IconRelay.name)
@@ -1015,6 +1028,8 @@ final class Tab: ObservableObject, Identifiable {
         veils_.tab = self
         forms.tab = self
         images.tab = self
+        dial.tab = self
+        siteDial.tab = self
         media.tab = self
         shop.tab = self
         iconChanges.tab = self
@@ -1087,6 +1102,18 @@ final class Tab: ObservableObject, Identifiable {
         controller.addUserScript(
             WKUserScript(source: ImageRelay.watch, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: Web.world)
         )
+        // Every frame: what a right-click lands on, for Call <number>
+        // (DialMenu.swift). The main frame, on a site Settings › Dialer
+        // lists: otto's click-to-call, only while the dialer is on.
+        controller.addUserScript(
+            WKUserScript(source: DialRelay.watch, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: Web.world)
+        )
+        if Shared.prefs.dialerOn, !Shared.prefs.dialerSites.isEmpty {
+            controller.addUserScript(
+                WKUserScript(source: DialerSiteRelay.script(hosts: Shared.prefs.dialerSites), injectionTime: .atDocumentStart,
+                             forMainFrameOnly: true, in: Web.world)
+            )
+        }
         // Every frame, in Search's world: a paused video gives the media keys
         // back (see MediaKeys.swift).
         controller.addUserScript(
@@ -2015,6 +2042,8 @@ final class Tab: ObservableObject, Identifiable {
         web.onTouch = nil
         web.onKeys = nil
         web.searchName = nil
+        web.dialNumber = nil
+        web.onCall = nil
         web.translating = nil
         web.onTranslate = nil
         web.onSearch = nil
@@ -2206,6 +2235,9 @@ final class PageView: WKWebView {
     /// page in it itself; Search adding them again showed each one twice.
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
+        // Call <number>, first, when the right-click landed on one and the
+        // dialer is on (see DialMenu.swift).
+        addCallItem(to: menu)
         // WebKit names it for a window, but a new window's page arrives here
         // as a new tab (Browser's createWebViewWith), so it says so. The tab
         // stays behind this one, as in Safari and Chrome, and as a ⌘-click's
@@ -2307,6 +2339,10 @@ final class PageView: WKWebView {
     /// The item the bench's linkmenu will choose in the next menu.
     static var picking: String?
     var searchName: (() -> String?)?
+    /// The phone number the last right-click landed on, and Call <number>
+    /// chosen (see DialMenu.swift).
+    var dialNumber: (() -> String?)?
+    var onCall: ((String) -> Void)?
     var onSearch: ((String) -> Void)?
     private var selection: String?
 

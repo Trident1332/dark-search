@@ -31,6 +31,8 @@ enum SidePanelContent: Equatable {
     case page(extensionID: String, url: URL, tab: Tab.ID?)
     /// A website, in the space the window was in when it opened.
     case site(url: URL, space: UUID)
+    /// The dialer (Dialer.swift): the window's own page, kept with it.
+    case dialer
 }
 
 /// The sites offered in View › Side Panel, as they are typed: a short list,
@@ -169,9 +171,11 @@ extension Browser {
         sidePanel = .site(url: url, space: spaceID)
     }
 
-    /// Closed: an extension's page is let go, as Chrome does.
+    /// Closed: an extension's page is let go, as Chrome does. The dialer's
+    /// stays, signed in, but a call in progress ends with the panel.
     func closeSidePanel() {
         if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
+        if case .dialer = sidePanel { dialerPage?.hangUp() }
         SidePanelPages.shared.drop(in: self)
         sidePanelShown = false
         sidePanel = nil
@@ -282,6 +286,9 @@ final class SidePanelPages: NSObject {
                 if #available(macOS 15.4, *), let context = Extensions.shared.contexts[id] {
                     _ = load(url, from: context, in: browser)
                 }
+            case .dialer:
+                // Its page takes no route of the proxy's: nothing to make again.
+                break
             }
             browser.objectWillChange.send()
         }
@@ -653,6 +660,8 @@ struct SidePanelView: View {
                 Rectangle().fill(Palette.hairline).frame(height: 1)
                 PanelPage(web: SidePanelPages.shared.web(in: browser))
             }
+        case .dialer:
+            DialerPanelView(browser: browser)
         case nil:
             Color.clear
         }
@@ -707,7 +716,7 @@ private struct SiteLine: View {
 /// stays the same object when another site (or the same one again, from
 /// View › Side Panel) replaces the page. Holding the window, the holder kept
 /// the page just let go, taken out of it, and the panel stayed white.
-private struct PanelPage: NSViewRepresentable {
+struct PanelPage: NSViewRepresentable {
     let web: WKWebView?
 
     func makeNSView(context: Context) -> NSView {

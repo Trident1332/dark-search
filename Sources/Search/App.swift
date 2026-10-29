@@ -172,6 +172,11 @@ struct SearchApp: App {
                     .shortcut("view.reader")
                 Button("Float Video") { browser.toggleFloat() }
                     .shortcut("view.float")
+                // The dialer, only once it is on (Settings › Dialer).
+                if browser.prefs.dialerOn {
+                    Button(browser.dialerShown ? "Close Dialer" : "Show Dialer") { browser.toggleDialer() }
+                        .shortcut("view.dialer")
+                }
                 // Websites in the side panel, only once they are on
                 // (Settings › General).
                 if browser.prefs.sitesInPanel {

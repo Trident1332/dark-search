@@ -191,6 +191,7 @@ struct Command: Identifiable {
         Command("view.reader", "Reading Mode", .view, KeyCombo("r", shift: true)) { $0.toggleReader() },
         Command("view.float", "Float Video", .view, KeyCombo("p", shift: true)) { $0.toggleFloat() },
         Command("view.sitePanel", "Show Side Panel", .view, nil) { $0.toggleSitePanel() },
+        Command("view.dialer", "Show Dialer", .view, KeyCombo("k", shift: true)) { $0.toggleDialer() },
         Command("view.dusk", "Darken This Site", .view, KeyCombo("d", shift: true)) { $0.toggleDusk() },
         Command("view.duskPause", "Pause Darkening", .view, KeyCombo("d", shift: true, option: true)) { $0.pauseDusk() },
         Command("view.summarize", "Summarize Page", .view, nil) { $0.summarizePage() },

@@ -398,6 +398,9 @@ final class Browser: NSObject, ObservableObject {
     /// not, and what is in it.
     @Published var sidePanelShown = false
     @Published var sidePanel: SidePanelContent?
+    /// The dialer's page in this window, once the dialer has been opened
+    /// here, kept while the dialer is on (see Dialer.swift).
+    var dialerPage: DialerPage?
     /// The Settings page it opens on next.
     var settingsPage: SettingsPanel.Page {
         get {
@@ -5491,6 +5494,7 @@ final class Browser: NSObject, ObservableObject {
         }
         tab.onPickEnd = { [weak self] _ in self?.veiling = false }
         tab.onImageMenu = { [weak self] tab, url in self?.showImageMenu(for: tab, at: url) }
+        tab.onCall = { [weak self] _, number in self?.call(number) }
         tab.searchName = { [weak self] in self.map { $0.prefs.engine.name(custom: $0.prefs.customEngine) } }
         tab.onSearch = { [weak self] tab, text in
             guard let self, let url = self.searchURL(for: text) else { return }
@@ -6375,6 +6379,13 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // judged, as for any other frame.
         guard action.targetFrame?.isMainFrame ?? false || clicked || ownSite else {
             if Store.testing { Browser.handedOff.append("\(scheme): ignored") }
+            return
+        }
+        // A phone number clicked, with the dialer on: Search's own call,
+        // not FaceTime's (see Dialer.swift).
+        if clicked, ["tel", "callto"].contains(scheme), prefs.dialerOn, let number = Dialer.number(ofTel: url.absoluteString) {
+            if Store.testing { Browser.handedOff.append("\(scheme): dialer") }
+            call(number)
             return
         }
         guard let app = NSWorkspace.shared.urlForApplication(toOpen: url) else {

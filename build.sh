@@ -132,6 +132,10 @@ mv "$APP/Contents/MacOS/$NAME.sdk" "$APP/Contents/MacOS/$NAME"
 # The AppleScript dictionary (Scripting.swift): read-only, tabs' addresses
 # and titles. The plist below points to it.
 cp Search.sdef "$APP/Contents/Resources/"
+# The dialer's page (Dialer.swift): Otto's softphone, its scripts, fonts
+# and licences, read from the bundle as files.
+rm -rf "$APP/Contents/Resources/Dialer"
+cp -R Resources/Dialer "$APP/Contents/Resources/Dialer"
 
 # Symbols stay out of the app. The linker leaves every function's name and a
 # map back to the source in the binary — 15,000 entries, more than half of
