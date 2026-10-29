@@ -2,7 +2,7 @@ import SwiftUI
 
 /// A country's flag, flat: a few shapes drawn here, rather than the Mac's
 /// emoji flags, which wave. Stripes, crosses, discs, stars, a canton or a
-/// hoist triangle cover most of the world; a flag that is mostly a crest
+/// hoist triangle, and one leaf, cover most of the world; a flag that is mostly a crest
 /// or a device these can't draw is shown as its two-letter code in a quiet
 /// badge instead, never as a wrong flag. Settings › Proxy shows one beside
 /// where sites see you from.
@@ -61,6 +61,8 @@ struct FlatFlag: View {
         /// A crescent open to the fly: a disc with the field's colour cut back in.
         case crescent(Color, x: CGFloat, y: CGFloat, r: CGFloat, field: Color)
         case hexagram(Color, x: CGFloat, y: CGFloat, r: CGFloat)
+        /// Canada's maple leaf, centred, seven tenths of the height.
+        case leaf(Color)
 
         func draw(in context: inout GraphicsContext, size: CGSize) {
             let w = size.width, h = size.height
@@ -133,8 +135,28 @@ struct FlatFlag: View {
                     path.closeSubpath()
                     context.stroke(path, with: .color(colour), lineWidth: max(0.6, r * h * 0.18))
                 }
+            case .leaf(let colour):
+                let scale = 0.7 * h / Piece.leafHeight
+                var path = Path()
+                for (i, point) in Piece.leafOutline.enumerated() {
+                    let at = CGPoint(x: w / 2 + point.x * scale, y: 0.15 * h + point.y * scale)
+                    if i == 0 { path.move(to: at) } else { path.addLine(to: at) }
+                }
+                path.closeSubpath()
+                context.fill(path, with: .color(colour))
             }
         }
+
+        /// The official leaf's corners, hoist side, from the tip down to the stem, in units
+        /// where the leaf is 15.1 tall; the fly side mirrors them. The dialer's Number menu
+        /// draws the same outline (Resources/Dialer/search.css).
+        private static let leafHoist: [(x: CGFloat, y: CGFloat)] = [
+            (0, 0), (-1.2, 2.3), (-1.82, 2.6), (-2.69, 2.15), (-2.04, 5.6), (-2.55, 5.95), (-4.07, 4.26),
+            (-4.32, 5.12), (-4.65, 5.33), (-6.56, 4.92), (-6.06, 6.75), (-6.17, 7.43), (-6.85, 7.74),
+            (-3.55, 10.43), (-3.4, 10.88), (-3.69, 11.83), (-0.4, 11.37), (-0.13, 11.64), (-0.5, 15.1),
+        ]
+        private static let leafHeight: CGFloat = 15.1
+        private static let leafOutline: [(x: CGFloat, y: CGFloat)] = leafHoist + leafHoist.reversed().map { (x: -$0.x, y: $0.y) }
 
         private static func star(at centre: CGPoint, outer: CGFloat) -> Path {
             var path = Path()
@@ -250,6 +272,7 @@ struct FlatFlag: View {
         "NG": [columns(c(0x008751), white, c(0x008751))],
         "CI": [columns(c(0xFF8200), white, c(0x009E60))],
         "PE": [columns(c(0xD91023), white, c(0xD91023))],
+        "CA": [.columns([(c(0xD52B1E), 1), (white, 2), (c(0xD52B1E), 1)]), .leaf(c(0xD52B1E))],
         "MX": [columns(c(0x006847), white, c(0xCE1126))],
         "GT": [columns(c(0x4997D0), white, c(0x4997D0))],
         "CM": [columns(c(0x007A5E), c(0xCE1126), c(0xFCD116)), .star(c(0xFCD116), x: 0.5, y: 0.5, r: 0.18)],
