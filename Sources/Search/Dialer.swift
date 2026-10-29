@@ -342,6 +342,14 @@ final class Dialer: ObservableObject {
 enum DialerPassword {
     private static let service = Store.world.map { "Search Dialer (\($0))" } ?? "Search Dialer"
     nonisolated(unsafe) private static var rehearsal: [String: String] = [:]
+    /// What the keychain answered this launch, per seat: the password, or
+    /// nil for a refusal. Asked once. The keychain puts its question — its
+    /// sheet for the login password — for every build it doesn't know, and
+    /// an ad-hoc signed build is a new one to it every time it is built;
+    /// asked on every read, it came with every reconnect, and a Deny only
+    /// had the page ask again, thousands of times (feedback, 29 Oct 2026).
+    /// Saving or forgetting the password starts afresh.
+    nonisolated(unsafe) private static var answered: [String: String?] = [:]
 
     private static func account(_ setup: DialerSetup) -> String { "\(setup.trimmedUser)@\(setup.trimmedDomain)" }
 
@@ -354,13 +362,22 @@ enum DialerPassword {
     static func read(_ setup: DialerSetup) -> String? {
         guard !setup.trimmedUser.isEmpty else { return nil }
         if Store.testing { return rehearsal[account(setup)] }
+        if let known = answered[account(setup)] { return known }
         var asked = identity(setup)
         asked[kSecReturnData as String] = true
         asked[kSecMatchLimit as String] = kSecMatchLimitOne
         var out: CFTypeRef?
-        guard SecItemCopyMatching(asked as CFDictionary, &out) == errSecSuccess,
+        let status = SecItemCopyMatching(asked as CFDictionary, &out)
+        guard status == errSecSuccess,
               let data = out as? Data, let password = String(data: data, encoding: .utf8), !password.isEmpty
-        else { return nil }
+        else {
+            // A no from the person at the keychain's sheet is the answer
+            // for this launch. Nothing kept, or a keychain that couldn't be
+            // asked just now, is asked again next time.
+            if status == errSecAuthFailed || status == errSecUserCanceled { answered[account(setup)] = .some(nil) }
+            return nil
+        }
+        answered[account(setup)] = password
         return password
     }
 
@@ -370,21 +387,28 @@ enum DialerPassword {
     static func save(_ password: String, for setup: DialerSetup) -> Bool {
         guard !setup.trimmedUser.isEmpty, !password.isEmpty else { return false }
         if Store.testing { rehearsal[account(setup)] = password; return true }
+        answered.removeValue(forKey: account(setup))
         let data = Data(password.utf8)
         let query = identity(setup)
         let update: [String: Any] = [kSecValueData as String: data]
         let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-        if status == errSecSuccess { return true }
+        if status == errSecSuccess {
+            answered[account(setup)] = password
+            return true
+        }
         guard status == errSecItemNotFound else { return false }
         var add = query
         add[kSecValueData as String] = data
         add[kSecAttrLabel as String] = service
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+        guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else { return false }
+        answered[account(setup)] = password
+        return true
     }
 
     @discardableResult
     static func forget(_ setup: DialerSetup) -> Bool {
+        answered.removeValue(forKey: account(setup))
         if Store.testing { rehearsal[account(setup)] = nil; return true }
         let status = SecItemDelete(identity(setup) as CFDictionary)
         return status == errSecSuccess || status == errSecItemNotFound
