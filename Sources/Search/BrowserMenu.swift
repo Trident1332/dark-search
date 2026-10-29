@@ -45,7 +45,7 @@ struct BrowserMenu: View {
         }
         .padding(6)
         .frame(width: 300)
-        .popoverGround(card: true)
+        .popoverGround()
     }
 
     /// The command's key as it stands, for the end of its row.

@@ -144,7 +144,7 @@ final class TorRuntime: ObservableObject {
             input = incoming
             output = outgoing
             do { try child.run() }
-            catch { throw Failure(message: "Tor could not be launched. Reinstall Search's Tor component and try again") }
+            catch { throw Failure(message: "Tor could not be launched. Reinstall Dark Search's Tor component and try again") }
             incoming.fileHandleForReading.closeFile()
             outgoing.fileHandleForWriting.closeFile()
             do { try incoming.fileHandleForWriting.write(contentsOf: Data(configuration.utf8)) }
@@ -273,7 +273,7 @@ final class TorRuntime: ObservableObject {
             + ["/opt/homebrew/bin/tor", "/usr/local/bin/tor",
                "/Applications/Tor Browser.app/Contents/MacOS/Tor/tor"].map { URL(fileURLWithPath: $0) }
         guard let found = candidates.compactMap({ $0 }).first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
-            throw Failure(message: "Tor's network component is unavailable. Reinstall Search or install Tor and try again")
+            throw Failure(message: "Tor's network component is unavailable. Reinstall Dark Search or install Tor and try again")
         }
         return found
     }

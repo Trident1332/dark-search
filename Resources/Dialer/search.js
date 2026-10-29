@@ -23,7 +23,7 @@
 
   var handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.dialer;
   function ask(msg) {
-    if (!handler) return Promise.reject(new Error("Search isn't listening"));
+    if (!handler) return Promise.reject(new Error("Dark Search isn't listening"));
     try { return Promise.resolve(handler.postMessage(msg)); } catch (e) { return Promise.reject(e); }
   }
 

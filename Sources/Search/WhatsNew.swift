@@ -50,7 +50,7 @@ enum WhatsNew {
                since: "1.0.6", get: { $0.engineSuggests }, set: { $0.engineSuggests = $1 }),
         Toggle(title: "Pins keep their site", detail: "Links elsewhere open in a peek, and ⌘W takes a pin back to its page, as in Arc.",
                since: "1.0.6", get: { $0.pinsKeepSite }, set: { $0.pinsKeepSite = $1 }),
-        Toggle(title: "Darken light pages", detail: "While Search is dark, pages with no dark look of their own are darkened.",
+        Toggle(title: "Darken light pages", detail: "While Dark Search is dark, pages with no dark look of their own are darkened.",
                since: "1.0.6", get: { $0.darkensPages }, set: { $0.darkensPages = $1 }),
         Toggle(title: "Roomier tabs", detail: "Taller rows and larger titles in the sidebar.",
                since: "1.0.6", get: { $0.roomyTabs }, set: { $0.roomyTabs = $1 }),
@@ -144,6 +144,20 @@ enum WhatsNew {
 
     /// Newest first.
     static let notes: [Notes] = [
+        Notes(
+            version: "1.1.0", date: "30 October 2026",
+            headline: "Dark Search, by Caroline.",
+            new: [
+                "A new D-shaped search lens for the app icon and About page.",
+                "Dark Search branding across the browser, installer and releases.",
+            ],
+            better: [
+                "Your existing profiles, tabs, bookmarks, passwords and settings stay in place.",
+            ],
+            fixed: [
+                "The browser menu uses a single outline at its rounded corners.",
+            ]
+        ),
         Notes(
             version: "1.0.7", date: "25 October 2026",
             headline: "Settings as a page, profiles, page translation, Apple Passwords and YouTube without ads.",
@@ -367,7 +381,7 @@ struct WhatsNewCard: View {
     private var fresh: [WhatsNew.Toggle] { WhatsNew.toggles.filter { $0.since == release.version } }
 
     var body: some View {
-        Plate("New in Search \(release.version)", width: 460, close: close) {
+        Plate("New in Dark Search \(release.version)", width: 460, close: close) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     rows(fresh)
@@ -445,7 +459,7 @@ struct ReleaseNotesPanel: View {
     private func version(_ note: WhatsNew.Notes) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("Search \(note.version)")
+                Text("Dark Search \(note.version)")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                 if !note.date.isEmpty {

@@ -638,7 +638,7 @@ final class Bookmarks: ObservableObject {
     /// line on why, and Cancel keeps the address the bookmark had.
     func askAddress(_ node: Bookmark, typed: String? = nil) {
         guard let current = node.url else { return }
-        let detail = typed.map { "Search can\u{2019}t open \u{201C}\($0)\u{201D} as a page. Cancel keeps the address the bookmark has." }
+        let detail = typed.map { "Dark Search can\u{2019}t open \u{201C}\($0)\u{201D} as a page. Cancel keeps the address the bookmark has." }
         Ask.name("Edit Address", detail: detail, placeholder: "https://example.com", initial: typed ?? current, confirm: "Save") { typed in
             guard let url = Address.url(from: typed) else {
                 DispatchQueue.main.async { self.askAddress(node, typed: typed) }

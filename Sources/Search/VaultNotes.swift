@@ -76,7 +76,7 @@ extension Vault {
         let fields: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrLabel as String: name.isEmpty ? "Untitled" : name,
-            kSecAttrDescription as String: "Search note",
+            kSecAttrDescription as String: "Dark Search note",
         ]
         let status = KeychainAccess.update(noteIdentity(id) as CFDictionary, fields as CFDictionary)
         if status == errSecSuccess { return id }

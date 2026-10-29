@@ -460,7 +460,7 @@ struct TabSwitcherOverlay: View {
     /// TabSwitcher.Action), under the grid; Open in Search only on a moon.
     private var legend: some View {
         let moon = switcher.selectedID.map(switcher.moons.contains) == true
-        let keys = [("W", "Close"), ("R", "Reload"), ("M", "Mute")] + (moon ? [("O", "Open in Search")] : [])
+        let keys = [("W", "Close"), ("R", "Reload"), ("M", "Mute")] + (moon ? [("O", "Open in Dark Search")] : [])
         return HStack(spacing: 14) {
             ForEach(keys, id: \.0) { key, name in
                 HStack(spacing: 4) {

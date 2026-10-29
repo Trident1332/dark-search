@@ -44,7 +44,7 @@
   var recoveryRevision = 0, recovering = null;
   var mediaWaiters = [], mediaFailure = null;
   var MEDIA_START_TIMEOUT = 15000;
-  var MEDIA_TIMEOUT_NOTE = "The microphone didn't start. Keep Search in front and check microphone access in System Settings, then try again.";
+  var MEDIA_TIMEOUT_NOTE = "The microphone didn't start. Keep Dark Search in front and check microphone access in System Settings, then try again.";
   var provider = "numero";     // outbound trunk; "telicall" adds an X-Provider INVITE header
   var numeroLine = "us";      // an owned Numero line, chosen explicitly in the Number menu
   var voice = "";              // voice changer: semitones sent as an X-Voice INVITE header, "" = off
@@ -976,7 +976,7 @@
   }
   function showMediaFailure() {
     if (!mediaFailure || !mediaFailed(mediaFailure.token, mediaFailure.gen)) return;
-    subEl.textContent = mediaFailure.kind === "denied" ? "Microphone blocked — allow Search to use the microphone, then try again" : MEDIA_TIMEOUT_NOTE;
+    subEl.textContent = mediaFailure.kind === "denied" ? "Microphone blocked — allow Dark Search to use the microphone, then try again" : MEDIA_TIMEOUT_NOTE;
     setStatus(mediaFailure.kind === "denied" ? "Microphone blocked" : "Microphone didn't start", "err");
   }
   function startMedia(start, token, gen, usesMacVoice) {
@@ -1214,7 +1214,7 @@
   function needMic(n, state, ref) {
     // A denial never leaves an old number waiting to call after a later permission change.
     pending = null; activeAttempt = 0;
-    subEl.textContent = "Microphone blocked — allow Search in System Settings › Privacy & Security, then try again";
+    subEl.textContent = "Microphone blocked — allow Dark Search in System Settings › Privacy & Security, then try again";
     setStatus("Microphone blocked", "err");
   }
 
@@ -1232,7 +1232,7 @@
     context.token = token;
     mediaFailure = null;
     activeAttempt = token;
-    subEl.textContent = "Allow Search to use the microphone if macOS asks…";
+    subEl.textContent = "Allow Dark Search to use the microphone if macOS asks…";
     setStatus("Checking microphone…");
     var mic = await micState();
     if (stopped || !panelVisible || token !== activeAttempt || gen !== generation || client !== simple) return;
@@ -1338,7 +1338,7 @@
     incoming = false; calling = true; syncButtons(); subEl.textContent = "Answering…";
     setStatus("Answering…", "calling");
     try {
-      subEl.textContent = "Allow Search to use the microphone if macOS asks…";
+      subEl.textContent = "Allow Dark Search to use the microphone if macOS asks…";
       var mic = await micState();
       if (token !== activeAttempt || gen !== generation || stopped || !panelVisible) return;
       if (mic !== "granted") {

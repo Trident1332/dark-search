@@ -367,10 +367,10 @@ final class ApplePasswords: ObservableObject {
         switch error {
         case let error as Unavailable: return error.errorDescription ?? "Apple Passwords isn't available"
         case ApplePasswordsError.timedOut: return "Apple's Passwords helper didn't answer"
-        case ApplePasswordsError.gone: return "Apple's Passwords helper wouldn't run for this copy of Search"
+        case ApplePasswordsError.gone: return "Apple's Passwords helper wouldn't run for this copy of Dark Search"
         case ApplePasswordsError.notTheHelper: return "The pairing couldn't be checked. Connect again."
         case ApplePasswordsError.badHello, ApplePasswordsError.malformed:
-            return "Apple's Passwords helper answered in a way Search doesn't know"
+            return "Apple's Passwords helper answered in a way Dark Search doesn't know"
         default: return "Apple Passwords isn't available on this Mac"
         }
     }

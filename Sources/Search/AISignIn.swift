@@ -51,7 +51,7 @@ enum AISignIn {
             URLQueryItem(name: "callback_url", value: callback.absoluteString),
             URLQueryItem(name: "code_challenge", value: challenge),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
-            URLQueryItem(name: "key_label", value: "Search"),
+            URLQueryItem(name: "key_label", value: "Dark Search"),
         ]
         guard let url = parts?.url else { return }
         let tab = browser.open(url, foreground: true)
@@ -79,7 +79,7 @@ enum AISignIn {
                 let key = try await AIClient.shared.exchange(code: code, verifier: flow.verifier)
                 switch AIKeys.save(key, for: .openRouter) {
                 case .kept: _ = finish(true, nil, tab, browser)
-                case .unavailable: _ = finish(false, "This copy of Search can't keep keys (it isn't the signed release).", tab, browser)
+                case .unavailable: _ = finish(false, "This copy of Dark Search can't keep keys (it isn't the signed release).", tab, browser)
                 case .failed: _ = finish(false, "The keychain refused the key.", tab, browser)
                 }
             } catch {

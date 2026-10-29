@@ -63,7 +63,7 @@ struct ImportPanel: View {
                     Text("Looking on this Mac").font(.system(size: 12)).foregroundStyle(Palette.muted)
                 }
             } else if sources.isEmpty {
-                Card { Nothing(unreadable.isEmpty ? "No other browser found on this Mac." : "Choose a browser's data folder below to allow Search to read it.") }
+                Card { Nothing(unreadable.isEmpty ? "No other browser found on this Mac." : "Choose a browser's data folder below to allow Dark Search to read it.") }
             } else {
                 Caption("On this Mac")
                 Card {

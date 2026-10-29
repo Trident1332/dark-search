@@ -21,7 +21,7 @@ struct ApplePasswordsCard: View {
             } else {
                 Card {
                     Line("Passwords from Apple's Passwords app",
-                         "Accounts saved in the Passwords app, under the sign-in box. Unofficial: Search talks to the helper Apple made for its Chrome extension, as that extension. Never in private tabs.") {
+                         "Accounts saved in the Passwords app, under the sign-in box. Unofficial: Dark Search talks to the helper Apple made for its Chrome extension, as that extension. Never in private tabs.") {
                         Switch(on: $prefs.applePasswords)
                     }
                     if prefs.applePasswords {
@@ -40,7 +40,7 @@ struct ApplePasswordsCard: View {
     @ViewBuilder private var pairing: some View {
         switch apple.state {
         case .idle:
-            Line(apple.trouble ?? "Not connected", "Your Mac shows a code, and you type it here. Once per launch of Search, and only when you first want an account: under a sign-in box, Connect Apple Passwords asks for it there.") {
+            Line(apple.trouble ?? "Not connected", "Your Mac shows a code, and you type it here. Once per launch of Dark Search, and only when you first want an account: under a sign-in box, Connect Apple Passwords asks for it there.") {
                 Pill("Connect") { Task { await apple.connect() } }
             }
         case .starting:
@@ -69,7 +69,7 @@ struct ApplePasswordsCard: View {
                 }
             }
         case .paired:
-            Line("Connected", "Until Search quits. Accounts show under sign-in boxes, marked Apple Passwords; macOS may ask for Touch ID before one is filled.") {
+            Line("Connected", "Until Dark Search quits. Accounts show under sign-in boxes, marked Apple Passwords; macOS may ask for Touch ID before one is filled.") {
                 Pill("Disconnect") { apple.disconnect() }
             }
         }
@@ -168,7 +168,7 @@ struct ApplePairingCard: View {
     private var detail: String {
         switch apple.state {
         case .starting: return "Your Mac shows a six-digit code in a moment"
-        case .code, .checking: return "Six digits, from the Passwords window. Once per launch of Search."
+        case .code, .checking: return "Six digits, from the Passwords window. Once per launch of Dark Search."
         default: return "Apple Passwords"
         }
     }

@@ -165,14 +165,14 @@ enum AIAssist {
     /// What a provider off this Mac is sent, said once, the first time it is
     /// used — and a word on what it does with it where that matters.
     static func notice(for provider: AIProvider) -> String {
-        var text = "When you ask, Search sends this page's text, its address and your question to \(provider.host)"
+        var text = "When you ask, Dark Search sends this page's text, its address and your question to \(provider.host)"
         text += provider == .openRouter ? ", which passes them to the model's provider." : "."
-        text += " Their terms and privacy policy apply. Nothing is sent until you ask, never from a private tab, and Search keeps no copy."
+        text += " Their terms and privacy policy apply. Nothing is sent until you ask, never from a private tab, and Dark Search keeps no copy."
         switch provider {
         case .gemini:
             text += "\n\nOn Gemini's free tier, outside the EEA, Switzerland and the UK, Google may use this to improve its products, and people may read it. Don't use it on sensitive pages."
         case .openRouter:
-            text += "\n\nSearch asks OpenRouter to use only providers that keep nothing (zero data retention)."
+            text += "\n\nDark Search asks OpenRouter to use only providers that keep nothing (zero data retention)."
         default:
             break
         }
@@ -468,7 +468,7 @@ struct AISettings: View {
     private var onThisMac: some View {
         let size = ByteCountFormatter.string(fromByteCount: engine.downloadSize, countStyle: .file)
         if AIEngine.translated {
-            Line("Model", "Needs the Apple Silicon version of Search — this copy runs translated") { EmptyView() }
+            Line("Model", "Needs the Apple Silicon version of Dark Search — this copy runs translated") { EmptyView() }
         } else {
             switch engine.state {
             case .absent:
@@ -510,7 +510,7 @@ struct AISettings: View {
                 }
             }
         } else if !AIKeys.available {
-            Line("Key", "This copy of Search can't keep keys safely — it isn't the signed release. An app on this Mac still works") { EmptyView() }
+            Line("Key", "This copy of Dark Search can't keep keys safely — it isn't the signed release. An app on this Mac still works") { EmptyView() }
         } else {
             Line("Key", provider == .openRouter ? "Paste one, or sign in and OpenRouter makes one for you" : "Paste your API key") {
                 HStack(spacing: 6) {
@@ -594,7 +594,7 @@ struct AISettings: View {
         pasted = ""
         switch AIKeys.save(key, for: provider) {
         case .kept: browser.announce("Key kept in the keychain")
-        case .unavailable: browser.announce("This copy of Search can't keep keys")
+        case .unavailable: browser.announce("This copy of Dark Search can't keep keys")
         case .failed: browser.announce("The key wasn't kept")
         }
         refresh()

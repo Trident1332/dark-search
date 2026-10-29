@@ -451,7 +451,7 @@ test('hiding during native permission cancels the request before any capture or 
   const permission = deferred();
   const w = await world({ nativePermission: () => permission.promise });
   w.dial('9196'); await settle();
-  assert.match(w.api.state().note, /Allow Search/);
+  assert.match(w.api.state().note, /Allow Dark Search/);
   await w.api.setVisible(false); permission.resolve({ state: 'granted' }); await settle();
   await w.advance(20000);
   assert.equal(w.calls.length, 0);

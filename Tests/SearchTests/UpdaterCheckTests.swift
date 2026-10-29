@@ -71,7 +71,7 @@ final class UpdaterCheckTests: XCTestCase {
         let updater = Updater(fetchFeed: { current })
         let result = await check(updater)
         XCTAssertEqual(result, .upToDate)
-        XCTAssertEqual(result.message, "Search is up to date")
+        XCTAssertEqual(result.message, "\(Brand.name) is up to date")
         XCTAssertNotNil(updater.lastChecked)
         XCTAssertNil(updater.lastCheckFailure)
         XCTAssertEqual(updater.stage, .none)
@@ -123,11 +123,11 @@ final class UpdaterCheckTests: XCTestCase {
         updater.checkByHand()
         try await until { !updater.checking }
         XCTAssertTrue(messages.last?.hasPrefix("Couldn't check for updates.") == true)
-        XCTAssertFalse(messages.contains("Search is up to date"))
+        XCTAssertFalse(messages.contains("\(Brand.name) is up to date"))
         fail = false
         updater.checkByHand()
         try await until { !updater.checking }
-        XCTAssertEqual(messages.last, "Search is up to date")
+        XCTAssertEqual(messages.last, "\(Brand.name) is up to date")
         XCTAssertNil(updater.lastCheckFailure)
     }
 

@@ -1,22 +1,22 @@
-# Search
+# Dark Search
 
-A small, fast, quiet web browser for the Mac, by [Office Commun](https://officecommun.com).
+A small, fast, quiet web browser for the Mac, by Caroline.
 
-![Search, with its tabs down the left and a page taking the rest of the window](.github/screenshot.png)
+![Dark Search, with its tabs down the left and a page taking the rest of the window](.github/screenshot.png)
 
-**[Download for macOS →](https://searchbrowser.app)** · macOS 14 or later · free · about 9 MB
+**[Download Dark Search for macOS →](https://github.com/Trident1332/dark-search/releases/latest/download/Dark%20Search.dmg)** · macOS 14 or later · free
 
-Or with [Homebrew](https://brew.sh): `brew install --cask driceroland/tap/search`
+Dark Search 1.1.0 is maintained by Caroline, based on the open-source Search browser by [Office Commun](https://officecommun.com).
 
 ---
 
 ## What it is
 
-Search is a browser with nothing in the way. A row of tabs — across the top or down the left, your choice — and the page. There is no toolbar, no start page, no sidebar of suggestions, no account to sign into, nothing that wants your attention. You type an address or a few words in one field and you are on the page.
+Dark Search is a browser with nothing in the way. A row of tabs — across the top or down the left, your choice — and the page. There is no toolbar, no start page, no sidebar of suggestions, no account to sign into, nothing that wants your attention. You type an address or a few words in one field and you are on the page.
 
 It uses **WebKit**, the engine already inside every Mac (it is what Safari runs on). That is why the whole app is about 8 MB on disk and opens instantly: there is no second copy of Chromium to download, update and keep in memory.
 
-It was built by a design studio that spends its whole day in a browser and was tired of the ones that had become products. This one is a tool.
+Caroline maintains this fork with its own identity and releases. The original browser was built by Office Commun; its upstream license and attribution remain included.
 
 ## What it does
 
@@ -28,12 +28,12 @@ It was built by a design studio that spends its whole day in a browser and was t
 - **Hide anything, for good.** `⇧⌘H`, then click a cookie banner, a newsletter overlay, a rail of "related" nonsense — it goes, and it is still gone on that site next time, before the page has drawn a single frame.
 - **An ad blocker that runs before the page.** Third-party trackers and ad networks are stopped at the network level, so there is nothing to render and nothing to slow down. On by default, off per site if something breaks.
 - **Video that follows you.** `⇧⌘P` lifts the video out of the page into a small window that stays above everything, including other apps.
-- **Passwords, in your keychain.** Search offers to save a sign-in once it has actually worked, and offers your saved accounts, and the Mac's passkeys for the site, under the field when you click it — the way Safari does, never filling anything on its own. Everything lives in the macOS keychain, encrypted by the system, readable only by Search. Bring yours in from Chrome, Arc, Dia, Brave or Edge in one click; nothing leaves the Mac.
+- **Passwords, in your keychain.** Dark Search offers to save a sign-in once it has actually worked, and offers your saved accounts, and the Mac's passkeys for the site, under the field when you click it — the way Safari does, never filling anything on its own. Everything lives in the macOS keychain, encrypted by the system, readable only by Dark Search. Bring yours in from Chrome, Arc, Dia, Brave or Edge in one click; nothing leaves the Mac.
 - **Light, dark, or the Mac's own.** The frame and the pages follow.
 - **Bookmarks, history, downloads** — each a panel, each searchable, each one keystroke away.
-- **Chrome extensions, without Chrome.** Paste a Chrome Web Store link in Settings › Extensions, or open the extension's page in Search and press Add. It runs on WebKit's own extension engine — the one Safari uses — and where Chrome has APIs WebKit doesn't (bookmarks, history, downloads, side panel, offscreen documents, fonts, notifications, speech, OAuth sign-in), Search fills them in itself. They live behind the puzzle button; pin the ones you use often. Building your own? Load its folder as an unpacked extension and press Reload after each change, as in Chrome's developer mode. macOS 15.4 or later.
+- **Chrome extensions, without Chrome.** Paste a Chrome Web Store link in Settings › Extensions, or open the extension's page in Dark Search and press Add. It runs on WebKit's own extension engine — the one Safari uses — and where Chrome has APIs WebKit doesn't (bookmarks, history, downloads, side panel, offscreen documents, fonts, notifications, speech, OAuth sign-in), Dark Search fills them in itself. They live behind the puzzle button; pin the ones you use often. Building your own? Load its folder as an unpacked extension and press Reload after each change, as in Chrome's developer mode. macOS 15.4 or later.
 - **Call a number on a page.** Turn on Settings › Dialer, point it at your FreeSWITCH phone line, and a right-click on a phone number — selected, or just under the pointer — offers to call it. `tel:` links call too, and `⇧⌘K` opens the dialer in the side panel with a keypad and your recent calls. It is Otto's dialer, built in: a softphone over a WebSocket, the sound through WebRTC, the seat's password in your keychain. Pages on the sites you list, otto's leads table among them, can start a call themselves and take the call log back.
-- **Updates itself, quietly.** Once a day it checks for a newer build, downloads it, verifies it is signed by Office Commun, and swaps it in for the next launch. Nothing restarts on its own.
+- **Updates itself, quietly.** Once a day it checks for a newer build, downloads it, verifies it is signed with this fork's pinned release key, and swaps it in for the next launch. Nothing restarts on its own.
 
 ## What it doesn't do
 
@@ -48,7 +48,7 @@ On purpose:
 
 | What | Where it is | Who can read it |
 |---|---|---|
-| Passwords | The macOS login keychain, as ordinary keychain items tagged `Search` | Search, signed by Office Commun. Any other app triggers the system's permission dialog. |
+| Passwords | The macOS login keychain, as ordinary keychain items tagged `Search` | Dark Search, signed with this fork's release key. Any other app triggers the system's permission dialog. |
 | History, bookmarks, open tabs, hidden elements | Small JSON files in `~/Library/Application Support/Search/` | You. |
 | Cookies and site data | WebKit's own store for the app | The sites that set them, as in any browser. |
 | Extensions | Unpacked in `~/Library/Application Support/Search/Extensions/`, their data in WebKit's extension store | Each extension, within the permissions you accepted when adding it. |
@@ -86,15 +86,17 @@ So anyone can read exactly what a browser handling their passwords and history i
 
 - macOS 14 or later, Xcode 16 / Swift 6 toolchain
 - `swift build` — runs the app straight from the SwiftPM binary
-- `./build.sh` — assembles a real, double-clickable `Search.app` in `build/`, ad-hoc signed so it runs on your own Mac. `SEARCH_DEV=1 ./build.sh` makes it a dev build, on a yellow icon and named for its branch (`Search-split-view` from `claude/split-view-4a6927`), so it's never mistaken for an installed Search or for another worktree's build; `SEARCH_FEATURE=name` picks the name. It shares the installed app's settings and its bundle id, so while both run, a link from another app may land in either
+- `./build.sh` — assembles a real, double-clickable `Dark Search.app` in `build/`, signed so it runs on your own Mac. `SEARCH_DEV=1 ./build.sh` makes it a dev build, on a yellow icon and named for its branch (`Dark Search-split-view` from `claude/split-view-4a6927`), so it's never mistaken for an installed Dark Search or for another worktree's build; `SEARCH_FEATURE=name` picks the name. It shares the installed app's settings and its bundle id, so while both run, a link from another app may land in either
 
-A build you make yourself won't be notarized or carry Office Commun's Developer ID, so the first launch needs a right-click → Open (or an allow in System Settings → Privacy & Security). That's expected — it's the same thing that happens with any app that isn't from the App Store or a notarized DMG. Your own build also keeps its passwords apart from a signed Search's: the keychain tells the two apart by their signatures.
+A local build uses the fork's release key when it is available, a Developer ID when available otherwise, or an ad-hoc signature. A build without the fork's release key cannot receive its automatic updates. The keychain may ask for approval when a build's signing identity changes.
 
-`./build.sh release dmg` also makes `Search.dmg` / `Search.zip`. `./build.sh release ship` additionally notarizes and staples — that step needs a Developer ID certificate and Apple credentials, so it only really does anything for Office Commun's own releases.
+`./build.sh release dmg` makes `Dark Search.dmg` and `Dark Search.zip`, each containing `Dark Search.app`. Byte-identical `Search.dmg` and `Search.zip` download aliases remain for older links. `./build.sh release ship` additionally notarizes and staples; that step needs a Developer ID certificate and Apple credentials.
+
+Local test tools retain the real `build/Search.app` path and internal `Search` executable. `build/Dark Search.app` points to that bundle. The bundle identifier, saved-data folders, preferences and keychain services retain their existing identifiers, so upgrading keeps your browser data.
 
 ### Releases and updates in this fork
 
-Every push to `main` runs `.github/workflows/release.yml`: it builds with `./build.sh release dmg`, signs the app and its feed with the fork's release key, and publishes them as the latest [GitHub release](https://github.com/Trident1332/dark-search/releases). An installed Search reads `releases/latest/download/appcast.json.zip` at launch, every hour and at Search › Check for Updates, and swaps in anything newer for the next launch.
+Every push to `main` runs `.github/workflows/release.yml`: it builds with `./build.sh release dmg`, signs the app and its feed with the fork's release key, and publishes them as the latest [GitHub release](https://github.com/Trident1332/dark-search/releases). An installed Dark Search reads `releases/latest/download/appcast.json.zip` at launch, every hour and at Dark Search › Check for Updates, and swaps in anything newer for the next launch.
 
 It only accepts builds signed with that key: a self-signed certificate named "Dark Search Release Signing", pinned by hash in `Updater.signer`. The key is in the login keychain of the Mac that made it, where `./build.sh` finds and uses it, and in the repository's `SIGNING_P12` / `SIGNING_P12_PASSWORD` secrets for the workflow. A build signed any other way (ad hoc, or on a Mac without the key) runs, but never updates itself.
 
@@ -105,12 +107,12 @@ It only accepts builds signed with that key: a self-signed certificate named "Da
 - The ad blocker is a `WKContentRuleList` compiled once at launch and enforced inside WebKit's networking, before a request is made — zero cost at run time, unlike a JavaScript blocker.
 - Hidden elements are a per-site list of selectors injected as a stylesheet at document start, so nothing is ever seen appearing and vanishing.
 - Every colour is a light/dark pair in `Design.swift`, resolved by the window's appearance; nothing else in the code knows which mode it is in.
-- Extensions run on `WKWebExtension` (macOS 15.4+). `Crx.swift` fetches an extension from the Chrome Web Store's public update address and checks the CRX3 signature against the extension's id before anything is unpacked. `Extensions.swift` is the browser's side of WebKit's contract — tabs, the window, permissions, popups. `ExtensionShims.swift` adds, at install, a small script to the extension's worker, pages and content scripts: it defines the Chrome APIs WebKit lacks — `userScripts`, `privacy`, `browsingData`, `sessions`, the old FileSystem API and more — as calls answered natively by Search, and mends the places where WebKit behaves differently from Chrome: replies from pages that don't answer, listeners added after a worker starts, workers WebKit loses track of, members and constants it leaves out. Extension pages are served from `chrome-extension://<id>/`, the address they have in Chrome, so servers and sites recognise them. `./bench ext-*` drives all of it from the shell against a test run. `ExtensionNative.swift` speaks Chrome's native messaging to hosts registered in Chrome's `NativeMessagingHosts` folders.
+- Extensions run on `WKWebExtension` (macOS 15.4+). `Crx.swift` fetches an extension from the Chrome Web Store's public update address and checks the CRX3 signature against the extension's id before anything is unpacked. `Extensions.swift` is the browser's side of WebKit's contract — tabs, the window, permissions, popups. `ExtensionShims.swift` adds, at install, a small script to the extension's worker, pages and content scripts: it defines the Chrome APIs WebKit lacks — `userScripts`, `privacy`, `browsingData`, `sessions`, the old FileSystem API and more — as calls answered natively by Dark Search, and mends the places where WebKit behaves differently from Chrome: replies from pages that don't answer, listeners added after a worker starts, workers WebKit loses track of, members and constants it leaves out. Extension pages are served from `chrome-extension://<id>/`, the address they have in Chrome, so servers and sites recognise them. `./bench ext-*` drives all of it from the shell against a test run. `ExtensionNative.swift` speaks Chrome's native messaging to hosts registered in Chrome's `NativeMessagingHosts` folders.
 - `Sources/Search/` is one file per concern: `Vault.swift` is the keychain, `Shield.swift` the ad blocker, `Curtain.swift` the hidden elements, `Session.swift` what comes back at launch, `Updater.swift` the update, `Bench.swift` the test socket, and so on. There's no framework of its own to learn first.
 
 ### Testing it without closing it
 
-Turn on **Settings › General › Let a script drive Search** and the running app listens on a Unix socket in its own folder (readable by your user only). `./bench` at the root of the repository speaks it:
+Turn on **Settings › General › Let a script drive Dark Search** and the running app listens on a Unix socket in its own folder (readable by your user only). `./bench` at the root of the repository speaks it:
 
 ```
 ./bench open https://example.com     # a tab of its own, at the end of your row, marked with a flask
@@ -134,4 +136,4 @@ Issues and pull requests are genuinely welcome — see [CONTRIBUTING.md](CONTRIB
 
 ### License
 
-MIT — see [LICENSE](LICENSE). Do what you want with the code. "Search" and the app icon are Office Commun's; please rename a fork before distributing it under another name.
+MIT — see [LICENSE](LICENSE). Dark Search is maintained by Caroline. The original Search code and upstream attribution remain credited to Office Commun; the original Search name and icon are not used for this fork's identity.

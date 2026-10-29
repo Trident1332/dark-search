@@ -656,7 +656,7 @@ final class Proxy: ObservableObject {
                     // Reached, but the site had nothing to say: the proxy
                     // works, where you appear from is unknown.
                     result = self?.setup.persistent == true
-                        ? .failed("The location service returned HTTP \(http.statusCode). Search stays offline and retries")
+                        ? .failed("The location service returned HTTP \(http.statusCode). Dark Search stays offline and retries")
                         : .reached(ms: ms, address: nil, place: nil)
                 } else {
                     let seen = Proxy.read(data)
@@ -667,7 +667,7 @@ final class Proxy: ObservableObject {
                     } else if self?.setup.matchesTimeZone == true, !ProxyTimeZone.isSupported {
                         result = .failed("This version of WebKit cannot match the proxy time zone")
                     } else if self?.setup.persistent == true, seen.address == nil {
-                        result = .failed("The proxy location could not be verified. Search stays offline")
+                        result = .failed("The proxy location could not be verified. Dark Search stays offline")
                     } else {
                         result = .reached(ms: ms, address: seen.address, place: seen.place)
                     }
@@ -711,7 +711,7 @@ final class Proxy: ObservableObject {
             let stopped = await contentTransition?.value ?? true
             guard !Task.isCancelled, revision == acceptingRevision else { return }
             guard stopped || !setup.persistent else {
-                connectionFailed("Search could not stop the previous browser processes. Restart Search to reconnect")
+                connectionFailed("Dark Search could not stop the previous browser processes. Restart Dark Search to reconnect")
                 return
             }
             place = spot ?? address
@@ -791,10 +791,10 @@ final class Proxy: ObservableObject {
         contentTransition = nil
         if #available(macOS 15.4, *), !Store.testing, !Extensions.shared.proxyChanged() {
             if setup.persistent {
-                connectionFailed("Search could not restart extensions safely. Restart Search to reconnect")
+                connectionFailed("Dark Search could not restart extensions safely. Restart Dark Search to reconnect")
                 return
             }
-            check = .failed("Some extensions could not restart. Restart Search to use them again")
+            check = .failed("Some extensions could not restart. Restart Dark Search to use them again")
         }
         for tab in Tab.proxyTabs.allObjects { tab.resumeAfterProxy() }
         NotificationCenter.default.post(name: Proxy.contentChanged, object: nil)
@@ -812,7 +812,7 @@ final class Proxy: ObservableObject {
                     return
                 }
                 guard stopped else {
-                    self.connectionFailed("Search could not stop the previous browser processes. Restart Search to reconnect")
+                    self.connectionFailed("Dark Search could not stop the previous browser processes. Restart Dark Search to reconnect")
                     return
                 }
                 self.automaticCheck()
@@ -984,7 +984,7 @@ final class Proxy: ObservableObject {
 
     /// What a page says over itself while the proxy is down, in place of
     /// "The site refused the connection".
-    static let droppedMessage = "The proxy isn't answering. Search tries it again every 15 seconds."
+    static let droppedMessage = "The proxy isn't answering. Dark Search tries it again every 15 seconds."
     static let refusedMessage = "The proxy didn't accept the name or password. See Settings › Proxy."
 
     private func startProbe() {
@@ -1233,7 +1233,7 @@ enum ProxyPassword {
                     if [errSecInteractionNotAllowed, errSecAuthFailed, errSecUserCanceled].contains(status) {
                         return interactive == nil
                             ? "Poke to allow access to the saved proxy password"
-                            : "Access to the saved proxy password wasn't allowed. Save it again or restart Search to retry"
+                            : "Access to the saved proxy password wasn't allowed. Save it again or restart Dark Search to retry"
                     }
                     return "The saved proxy password couldn't be read. Save it again"
                 case .pending:
