@@ -828,6 +828,9 @@ struct SettingsPanel: View {
     private func keptControl(_ id: String) -> some View {
         switch id {
         case "passwords.open": Pill("Open") { browser.lead(to: InternalPage(.passwords)) }
+        case "vault.lock": Segmented(options: VaultLockAfter.allCases.map { ($0, $0.title) }, selection: $prefs.vaultLockAfter)
+        case "vault.hidden": Switch(on: $prefs.vaultLocksWhenHidden)
+        case "vault.each": Switch(on: $prefs.vaultAsksEach)
         case "passwords.save": Switch(on: $prefs.savesPasswords)
         case "passwords.fill": Switch(on: $prefs.fillsPasswords)
         case "passkeys": Switch(on: $prefs.passkeys)

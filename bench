@@ -100,6 +100,9 @@
     ./bench import-file-cancel       test run: request cancellation of the current file import
     ./bench remove-folder TITLE        test run: the bookmarks list's Remove on a top-level folder, its question left up
     ./bench passwords [TEXT] [remove]  test run: the passwords list, narrowed to TEXT; remove: its Remove All… / Remove N… (ui confirm on|off answers it, Touch ID included)
+    ./bench passwords KEY=VALUE…       test run: the page's states — section=all|logins|notes|checkup|recent, pick=HOST user=NAME,
+                                       note=TITLE, change=on (the generator), add=login|note, check=on (the checkup, every
+                                       secret read here), keepnote=TITLE text=…, unlock=on (as ui confirm answers), lock=on
     ./bench menu [open]                test run: the Bookmarks menu as it is about to open, and its first
                                        folder (open: its first bookmark picked)
     ./bench marks                      test run: each bookmark on the bar (its size), in the bar's folders'
@@ -471,6 +474,12 @@ def main(argv):
     elif verb == "passwords":
         for a in args:
             if a == "remove": request["remove"] = True
+            elif "=" in a:
+                # The page's states (Bench.swift): section=checkup, pick=HOST user=NAME,
+                # note=TITLE, change=on, add=login|note, check=on, keepnote=TITLE text=…,
+                # unlock=on, lock=on, shown=on, filter=TEXT.
+                key, value = a.split("=", 1)
+                request[key] = value in ("on", "true", "1", "yes") if key in ("check", "change", "unlock", "lock", "shown") else value
             else: request["filter"] = a
     elif verb in ("import-file-status", "import-file-cancel"):
         if args: sys.exit(f"usage: bench {verb}")

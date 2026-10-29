@@ -1593,6 +1593,34 @@ final class Bench {
             // "shown": the list as the page holds it now, not read again,
             // so a route to the page that never read it shows as empty.
             if request["shown"] as? Bool != true { browser.relist() }
+            // The page itself, for a look at each of its states: a section,
+            // an account or a note picked, the generator or the add form up,
+            // the checkup run (every secret read, here), a note kept, and
+            // the lock opened (answered as `ui confirm` says) or closed.
+            let page = browser.passwordsPage
+            if let name = request["section"] as? String, let section = PasswordsPanel.Section(rawValue: name) {
+                page.section = section
+                page.picked = nil
+                page.changing = false
+            }
+            if let host = request["pick"] as? String {
+                let user = request["user"] as? String ?? ""
+                if let kept = browser.saved.first(where: { $0.host == host && $0.user == user }) {
+                    page.open = host
+                    page.picked = .login(kept)
+                }
+            }
+            if let title = request["note"] as? String, let note = browser.notes.first(where: { $0.title == title }) {
+                page.picked = .note(note)
+            }
+            if let on = request["change"] as? Bool { page.changing = on }
+            if let kind = request["add"] as? String {
+                page.adding = kind == "login" ? .login : kind == "note" ? .note : nil
+            }
+            if request["check"] as? Bool == true { page.checkup = Vault.checkup(browser.saved) }
+            if let title = request["keepnote"] as? String { browser.keepNote(title: title, text: request["text"] as? String ?? "") }
+            if request["unlock"] as? Bool == true { VaultLock.shared.unlock() }
+            if request["lock"] as? Bool == true { VaultLock.shared.lock() }
             if request["remove"] as? Bool == true { browser.forgetShown() }
             // Answered once the removals, off the main thread, are done.
             func settled() {
@@ -1601,6 +1629,14 @@ final class Bench {
                     return
                 }
                 answer(["count": browser.saved.count, "shown": browser.shownSites.reduce(0) { $0 + $1.logins.count },
+                        "notes": browser.notes.count, "locked": !VaultLock.shared.open, "section": page.section.rawValue,
+                        "picked": { () -> String in
+                            switch page.picked {
+                            case .login(let kept): return "\(kept.host) \(kept.user)"
+                            case .note(let note): return "note \(note.title)"
+                            case nil: return ""
+                            }
+                        }(), "open": page.open ?? "", "changing": page.changing,
                         "announced": browser.announcement ?? ""])
             }
             settled()

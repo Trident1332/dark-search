@@ -21,8 +21,47 @@ struct Login: Identifiable, Equatable, Hashable {
     /// written down, is never handed to a page anyone on the way could have
     /// written.
     var clear = false
+    /// What was written beside it on the Passwords page, encrypted with it
+    /// (see `Secret`). Empty for most.
+    var notes = ""
 
     var id: String { host + "\u{1}" + user }
+}
+
+/// What an item's data holds: the password alone, as every item written
+/// before there were notes was, or the password with a note beside it. The
+/// second starts with a byte no password can hold, so neither is ever read
+/// as the other. Both are one encrypted value to the keychain; a note is
+/// never an attribute, which the keychain keeps in the clear.
+struct Secret: Equatable {
+    var password: String
+    var notes = ""
+
+    private static let mark = Data([0]) + Data("SV1".utf8)
+
+    init(password: String, notes: String = "") {
+        self.password = password
+        self.notes = notes
+    }
+
+    init?(_ data: Data) {
+        guard data.starts(with: Secret.mark) else {
+            guard let text = String(data: data, encoding: .utf8) else { return nil }
+            password = text
+            return
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data.dropFirst(Secret.mark.count)) as? [String: String],
+              let password = object["p"]
+        else { return nil }
+        self.password = password
+        notes = object["n"] ?? ""
+    }
+
+    var packed: Data? {
+        guard !notes.isEmpty else { return password.data(using: .utf8) }
+        guard let json = try? JSONSerialization.data(withJSONObject: ["p": password, "n": notes]) else { return nil }
+        return Secret.mark + json
+    }
 }
 
 /// One item as a list needs it: the site, the account, and when it was last
@@ -38,6 +77,8 @@ struct Kept: Identifiable, Equatable, Hashable {
     var used: Date?
     /// Kept from a page sent in the clear, over plain http. See `Login`.
     var clear = false
+    /// When it went into the keychain, by the keychain's own clock.
+    var since: Date?
 
     var id: String { host + "\u{1}" + user }
 }
@@ -120,8 +161,9 @@ enum Vault {
         return rows
     }
 
-    /// One item's secret, by the two things that name it.
-    private static func secret(host: String, user: String) -> String? {
+    /// One item's data, by the two things that name it: the password, and
+    /// the note beside it if there is one.
+    private static func read(host: String, user: String) -> Secret? {
         var out: CFTypeRef?
         let status = SecItemCopyMatching([
             kSecClass as String: kSecClassInternetPassword,
@@ -135,12 +177,18 @@ enum Vault {
             if status != errSecItemNotFound { NSLog("Vault: keychain read failed (%d)", status) }
             return nil
         }
-        return String(data: data, encoding: .utf8)
+        return Secret(data)
     }
+
+    /// One item's secret, by the two things that name it.
+    private static func secret(host: String, user: String) -> String? { read(host: host, user: user)?.password }
 
     /// One item's secret, where a list holds only the item: read when a
     /// password is shown or copied, and never as part of a list.
     static func secret(of kept: Kept) -> String? { secret(host: kept.host, user: kept.user) }
+
+    /// The password and the note beside it, for the page that shows both.
+    static func details(of kept: Kept) -> Secret? { read(host: kept.host, user: kept.user) }
 
     /// What an item's attributes say beyond its name: when it was last used,
     /// and whether it was kept from a page sent in the clear.
@@ -156,8 +204,8 @@ enum Vault {
     /// filling a sign-in in, and telling whether one is already kept. One
     /// keychain read, for the one account picked.
     static func login(_ kept: Kept) -> Login? {
-        guard let password = secret(of: kept) else { return nil }
-        return Login(host: kept.host, user: kept.user, password: password, used: kept.used, clear: kept.clear)
+        guard let secret = details(of: kept) else { return nil }
+        return Login(host: kept.host, user: kept.user, password: secret.password, used: kept.used, clear: kept.clear, notes: secret.notes)
     }
 
     /// The account an item is kept under. A sign-in with a password box
@@ -174,16 +222,18 @@ enum Vault {
         guard let host = row[kSecAttrServer as String] as? String else { return nil }
         let user = account(of: row)
         let (used, clear) = noted(row)
-        return Kept(host: host, user: user, used: used, clear: clear)
+        return Kept(host: host, user: user, used: used, clear: clear, since: row[kSecAttrCreationDate as String] as? Date)
     }
 
     // MARK: - writing
 
+    /// `notes`: what goes beside the password, or nil to leave what is there
+    /// — a sign-in that updates the password keeps the note written for it.
     @discardableResult
-    static func save(host: String, user: String, password: String, used: Date? = nil, clear: Bool = false) -> Bool {
-        guard !host.isEmpty, !password.isEmpty,
-              let data = password.data(using: .utf8)
-        else { return false }
+    static func save(host: String, user: String, password: String, used: Date? = nil, clear: Bool = false, notes: String? = nil) -> Bool {
+        guard !host.isEmpty, !password.isEmpty else { return false }
+        let kept = notes ?? (read(host: host, user: user)?.notes ?? "")
+        guard let data = Secret(password: password, notes: kept).packed else { return false }
 
         // Ours only. Server and account alone also match what other apps
         // keep for the same site — git's token for github.com under your
@@ -216,7 +266,7 @@ enum Vault {
 
     /// It was just used to sign in. Lists put it first from now on.
     static func touch(_ login: Login) {
-        save(host: login.host, user: login.user, password: login.password, used: Date(), clear: login.clear)
+        save(host: login.host, user: login.user, password: login.password, used: Date(), clear: login.clear, notes: login.notes)
     }
 
     /// Whether the keychain let it go: Remove All… counts only those.
@@ -256,8 +306,9 @@ enum Vault {
         var trouble: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &trouble) else {
             // No way to ask at all — a Mac with no password set. Then there is
-            // nothing to prove.
-            done(true)
+            // nothing to prove. Any other reason it can't ask is a no: a lock
+            // that opened because the question couldn't be put was no lock.
+            done((trouble as? LAError)?.code == .passcodeNotSet)
             return
         }
         context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, _ in
