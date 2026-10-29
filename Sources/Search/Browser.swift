@@ -189,6 +189,8 @@ final class Browser: NSObject, ObservableObject {
     }
     /// The dropdown off the button.
     @Published var bookmarksOpen = false
+    /// The browser's menu is open, off the three dots (BrowserMenu.swift).
+    @Published var menuShown = false
     /// What hangs off the button instead of the list: the card for one
     /// bookmark, its name and folder, as ⇧⌘B opens it.
     @Published var bookmarkCard: Bookmark.ID?
@@ -1726,6 +1728,29 @@ final class Browser: NSObject, ObservableObject {
         guard let home = tab.home, !Browser.samePage(home, tab.address) else { return editLetter(tab) }
         tab.go(to: home)
         rememberSession()
+    }
+
+    /// The home button in the address bar. A pin goes back to the page it
+    /// was pinned at, as its double-click does. Any other tab opens what a
+    /// new tab opens to (Settings › Browsing › Home page): an extension's
+    /// page, in this tab, or a new tab of Search's own.
+    func goHome() {
+        if let tab = active, tab.pin != nil, let home = tab.home {
+            guard !Browser.samePage(home, tab.address) else { return }
+            tab.go(to: home)
+            rememberSession()
+            return
+        }
+        if #available(macOS 15.4, *), let tab = active, tab.isWeb, !tab.shy, let page = Extensions.shared.newTabPage {
+            tab.go(to: page)
+            return
+        }
+        launch()
+    }
+
+    /// The window fills the screen, or comes back from it: the menu's Zoom row.
+    func toggleFullScreen() {
+        (window ?? NSApp.keyWindow)?.toggleFullScreen(nil)
     }
 
     /// The same page, give or take a trailing slash.

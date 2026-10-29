@@ -872,7 +872,8 @@ struct SideBar: View {
 /// the column took its width, and centred in its own frame it slid half the
 /// overflow off each side (#535). The space's door, the puzzle, bookmarks and
 /// downloads stay put; the pinned extensions that don't fit give way, from
-/// the last, and are still in the puzzle's list.
+/// the last, and are still in the puzzle's list. The menu's three dots
+/// stand after the bookmarks, as they do in the address bar (AddressBar.swift).
 private struct SideFoot: View {
     @ObservedObject var browser: Browser
     @ObservedObject var prefs: Preferences
@@ -887,6 +888,7 @@ private struct SideFoot: View {
                 FetchDoor(browser: browser, fetches: fetches)
                 ExtensionSlot(edge: prefs.sidePosition == .right ? .leading : .trailing, room: 0)
                 BookmarkDoor(browser: browser, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing)
+                MenuDoor(browser: browser, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing)
                 if prefs.usesSpaces { SpaceDot(browser: browser) }
                 if Profiles.shared.several { ProfileBadge(browser: browser) }
             }
@@ -898,6 +900,7 @@ private struct SideFoot: View {
                 if prefs.usesSpaces { SpaceDot(browser: browser) }
                 ExtensionSlot(edge: .trailing, room: room)
                 BookmarkDoor(browser: browser, arrowEdge: .trailing)
+                MenuDoor(browser: browser, arrowEdge: .trailing)
                 // Only while a download is running, and a moment after.
                 FetchDoor(browser: browser, fetches: fetches)
                 Spacer(minLength: 0)
@@ -909,7 +912,7 @@ private struct SideFoot: View {
 
     /// How many doors the foot has, stacked: what the rows stop short of.
     @MainActor static func doors(_ prefs: Preferences, _ fetches: Fetches) -> Int {
-        var kept = 2  // the puzzle and bookmarks
+        var kept = 3  // the puzzle, bookmarks and the menu
         if prefs.usesSpaces { kept += 1 }
         if Profiles.shared.several { kept += 1 }
         if FetchDoor.shows(fetches, prefs) { kept += 1 }
@@ -920,7 +923,7 @@ private struct SideFoot: View {
     /// is 26 points, with 2 between them.
     private var room: Int {
         let door: CGFloat = 26 + 2
-        var kept = 2  // the puzzle and bookmarks
+        var kept = 3  // the puzzle, bookmarks and the menu
         if prefs.usesSpaces { kept += 1 }
         if Profiles.shared.several { kept += 1 }
         if FetchDoor.shows(fetches, prefs) { kept += 1 }
@@ -1387,6 +1390,9 @@ struct Speaker: View {
 struct Door: View {
     @Environment(\.greys) private var greys
     let icon: String
+    /// Drawn a quarter turn round: the menu's three dots stand on end, as
+    /// Chrome's do, and SF Symbols has them lying down.
+    var turned = false
     var on = false
     var help = ""
     /// What holding the button down opens, as Back and Forward list the
@@ -1405,6 +1411,7 @@ struct Door: View {
         } label: {
             Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
+                .rotationEffect(.degrees(turned ? 90 : 0))
                 .foregroundStyle(on ? Palette.ink : (hovering ? Palette.ink.opacity(0.7) : Palette.muted))
                 .frame(width: 26, height: 26)
                 .background(

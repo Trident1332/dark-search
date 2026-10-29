@@ -3192,6 +3192,26 @@ final class Bench {
                 window.contentView = nil
             }
 
+        case "dots":
+            // The browser's menu, what the three dots open (BrowserMenu.swift),
+            // drawn off screen as the strip is, at its own size.
+            guard let path = request["path"] as? String else { answer(["error": "dots needs a path"]); return }
+            let host = NSHostingView(rootView: BrowserMenu(browser: browser).fixedSize())
+            host.frame = NSRect(origin: .zero, size: host.fittingSize)
+            let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
+            window.appearance = NSApp.effectiveAppearance
+            window.contentView = host
+            host.layoutSubtreeIfNeeded()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                guard let picture = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { answer(["error": "nothing drawn"]); return }
+                host.cacheDisplay(in: host.bounds, to: picture)
+                do {
+                    try picture.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                    answer(["saved": path, "points": [Int(host.bounds.width), Int(host.bounds.height)]])
+                } catch { answer(["error": error.localizedDescription]) }
+                window.contentView = nil
+            }
+
         case "pdf":
             // The page on screen as File › Export as PDF… makes it, without
             // a save panel. A test path only: a real browser never lets the
@@ -4301,7 +4321,8 @@ final class Bench {
             // it says it now: the setting on, the tab you're on, not edited
             // (see AtRest.swift).
             "atRest": AtRest.of(tab.restAddress, tor: tab.usesTor)?.text ?? "",
-            "atRestShown": browser.map { tab.id == $0.activeID && $0.editingTab != tab.id && AtRest.said(tab.restAddress, always: $0.prefs.showsAddress, tor: tab.usesTor) != nil } ?? false,
+            // Only in the column: across the top the address bar says it.
+            "atRestShown": browser.map { $0.prefs.sidebar && tab.id == $0.activeID && $0.editingTab != tab.id && AtRest.said(tab.restAddress, always: $0.prefs.showsAddress, tor: tab.usesTor) != nil } ?? false,
             "asleep": tab.asleep,
             "shy": tab.shy,
             "noisy": tab.noisy,

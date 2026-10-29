@@ -61,7 +61,7 @@ extension Browser {
         guard let window, page.window === window else { return false }
         if let peek = peekTab, peek.built !== page { return true }
         guard folded, peeking, active?.immersed != true, let size = window.contentView?.bounds.size else { return false }
-        if !prefs.sidebar { return point.y >= size.height - Metrics.strip }
+        if !prefs.sidebar { return point.y >= size.height - Metrics.strip - Metrics.bar }
         return prefs.sidePosition == .right ? point.x >= size.width - prefs.columnWidth : point.x <= prefs.columnWidth
     }
 }
@@ -128,10 +128,13 @@ struct Fold: View {
                 // as the column does, or the page showed through between the
                 // tabs, and the shadow fell from every title and icon rather
                 // than from the row's edge.
-                TabBar(browser: browser)
-                    .modifier(FoldShadow(y: 4, behind: true, strength: browser.peeking ? 1 : 0))
-                    .offset(y: browser.peeking ? 0 : -Metrics.strip)
-                    .allowsHitTesting(browser.peeking)
+                VStack(spacing: 0) {
+                    TabBar(browser: browser)
+                    AddressBar(browser: browser)
+                }
+                .modifier(FoldShadow(y: 4, behind: true, strength: browser.peeking ? 1 : 0))
+                .offset(y: browser.peeking ? 0 : -(Metrics.strip + Metrics.bar))
+                .allowsHitTesting(browser.peeking)
             }
             ZStack(alignment: onRight ? .trailing : .leading) {
                 Color.clear.frame(width: 0)
@@ -308,7 +311,7 @@ struct Fold: View {
             let top = NSWindow.windowNumber(at: screen, belowWindowWithWindowNumber: 0)
             let onWindow = top == window.windowNumber
             let onOwnPanel = !onWindow && NSApp.windows.contains { $0.windowNumber == top }
-            let reach = prefs.sidebar ? prefs.columnWidth : Metrics.strip
+            let reach = prefs.sidebar ? prefs.columnWidth : Metrics.strip + Metrics.bar
             // An extension's popup hangs from its button in the column: the
             // column stays out while it is up, or the popup is left hanging
             // from nothing (see ExtensionPopup).

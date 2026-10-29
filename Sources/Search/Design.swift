@@ -155,6 +155,10 @@ enum Metrics {
     /// to breathe just leaves it sitting below three buttons it used to line
     /// up with.
     static let strip: CGFloat = 52
+    /// The row under the strip, with the tabs across the top: back, forward,
+    /// reload and home, the address, the bookmark and the menu
+    /// (see AddressBar.swift). The page starts under both.
+    static let bar: CGFloat = 44
     /// With the tabs down the side the page is a card: this far from the
     /// window's edges (and from the column, folded away), and its corners
     /// this round.

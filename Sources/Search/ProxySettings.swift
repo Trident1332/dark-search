@@ -9,9 +9,10 @@ import SwiftUI
 // MARK: - the mark beside the address
 
 /// Beside the address of the tab you are on, while its pages take the
-/// route: a green lock once the proxy is reached, with where sites see
-/// you on hover; the network mark until then; amber while the proxy
-/// isn't answering. A click opens Settings › Proxy.
+/// route: the flat flag of where sites see you from once the proxy is
+/// reached (Flag.swift), a green lock while the place isn't known, with
+/// where sites see you on hover; the network mark until then; amber while
+/// the proxy isn't answering. A click opens Settings › Proxy.
 struct ProxySign: View {
     @ObservedObject var browser: Browser
     @ObservedObject var tab: Tab
@@ -48,6 +49,8 @@ struct ProxySign: View {
                     if tab.usesTor {
                         Text("Tor").font(.system(size: 9, weight: .medium))
                     } else if connected {
+                    } else if connected, let code = proxy.countryCode {
+                        FlatFlag(code: code, width: 15)
                         Image(systemName: "lock.fill")
                             .font(.system(size: 9.5, weight: .medium))
                     } else {

@@ -22,10 +22,6 @@ struct TabBar: View {
     @State private var nearby = false
     @State private var plussed = false
     @State private var carrying = false
-    /// The helm's width when it stands before the tabs rather than after them.
-    private var leading: CGFloat { browser.prefs.navigationLeft ? Metrics.helm - 8 + Metrics.tabGap : 0 }
-    /// How wide the doors at the far end are, extension buttons included.
-    @State private var doors: CGFloat = 0
 
     var body: some View {
         // A GeometryReader is only here to measure the width. Its content is
@@ -37,15 +33,13 @@ struct TabBar: View {
             ZStack(alignment: .leading) {
                 // The empty half of the strip is what you grab to move the
                 // window; the tabs keep the run they sit on.
-                DragStrip(reserved: lights + dot + leading + (making ? min(540, room(in: geo.size.width)) : run(in: geo.size.width)) + Metrics.tabGap + Metrics.plusWidth, trailing: doors + 12, onDoubleClick: browser.newTab)
+                DragStrip(reserved: lights + dot + (making ? min(540, room(in: geo.size.width)) : run(in: geo.size.width)) + Metrics.tabGap + Metrics.plusWidth, trailing: 12, onDoubleClick: browser.newTab)
                 // And the corner the lights sit in, which is title bar too —
                 // the one stretch left to take hold of when tabs fill the row.
                 DragStrip()
                     .frame(width: lights)
 
                 HStack(spacing: Metrics.tabGap) {
-                    // Back, forward and reload by the lights, when asked.
-                    if browser.prefs.navigationLeft { Helm(browser: browser) }
                     // The space on screen, first, when there are spaces.
                     // Above the tabs, for the name it shows over them a moment
                     // after a switch.
@@ -164,25 +158,9 @@ struct TabBar: View {
                     .animation(Motion.settle, value: nearby)
 
                     Spacer(minLength: 0)
-
-                    // Back, forward, reload, and the bookmarks, at the far end
-                    // of the row. The dropdown hangs from the last one.
-                    HStack(spacing: Metrics.tabGap) {
-                        // Only while a download is running, and a moment after.
-                        FetchDoor(browser: browser, fetches: browser.fetches)
-                        ExtensionSlot()
-                        if !browser.prefs.navigationLeft {
-                            Helm(browser: browser).padding(.trailing, 8)
-                        }
-                        BookmarkDoor(browser: browser, arrowEdge: .bottom)
-                    }
-                    .background {
-                        GeometryReader { box in
-                            Color.clear
-                                .onAppear { doors = box.size.width }
-                                .onChange(of: box.size.width) { _, width in doors = width }
-                        }
-                    }
+                    // Back, forward, reload, the bookmarks and the rest stood
+                    // at the far end of the row once; they are in the address
+                    // bar under it now (see AddressBar.swift).
                 }
                 // The traffic lights are the system's. The row starts after
                 // them and stays there — nothing here moves to get out of
@@ -323,7 +301,7 @@ struct TabBar: View {
         let itemWidth = isPairRepresentative ? splitItemWidth(base: each) : each
         let step = (tab.pin != nil ? Metrics.pinWidth : itemWidth) + Metrics.tabGap
         return rowItem(tab, in: browser.tabs, splits: browser.splits, activeID: browser.activeID,
-                       width: each, room: strip - lights - leading - 12,
+                       width: each, room: strip - lights - 12,
                        height: Metrics.strip, interactive: true, pill: pill)
             .background {
                 if browser.prefs.splitView && !isPairRepresentative {
@@ -434,18 +412,15 @@ struct TabBar: View {
         if let id = browser.editingTab, let tab = browser.tabs.first(where: { $0.id == id }) {
             let splitWidth = browser.prefs.splitView ? browser.split(for: tab).map { _ in splitItemWidth(base: each) } : nil
             let oldWidth = splitWidth ?? (tab.pin != nil ? Metrics.pinWidth : each)
-            total += min(340, strip - lights - leading - 12) - oldWidth
+            total += min(340, strip - lights - 12) - oldWidth
         }
         return total
     }
 
-    /// The strip, less the lights, the helm when it leads, the plus, the
-    /// doors at the far end and the air around them. The doors are measured;
-    /// until they have been, the helm and the bookmarks stand in for them —
-    /// unless the helm leads, when nothing at the far end may be a real zero.
+    /// The strip, less the lights, the plus and the air around them. Nothing
+    /// stands at the far end: the doors are in the address bar under the row.
     private func room(in strip: CGFloat) -> CGFloat {
-        let far = doors > 0 || browser.prefs.navigationLeft ? doors : Metrics.helm + 26
-        return max(0, strip - lights - dot - leading - 12 - Metrics.plusWidth - far - 3 * Metrics.tabGap)
+        max(0, strip - lights - dot - 12 - Metrics.plusWidth - 3 * Metrics.tabGap)
     }
 
     /// What the space's dot takes before the tabs, when there are spaces.
@@ -666,9 +641,12 @@ private struct TabPill: View {
     /// A speaker to press at the end of the pill: the page plays sound, or
     /// was muted. The ring, while the page is still coming, goes first.
     private var speaker: Bool { !editing && !tab.loading && (tab.noisy || tab.muted) }
-    /// Where the page is, said on the tab you're on (Settings › Tabs › Show
-    /// the address on the tab you're on).
-    private var rest: AtRest? { live && !editing ? AtRest.said(tab.restAddress, always: prefs.showsAddress, tor: tab.usesTor) : nil }
+    /// Across the top the tab says its title, as Chrome's do: the address
+    /// bar under the row says where the page is and what warns about it
+    /// (AddressBar.swift). The column, with no bar, still says the address
+    /// on the tab you're on (Settings › Tabs › Show the address on the tab
+    /// you're on; see Side.swift).
+    private var rest: AtRest? { nil }
     private var atRest: Bool { rest != nil }
 
     /// A pinned tab is a square, an edited one is a field, everything else is
