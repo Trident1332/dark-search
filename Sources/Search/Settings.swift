@@ -509,13 +509,14 @@ struct SettingsPanel: View {
     private func row(_ item: SettingsItem) -> some View {
         let counts = SettingsIndex.applies(item, prefs)
         return SettingRow(
-            icon: icon(of: item),
+            icon: item.icon,
             title: title(of: item),
             detail: counts ? detail(of: item) : SettingsIndex.needs(item),
             more: counts ? item.more : nil,
             wide: item.kind == .wide,
             lit: lit == item.id,
-            tint: tint(of: item)
+            tint: tint(of: item),
+            globe: globe(of: item)
         ) {
             control(item)
         }
@@ -570,16 +571,17 @@ struct SettingsPanel: View {
         }
     }
 
-    /// Settings › Proxy › Status wears how the connection is: a tick once
-    /// reached, a mark when it failed, dots while nothing is known.
-    private func icon(of item: SettingsItem) -> String {
-        guard item.id == "proxy.test" else { return item.icon }
-        if proxy.refused || proxy.dropped { return "exclamationmark.circle.fill" }
+    /// Settings › Proxy › Status wears a wireframe globe that turns while the
+    /// proxy is being reached, keeps slowly turning while it is connected,
+    /// and stands still before a test or after a failure; its colour says
+    /// which (tint(of:)).
+    private func globe(of item: SettingsItem) -> WireGlobe.Pace? {
+        guard item.id == "proxy.test" else { return nil }
+        if proxy.refused || proxy.dropped { return .still }
         switch proxy.check {
-        case .untried: return item.icon
-        case .testing: return "ellipsis.circle"
-        case .reached: return "checkmark.circle.fill"
-        case .failed: return "exclamationmark.circle.fill"
+        case .untried, .failed: return .still
+        case .testing: return .fast
+        case .reached: return .slow
         }
     }
 
@@ -592,10 +594,10 @@ struct SettingsPanel: View {
             }
         }
         guard item.id == "proxy.test" else { return nil }
-        if proxy.refused || proxy.dropped { return Palette.unsafe }
+        if proxy.refused || proxy.dropped { return Palette.failed }
         switch proxy.check {
         case .reached: return Palette.safe
-        case .failed: return Palette.unsafe
+        case .failed: return Palette.failed
         case .untried, .testing: return nil
         }
     }
@@ -1388,6 +1390,8 @@ struct SettingRow<Control: View>: View {
     /// The icon's colour when it says how something is (Palette.safe,
     /// Palette.unsafe); ink otherwise.
     var tint: Color? = nil
+    /// A turning wireframe globe in place of the symbol (Proxy › Status).
+    var globe: WireGlobe.Pace? = nil
     @ViewBuilder let control: () -> Control
 
     @State private var open = false
@@ -1395,13 +1399,19 @@ struct SettingRow<Control: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(tint ?? Palette.ink.opacity(0.78))
-                    .frame(width: 26, height: 26)
-                    .background(Palette.wash, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .contentTransition(.symbolEffect(.replace))
-                    .animation(Motion.settle, value: icon)
+                Group {
+                    if let globe {
+                        WireGlobe(pace: globe, tint: tint ?? Palette.ink.opacity(0.78))
+                    } else {
+                        Image(systemName: icon)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(tint ?? Palette.ink.opacity(0.78))
+                            .contentTransition(.symbolEffect(.replace))
+                            .animation(Motion.settle, value: icon)
+                    }
+                }
+                .frame(width: 26, height: 26)
+                .background(Palette.wash, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 5) {
                         Text(title)

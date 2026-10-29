@@ -38,6 +38,9 @@ enum Palette {
     /// way, and one anybody can (see SiteCard.swift).
     static let safe = Color(nsColor: NS.safe)           // green-700 · green-400
     static let unsafe = Color(nsColor: NS.unsafe)       // amber-700 · amber-400
+    /// And one for a thing that has failed outright, which amber would
+    /// understate: the proxy Status globe after a test fails.
+    static let failed = Color(nsColor: NS.failed)       // red-700 · red-400
 
     /// The same colours for the AppKit corners of the app — a text field's
     /// ink, a window's background — which want an NSColor and keep it.
@@ -59,6 +62,7 @@ enum Palette {
         static let resting = pair(0.80, 0.30)
         static let safe = tint(light: (0.08, 0.50, 0.24), dark: (0.29, 0.87, 0.50))
         static let unsafe = tint(light: (0.71, 0.33, 0.04), dark: (0.98, 0.75, 0.14))
+        static let failed = tint(light: (0.73, 0.11, 0.11), dark: (0.97, 0.44, 0.44))
 
         private static func tint(light: (CGFloat, CGFloat, CGFloat), dark: (CGFloat, CGFloat, CGFloat)) -> NSColor {
             NSColor(name: nil) { appearance in

@@ -364,7 +364,7 @@ enum SettingsIndex {
         .init(id: "proxy.signIn", group: "proxy", icon: "person.badge.key",
               title: "Requires a password", detail: "Kept in your keychain, never in the settings file",
               keys: ["proxy.signsIn", "proxy.user"], words: ["password", "username", "authentication", "keychain"], parent: "proxy.on"),
-        .init(id: "proxy.test", group: "connection", icon: "circle.dotted",
+        .init(id: "proxy.test", group: "connection", icon: "globe",
               title: "Status", detail: "Not tested yet",
               more: "Poke sends a request through the proxy to ipinfo.io, which answers with the address it saw and where that address is. Persistent connection also checks automatically when Search starts and while recovering a connection. Matching the proxy time zone checks on launch too.",
               words: ["poke", "test", "location", "country", "city", "where", "connected"], parent: "proxy.on"),
