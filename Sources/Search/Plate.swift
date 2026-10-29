@@ -12,6 +12,9 @@ struct Plate<Content: View, Foot: View>: View {
     let title: String
     var width: CGFloat = 560
     let close: () -> Void
+    /// What sits at the title's right, when something does: the Passwords
+    /// page's lock and its clock.
+    var aside: AnyView? = nil
     @ViewBuilder let content: () -> Content
     @ViewBuilder let foot: () -> Foot
 
@@ -19,12 +22,14 @@ struct Plate<Content: View, Foot: View>: View {
         _ title: String,
         width: CGFloat = 560,
         close: @escaping () -> Void,
+        aside: AnyView? = nil,
         @ViewBuilder content: @escaping () -> Content,
         @ViewBuilder foot: @escaping () -> Foot
     ) {
         self.title = title
         self.width = width
         self.close = close
+        self.aside = aside
         self.content = content
         self.foot = foot
     }
@@ -40,11 +45,17 @@ struct Plate<Content: View, Foot: View>: View {
     /// card, no shadow, no cross — the tab is what closes.
     private var page: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(title)
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(Palette.ink)
-                .padding(.top, 44)
-                .padding(.bottom, 20)
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(title)
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                if let aside {
+                    Spacer(minLength: 0)
+                    aside
+                }
+            }
+            .padding(.top, 44)
+            .padding(.bottom, 20)
 
             content()
 
@@ -68,6 +79,7 @@ struct Plate<Content: View, Foot: View>: View {
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                 Spacer(minLength: 0)
+                if let aside { aside }
                 Door(icon: "xmark", help: "Done   esc", act: close)
             }
             .padding(.horizontal, 22)
@@ -103,9 +115,10 @@ extension Plate where Foot == EmptyView {
         _ title: String,
         width: CGFloat = 560,
         close: @escaping () -> Void,
+        aside: AnyView? = nil,
         @ViewBuilder content: @escaping () -> Content
     ) {
-        self.init(title, width: width, close: close, content: content, foot: { EmptyView() })
+        self.init(title, width: width, close: close, aside: aside, content: content, foot: { EmptyView() })
     }
 }
 

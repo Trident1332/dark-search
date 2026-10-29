@@ -1117,6 +1117,8 @@ final class Browser: NSObject, ObservableObject {
     /// The list, without secrets: see `Kept` and `Vault.all()`.
     @Published private(set) var saved: [Kept] = []
     @Published var hunting = ""
+    /// What the page shows of it (see PasswordsPage).
+    let passwordsPage = PasswordsPage()
     /// A Remove All… under way, off the main thread (see `forgetShown`).
     @Published private(set) var forgetting = false
 
@@ -1137,10 +1139,23 @@ final class Browser: NSObject, ObservableObject {
         }
     }
 
-    func relist() { saved = Vault.all() }
+    /// The notes beside the passwords (VaultNotes.swift), without their
+    /// text, as `saved` is without its secrets.
+    @Published private(set) var notes: [Note] = []
 
-    func keep(host: String, user: String, password: String) {
-        guard Vault.save(host: host, user: user, password: password) else {
+    func relist() {
+        saved = Vault.all()
+        notes = Vault.notes()
+    }
+
+    /// The notes the page's search leaves, by title.
+    var shownNotes: [Note] {
+        let needle = hunting.trimmingCharacters(in: .whitespaces).lowercased()
+        return needle.isEmpty ? notes : notes.filter { $0.title.lowercased().contains(needle) }
+    }
+
+    func keep(host: String, user: String, password: String, notes: String? = nil) {
+        guard Vault.save(host: host, user: user, password: password, notes: notes) else {
             announce("The keychain refused it")
             return
         }
@@ -1151,6 +1166,48 @@ final class Browser: NSObject, ObservableObject {
     func forget(_ login: Kept) {
         Vault.forget(host: login.host, user: login.user)
         relist()
+    }
+
+    /// A new password for an account, made on the page (Vault.generate) or
+    /// typed. The site isn't told: change it there first, or next.
+    func change(_ login: Kept, to password: String, notes: String? = nil) {
+        guard Vault.save(host: login.host, user: login.user, password: password, used: login.used, clear: login.clear, notes: notes) else {
+            announce("The keychain refused it")
+            return
+        }
+        relist()
+        announce(notes == nil ? "Password for \(login.host) changed here — change it on the site too" : "Saved")
+    }
+
+    /// A note written or changed on the page. Answers its id.
+    @discardableResult
+    func keepNote(_ id: String? = nil, title: String, text: String) -> String? {
+        guard let id = Vault.saveNote(id, title: title, text: text) else {
+            announce("The keychain refused it")
+            return nil
+        }
+        relist()
+        return id
+    }
+
+    func forgetNote(_ note: Note) {
+        Vault.forgetNote(note.id)
+        relist()
+    }
+
+    /// A name, or a note's text, onto the clipboard: not a secret the way
+    /// a password is, so it goes as any copied text does, but it is still
+    /// taken off again after a minute and a half if nothing else was
+    /// copied since.
+    func copyText(_ text: String, said: String) {
+        let board = NSPasteboard.general
+        board.prepareForNewContents(with: .currentHostOnly)
+        board.setString(text, forType: .string)
+        let copied = board.changeCount
+        DispatchQueue.main.asyncAfter(deadline: .now() + 90) {
+            if board.changeCount == copied { board.clearContents() }
+        }
+        announce(said)
     }
 
     /// The panel's Remove All…, or Remove N… while its search narrows the
@@ -1170,7 +1227,7 @@ final class Browser: NSObject, ObservableObject {
             confirm: "Remove",
             returnCancels: true
         ) { [weak self] in
-            Vault.prove("remove \(many)") { ok in
+            VaultLock.shared.allow("remove \(many)") { ok in
                 guard ok, let self, !self.forgetting else { return }
                 // A keychain delete is a few milliseconds, a few hundred of
                 // them a second: off the main thread, as imports are (#380).
@@ -1198,7 +1255,7 @@ final class Browser: NSObject, ObservableObject {
     /// of their history, and it is taken off again after a minute and a
     /// half unless something else has been copied since.
     func copy(_ login: Kept) {
-        Vault.prove("copy the password for \(login.host)") { [weak self] ok in
+        VaultLock.shared.allow("copy the password for \(login.host)") { [weak self] ok in
             guard ok, let self else { return }
             // Read here, once the Mac has said who this is: what the panel
             // drew its list from holds no secrets.
@@ -1206,17 +1263,23 @@ final class Browser: NSObject, ObservableObject {
                 self.announce("The keychain refused it")
                 return
             }
-            let board = NSPasteboard.general
-            board.prepareForNewContents(with: .currentHostOnly)
-            board.setString(password, forType: .string)
-            board.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
-            board.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
-            let copied = board.changeCount
-            DispatchQueue.main.asyncAfter(deadline: .now() + 90) {
-                if board.changeCount == copied { board.clearContents() }
-            }
-            announce("Password copied")
+            copyPassword(password)
         }
+    }
+
+    /// A password onto the clipboard, however it came to hand: one kept,
+    /// once the Mac has allowed it, or one just made on the page.
+    func copyPassword(_ password: String) {
+        let board = NSPasteboard.general
+        board.prepareForNewContents(with: .currentHostOnly)
+        board.setString(password, forType: .string)
+        board.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+        board.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+        let copied = board.changeCount
+        DispatchQueue.main.asyncAfter(deadline: .now() + 90) {
+            if board.changeCount == copied { board.clearContents() }
+        }
+        announce("Password copied")
     }
 
     /// What came back from another browser's store, put in the keychain,

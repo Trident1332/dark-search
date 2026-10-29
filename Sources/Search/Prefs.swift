@@ -346,6 +346,24 @@ final class Preferences: ObservableObject {
     @Published var applePasswords: Bool {
         didSet { store.set(applePasswords, forKey: "passwords.apple") }
     }
+    /// Settings › Passwords › Lock after: how long the Passwords page stays
+    /// open once Touch ID has opened it (see VaultLock).
+    @Published var vaultLockAfter: VaultLockAfter {
+        didSet {
+            store.set(vaultLockAfter.rawValue, forKey: VaultLock.lockAfterKey)
+            VaultLock.shared.refresh()
+        }
+    }
+    /// Settings › Passwords › Lock when Search is hidden: another app in
+    /// front locks the page at once.
+    @Published var vaultLocksWhenHidden: Bool {
+        didSet { store.set(vaultLocksWhenHidden, forKey: VaultLock.hiddenKey) }
+    }
+    /// Settings › Passwords › Ask again for each password: Touch ID for
+    /// every Show and Copy, even while the page is open.
+    @Published var vaultAsksEach: Bool {
+        didSet { store.set(vaultAsksEach, forKey: VaultLock.eachKey) }
+    }
     /// The first launch has been walked through. Until then the welcome
     /// stands over the window.
     @Published var welcomed: Bool {
@@ -839,6 +857,9 @@ final class Preferences: ObservableObject {
         savesPasswords = store.object(forKey: "passwords.save") as? Bool ?? true
         fillsPasswords = store.object(forKey: "passwords.fill") as? Bool ?? true
         applePasswords = store.bool(forKey: "passwords.apple")
+        vaultLockAfter = VaultLock.lockAfter
+        vaultLocksWhenHidden = VaultLock.locksWhenHidden
+        vaultAsksEach = VaultLock.asksEach
         // Anyone who already has a session was here before the welcome
         // existed; they are not asked to sit through it.
         welcomed = store.bool(forKey: "welcomed") || store.object(forKey: "glyph") != nil
