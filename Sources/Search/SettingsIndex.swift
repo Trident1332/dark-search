@@ -382,8 +382,8 @@ enum SettingsIndex {
               title: "Show the location in the address bar", detail: "A small mark beside the address while pages take the route, amber when it drops",
               keys: ["proxy.shows"], words: ["address bar", "indicator", "mark", "location"], parent: "proxy.on"),
         .init(id: "proxy.calls", group: "proxyprivacy", icon: "video",
-              title: "Keep video calls from revealing your address", detail: "Calls can't go through a proxy, so they're off while it's on",
-              more: "WebRTC, which video calls use, connects straight from your Mac and would show its real address. With this on, pages can't start a peer connection while the proxy is on. Persistent connection requires this protection; otherwise you can turn it off to take a call.",
+              title: "Keep video calls from revealing your address", detail: "Block websites from making direct video calls while the proxy is on",
+              more: "Website calls can send WebRTC traffic outside the browser proxy. With this on, pages can't start a peer connection while the proxy is on. Search's built-in Dialer uses its own protected relay and can still make calls. Persistent connection requires website call protection; otherwise you can turn it off to allow direct website calls.",
               keys: ["proxy.calls"], words: ["webrtc", "leak", "ip", "video call", "peer"], parent: "proxy.on"),
         .init(id: "proxy.timeZone", group: "proxyprivacy", icon: "clock",
               title: "Match the proxy's time zone", detail: "Pages use the time zone reported by the proxy's location",
@@ -392,7 +392,7 @@ enum SettingsIndex {
         // Dialer
         .init(id: "dialer.on", group: "dialer", icon: "phone",
               title: "Call phone numbers from Search", detail: "Right-click a number on a page to call it, and a keypad in the side panel",
-              more: "Otto's dialer, built in: a softphone that signs in to your FreeSWITCH phone server over a WebSocket and carries the call's sound through WebRTC, shown in the side panel. A tel: link opens there too, and otto's own pages can start a call. The dialer connects to the phone server directly, never through Settings › Proxy: a call's sound can't take a proxy's route.",
+              more: "Otto's dialer, built in: a softphone that signs in to your FreeSWITCH phone server over a WebSocket and carries the call's sound through WebRTC, shown in the side panel. A tel: link opens there too, and approved websites can start a call. With a proxy on, signaling and audio require the protected route through your phone server's relay, including with Persistent connection on. A failed route stops calls. Tor tabs must be closed before calling. Incoming calls wait for you to press Answer.",
               keys: ["dialer.on"], words: ["dialer", "phone", "call", "softphone", "sip", "freeswitch", "otto", "ottocaller", "keypad", "tel", "voip"]),
         .init(id: "dialer.open", group: "dialer", icon: "sidebar.right",
               title: "The dialer", detail: "In the side panel, beside the page. ⇧⌘K, or View › Show Dialer",
@@ -408,14 +408,18 @@ enum SettingsIndex {
               more: "The WebSocket the dialer signs in through, wss://sip.example.com:7443, and the domain the seat is registered under. Whoever runs the phone line has both; otto's Settings › Dialer shows them too.",
               keys: ["dialer.wss", "dialer.domain"], words: ["websocket", "wss", "domain", "sip", "server", "address"], kind: .wide, parent: "dialer.on"),
         .init(id: "dialer.seat", group: "dialerline", icon: "person.badge.key",
-              title: "Seat", detail: "The extension the dialer signs in as. Its password is kept in your keychain, never in the settings file",
+              title: "Seat", detail: "The extension to sign in as. Its password stays in your keychain",
               keys: ["dialer.user"], words: ["extension", "seat", "user", "password", "keychain", "1001"], kind: .wide, parent: "dialer.on"),
+        .init(id: "dialer.numbers", group: "dialerline", icon: "phone",
+              title: "Your phone numbers", detail: "US and Canada use Numero; UK uses Telicall",
+              more: "Enter the numbers assigned to your provider accounts, with the same numbers configured on your phone server. Choose the outgoing line in the dialer's Number menu. The US and Canadian Numero lines can share one account; the UK number belongs to Telicall. Default country formats destination numbers. Numero's separate US and Canada routes must be available before those lines can call.",
+              keys: ["dialer.numero.us", "dialer.numero.ca", "dialer.telicall.uk"], words: ["numero", "telicall", "us", "canada", "uk", "united kingdom", "britain", "caller id", "outgoing", "number", "line"], kind: .wide, parent: "dialer.on"),
         .init(id: "dialer.status", group: "dialerline", icon: "circle.dotted",
               title: "Status", detail: "Opens with the dialer",
               words: ["registered", "connected", "status", "signed in"], parent: "dialer.on"),
         .init(id: "dialer.sites", group: "dialersites", icon: "globe",
-              title: "Sites that may use the dialer", detail: "Pages on these sites can start a call, set the dialer up and take the call log, as otto's do",
-              more: "The same bridge otto's extension offers, on the sites you list: a click on a number in otto's leads table places the call, and every finished call is handed back for the lead's timeline. A site here can also set the dialer up, as otto does the first time it opens with a dialer there.",
+              title: "Sites that may use the dialer", detail: "Approved origins can call, configure the line and take logs. Saved passwords stay private",
+              more: "Each grant names one scheme, host and port, such as https://otto.example.com or http://localhost:3000. Public sites require HTTPS. Local servers need an explicit origin grant; other ports stay separate. Approved sites can supply a new password but cannot read the saved one. Private and Tor tabs cannot use this bridge.",
               keys: ["dialer.sites"], words: ["otto", "sites", "origins", "click to call", "leads", "bridge"], parent: "dialer.on"),
 
         .init(id: "onion.on", group: "tor", icon: "network.badge.shield.half.filled",
@@ -534,7 +538,7 @@ enum SettingsIndex {
         case "sidebar.roomy": return prefs.sidebar && !prefs.sideIcons
         case "sidebar.hides", "layout.cards", "pins.list", "tabs.address": return prefs.sidebar
         case "onion.connection": return prefs.onionEnabled
-        case "dialer.open", "dialer.autodial", "dialer.region", "dialer.server", "dialer.seat", "dialer.status", "dialer.sites":
+        case "dialer.open", "dialer.autodial", "dialer.region", "dialer.server", "dialer.seat", "dialer.numbers", "dialer.status", "dialer.sites":
             return prefs.dialerOn
         case "proxy.profiles": return prefs.proxyOn && !prefs.proxyBlocks && Profiles.shared.several
         case "proxy.bypass": return prefs.proxyOn && !prefs.proxyBlocks
@@ -550,11 +554,11 @@ enum SettingsIndex {
         switch item.id {
         case "pages.dusk": return "Only while Search isn't set to Light"
         case "sidebar.roomy": return "Only with titles in the column"
+        case "tabs.address": return "Only with the tabs down the side: across the top, the address bar says it"
         case "onion.connection": return "Only with Open onion websites on"
-        case "dialer.open", "dialer.autodial", "dialer.region", "dialer.server", "dialer.seat", "dialer.status", "dialer.sites":
+        case "dialer.open", "dialer.autodial", "dialer.region", "dialer.server", "dialer.seat", "dialer.numbers", "dialer.status", "dialer.sites":
             return "Only with the dialer on"
         case "proxy.profiles": return "Only with a proxy on, Persistent connection off and more than one profile"
-        case "tabs.address": return "Only with the tabs down the side: across the top, the address bar says it"
         case "proxy.bypass": return "Only with a proxy on and Persistent connection off"
         case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test",
              "proxy.blocks", "proxy.shows", "proxy.calls", "proxy.timeZone":
@@ -791,6 +795,15 @@ extension SettingsIndex {
         case "dialer.user":
             guard let text = value as? String else { return false }
             prefs.dialerUser = text
+        case "dialer.numero.us":
+            guard let text = value as? String else { return false }
+            prefs.dialerNumeroUS = text
+        case "dialer.numero.ca":
+            guard let text = value as? String else { return false }
+            prefs.dialerNumeroCA = text
+        case "dialer.telicall.uk":
+            guard let text = value as? String else { return false }
+            prefs.dialerTelicallUK = text
         default:
             return false
         }

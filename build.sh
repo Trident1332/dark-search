@@ -286,10 +286,11 @@ fi
 
 # Signing. This fork's release key, "Dark Search Release Signing", when it is
 # in a keychain here — the one certificate Updater.signer trusts, so a build
-# signed with it updates itself from the repository's releases, and keeps
-# its keychain items and permissions from one build to the next. It signs
-# itself rather than coming from Apple, so find-identity lists it as not
-# trusted, and it is named by its hash. Otherwise a Developer ID certificate,
+# signed with it updates itself from the repository's releases. It signs
+# itself rather than coming from Apple, so Keychain access can still need
+# approval for each changed binary hash, even with this same certificate.
+# find-identity lists it as not trusted, and it is named by its hash.
+# Otherwise a Developer ID certificate,
 # when there is one, with the hardened runtime Gatekeeper insists on for
 # anything notarised; otherwise ad-hoc, which is enough for the app to run
 # on the machine that built it — and which the updater refuses to swap

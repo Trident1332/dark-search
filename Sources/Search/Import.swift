@@ -573,7 +573,7 @@ enum Chromium {
             return (try? String(contentsOf: file, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         var out: CFTypeRef?
-        let status = SecItemCopyMatching([
+        let status = KeychainAccess.copyMatching([
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: source.service,
             kSecAttrAccount as String: source.account,

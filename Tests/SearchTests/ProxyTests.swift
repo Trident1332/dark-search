@@ -156,7 +156,8 @@ final class ProxyTests: XCTestCase {
         Proxy.shared.take(route)
         Proxy.shared.test(target: target)
         XCTAssertEqual(Proxy.shared.check, .failed(ProxyAuthentication.missing))
-        XCTAssertTrue(Proxy.shared.refused)
+        XCTAssertEqual(Proxy.shared.credentialIssue, ProxyAuthentication.missing)
+        XCTAssertFalse(Proxy.shared.refused, "A missing local password is not a rejected proxy login")
         XCTAssertEqual(server.authAttempts, 0)
     }
 
@@ -299,18 +300,26 @@ final class ProxyTests: XCTestCase {
         route.signsIn = true
         route.user = "proxy-test-user"
         ProxyPassword.save("synthetic-test-password", for: route)
-        defer { ProxyPassword.forget(route) }
+        let savedRoute = route
+        defer { ProxyPassword.forget(savedRoute) }
         Proxy.shared.take(route)
         let session = Proxy.makeSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
         route.port = 12324
         Proxy.shared.take(route)
+        // The new endpoint has no saved password. Its immediate local error
+        // must survive an authentication callback from the previous session.
+        let currentCheck = Proxy.shared.check
+        let currentCredentialIssue = Proxy.shared.credentialIssue
+        XCTAssertEqual(currentCheck, .failed(ProxyAuthentication.missing))
+        XCTAssertEqual(currentCredentialIssue, ProxyAuthentication.missing)
         XCTAssertTrue(Proxy.authenticate(challenge(), in: session) { disposition, credential in
             XCTAssertEqual(disposition, .cancelAuthenticationChallenge)
             XCTAssertNil(credential)
         })
         try await Task.sleep(for: .milliseconds(30))
-        XCTAssertEqual(Proxy.shared.check, .untried)
+        XCTAssertEqual(Proxy.shared.check, currentCheck)
+        XCTAssertEqual(Proxy.shared.credentialIssue, currentCredentialIssue)
         XCTAssertFalse(Proxy.shared.refused)
     }
 

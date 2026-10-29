@@ -27,12 +27,13 @@ struct ProxySign: View {
     }
 
     private var trouble: Bool {
-        tab.usesTor ? !onion.ready : (!proxy.setup.complete || proxy.dropped || proxy.refused)
+        tab.usesTor ? !onion.ready : (!proxy.setup.complete || proxy.dropped || proxy.refused || proxy.credentialIssue != nil)
     }
 
     private var words: String {
         if tab.usesTor { return "Tor · \(onion.status)" }
         if !proxy.setup.complete { return "Enter a proxy address in Settings › Proxy" }
+        if let issue = proxy.credentialIssue { return issue }
         if proxy.refused { return "The proxy didn't accept the name or password" }
         if proxy.dropped { return "The proxy isn't answering — trying again every 15 seconds" }
         if let place = proxy.place { return "Connected to \(place)" }
@@ -48,9 +49,9 @@ struct ProxySign: View {
                 Group {
                     if tab.usesTor {
                         Text("Tor").font(.system(size: 9, weight: .medium))
-                    } else if connected {
                     } else if connected, let code = proxy.countryCode {
                         FlatFlag(code: code, width: 15)
+                    } else if connected {
                         Image(systemName: "lock.fill")
                             .font(.system(size: 9.5, weight: .medium))
                     } else {

@@ -84,6 +84,14 @@ body { font: 400 13px/1.4 var(--font); padding: 10px 12px 12px; overflow-y: auto
 .call:disabled { background: var(--key); color: var(--faint); }
 .back:hover { color: var(--txt); background: var(--key); }
 
+/* An incoming call waits for a deliberate answer, even with microphone permission. */
+.incoming { display: flex; gap: 8px; margin-top: 16px; }
+.incoming[hidden] { display: none; }
+.incoming button { flex: 1; border: 0; border-radius: 8px; padding: 11px; font: 500 13px var(--font); color: var(--on-tint); cursor: pointer; }
+#answer { background: var(--green); }
+#decline { background: var(--red); }
+.phone[data-state="incoming"] .row { display: none; }
+
 /* The toolbar: a segmented control in the wash, the lit segment raised on the page's white. */
 .util { margin-top: 12px; padding: 3px; gap: 2px; background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-panel); }
 .util > button, .util > .mwrap > button { height: 32px; border-radius: 8px; font-size: 11.5px; font-weight: 500; color: var(--muted); }
@@ -97,6 +105,19 @@ body { font: 400 13px/1.4 var(--font); padding: 10px 12px 12px; overflow-y: auto
 .menu button { font-size: 12.5px; font-weight: 400; padding: 6px 9px; }
 .menu button:hover:not(:disabled) { background: var(--key); }
 .menu button[aria-checked="true"] { color: var(--txt); }
+#providerMenu { width: max-content; max-width: calc(100vw - 32px); }
+/* The Number menu: a line is its country's flag, a middle dot and the number. The flags are
+ * drawn flat, as FlatFlag draws them in Settings (Flag.swift) rather than the Mac's waving
+ * emoji: the stripes and canton, the crosses, the pale and leaf, 18 by 12 with a hairline. */
+#providerMenu button[data-flag]:not([data-flag=""]) { gap: 7px; }
+#providerMenu button[data-flag]:not([data-flag=""])::before {
+  content: ""; flex: none; width: 18px; height: 12px; border-radius: 2px; background-size: cover; background-position: center;
+  box-shadow: inset 0 0 0 .5px color-mix(in srgb, var(--txt) 14%, transparent);
+}
+#providerMenu button:disabled::before { opacity: .45; }
+#providerMenu button[data-flag="US"]::before { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 12'%3E%3Cpath fill='%23fff' d='M0 0h18v12H0z'/%3E%3Cpath fill='%23B22234' d='M0 0.00h18v.95H0zM0 1.85h18v.95H0zM0 3.69h18v.95H0zM0 5.54h18v.95H0zM0 7.38h18v.95H0zM0 9.23h18v.95H0zM0 11.08h18v.95H0z'/%3E%3Cpath fill='%233C3B6E' d='M0 0h7.2v6.46H0z'/%3E%3C/svg%3E"); }
+#providerMenu button[data-flag="CA"]::before { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 12'%3E%3Cpath fill='%23fff' d='M0 0h18v12H0z'/%3E%3Cpath fill='%23D52B1E' d='M0 0h4.5v12H0zM13.5 0h4.5v12h-4.5z'/%3E%3Cpath fill='%23D52B1E' transform='translate%289 1.8%29 scale%28.556%29' d='M0 0 -1.2 2.3 -1.82 2.6 -2.69 2.15 -2.04 5.6 -2.55 5.95 -4.07 4.26 -4.32 5.12 -4.65 5.33 -6.56 4.92 -6.06 6.75 -6.17 7.43 -6.85 7.74 -3.55 10.43 -3.4 10.88 -3.69 11.83 -0.4 11.37 -0.13 11.64 -0.5 15.1 0.5 15.1 0.13 11.64 0.4 11.37 3.69 11.83 3.4 10.88 3.55 10.43 6.85 7.74 6.17 7.43 6.06 6.75 6.56 4.92 4.65 5.33 4.32 5.12 4.07 4.26 2.55 5.95 2.04 5.6 2.69 2.15 1.82 2.6 1.2 2.3 0 0Z'/%3E%3C/svg%3E"); }
+#providerMenu button[data-flag="GB"]::before { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 12'%3E%3Cpath fill='%23012169' d='M0 0h18v12H0z'/%3E%3Cpath stroke='%23fff' stroke-width='2.4' d='M0 0l18 12M18 0L0 12'/%3E%3Cpath stroke='%23C8102E' stroke-width='.84' d='M0 0l18 12M18 0L0 12'/%3E%3Cpath stroke='%23fff' stroke-width='3.96' d='M9 0v12M0 6h18'/%3E%3Cpath stroke='%23C8102E' stroke-width='2.4' d='M9 0v12M0 6h18'/%3E%3C/svg%3E"); }
 .menu .vparent.sel { color: var(--txt); }
 .menu .vparent[aria-expanded="true"] { background: var(--key); }
 .menu .vparent .pips i.f { background: var(--txt); }

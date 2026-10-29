@@ -33,7 +33,7 @@ extension Vault {
     /// Every note, newest change first, without the text.
     static func notes() -> [Note] {
         var out: CFTypeRef?
-        let status = SecItemCopyMatching([
+        let status = KeychainAccess.copyMatching([
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: noteService,
             kSecReturnAttributes as String: true,
@@ -58,7 +58,7 @@ extension Vault {
         asked[kSecReturnData as String] = true
         asked[kSecMatchLimit as String] = kSecMatchLimitOne
         var out: CFTypeRef?
-        let status = SecItemCopyMatching(asked as CFDictionary, &out)
+        let status = KeychainAccess.copyMatching(asked as CFDictionary, &out)
         guard status == errSecSuccess, let data = out as? Data else {
             if status != errSecItemNotFound { NSLog("Vault: keychain note read failed (%d)", status) }
             return nil
@@ -78,16 +78,16 @@ extension Vault {
             kSecAttrLabel as String: name.isEmpty ? "Untitled" : name,
             kSecAttrDescription as String: "Search note",
         ]
-        let status = SecItemUpdate(noteIdentity(id) as CFDictionary, fields as CFDictionary)
+        let status = KeychainAccess.update(noteIdentity(id) as CFDictionary, fields as CFDictionary)
         if status == errSecSuccess { return id }
         guard status == errSecItemNotFound else { return nil }
         var fresh = noteIdentity(id).merging(fields) { _, new in new }
         fresh[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
-        return SecItemAdd(fresh as CFDictionary, nil) == errSecSuccess ? id : nil
+        return KeychainAccess.add(fresh as CFDictionary, nil) == errSecSuccess ? id : nil
     }
 
     @discardableResult
     static func forgetNote(_ id: String) -> Bool {
-        SecItemDelete(noteIdentity(id) as CFDictionary) == errSecSuccess
+        KeychainAccess.delete(noteIdentity(id) as CFDictionary) == errSecSuccess
     }
 }

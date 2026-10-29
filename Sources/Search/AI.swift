@@ -128,7 +128,7 @@ enum AIKeys {
         if Store.testing { return true }
         var asked = query(.anthropic)
         asked[kSecReturnAttributes as String] = true
-        return SecItemCopyMatching(asked as CFDictionary, nil) != errSecMissingEntitlement
+        return KeychainAccess.copyMatching(asked as CFDictionary, nil) != errSecMissingEntitlement
     }
 
     static func save(_ key: String, for provider: AIProvider) -> Saved {
@@ -138,7 +138,7 @@ enum AIKeys {
             rehearsal[account(provider)] = key
             return .kept
         }
-        SecItemDelete(query(provider) as CFDictionary)
+        KeychainAccess.delete(query(provider) as CFDictionary)
         var item = query(provider)
         item[kSecValueData as String] = Data(key.utf8)
         item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
@@ -146,7 +146,7 @@ enum AIKeys {
         item[kSecAttrLabel as String] = "Search — \(provider.name) key"
         // The last four, to tell keys apart in Settings without reading one.
         item[kSecAttrComment as String] = String(key.suffix(4))
-        switch SecItemAdd(item as CFDictionary, nil) {
+        switch KeychainAccess.add(item as CFDictionary, nil) {
         case errSecSuccess: return .kept
         case errSecMissingEntitlement: return .unavailable
         default: return .failed
@@ -160,7 +160,7 @@ enum AIKeys {
         asked[kSecReturnData as String] = true
         asked[kSecMatchLimit as String] = kSecMatchLimitOne
         var found: CFTypeRef?
-        guard SecItemCopyMatching(asked as CFDictionary, &found) == errSecSuccess, let data = found as? Data else { return nil }
+        guard KeychainAccess.copyMatching(asked as CFDictionary, &found) == errSecSuccess, let data = found as? Data else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
@@ -170,7 +170,7 @@ enum AIKeys {
         var asked = query(provider)
         asked[kSecReturnAttributes as String] = true
         var found: CFTypeRef?
-        guard SecItemCopyMatching(asked as CFDictionary, &found) == errSecSuccess,
+        guard KeychainAccess.copyMatching(asked as CFDictionary, &found) == errSecSuccess,
               let attributes = found as? [String: Any]
         else { return nil }
         return "••••" + (attributes[kSecAttrComment as String] as? String ?? "")
@@ -178,7 +178,7 @@ enum AIKeys {
 
     static func forget(_ provider: AIProvider) {
         if Store.testing { rehearsal[account(provider)] = nil; return }
-        SecItemDelete(query(provider) as CFDictionary)
+        KeychainAccess.delete(query(provider) as CFDictionary)
     }
 
     static func forgetAll() {

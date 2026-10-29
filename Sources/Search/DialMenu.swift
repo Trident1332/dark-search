@@ -192,25 +192,32 @@ extension Dialer {
 /// script did; finished calls arrive through Dialer.tellSites.
 final class DialerSiteRelay: NSObject, WKScriptMessageHandlerWithReply {
     static let name = "officeDialerSite"
+    static let scriptMarker = "/* SearchDialerSiteBridge */"
 
     weak var tab: Tab?
 
     /// The main frame of a page on a listed site, ahead of its scripts: the
     /// mark otto reads to know a dialer is there, then the bridge. `hosts`
-    /// is checked here so a page elsewhere gets nothing of it, and again
-    /// where the message arrives, which is what counts.
+    /// contains exact origins; the label is retained for existing callers.
+    /// The origin is checked here and again where the message arrives.
     static func script(hosts: [String]) -> String {
-        let list = (try? JSONSerialization.data(withJSONObject: hosts.map { $0.lowercased() })).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        let list = (try? JSONSerialization.data(withJSONObject: DialerOrigin.normalized(hosts))).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         return """
+        \(scriptMarker)
         (function () {
-          if (window.__searchDialerSite) return;
-          var hosts = \(list);
-          if (hosts.indexOf(String(location.hostname || '').toLowerCase()) < 0) return;
+          var old = window.__searchDialerSite;
+          if (old && typeof old.dispose === 'function') old.dispose();
+          try { delete window.__searchDialerSite; document.documentElement.removeAttribute('data-otto-dialer'); } catch (e) {}
+          var origins = \(list), origin = String(location.origin || '');
+          if (origins.indexOf(origin) < 0) return;
           var relay = window.webkit && webkit.messageHandlers && webkit.messageHandlers.officeDialerSite;
           if (!relay) return;
-          var VERSION = 'search';
+          var VERSION = 'search', active = true;
           try { document.documentElement.setAttribute('data-otto-dialer', VERSION); } catch (e) {}
-          function post(msg) { msg.source = 'otto-dialer'; window.postMessage(msg, window.location.origin); }
+          function post(msg) {
+            if (!active || String(location.origin || '') !== origin) return;
+            msg.source = 'otto-dialer'; window.postMessage(msg, origin);
+          }
           function ready() { post({ type: 'ready', version: VERSION, features: ['calls'] }); }
           var posted = {};
           function postCalls(list, all) {
@@ -225,9 +232,8 @@ final class DialerSiteRelay: NSObject, WKScriptMessageHandlerWithReply {
             if (all) posted = now; else for (var id in now) posted[id] = true;
             if (all || out.length) post({ type: 'calls', calls: out });
           }
-          window.__searchDialerSite = { calls: function (list) { postCalls(list, false); } };
-          window.addEventListener('message', function (e) {
-            if (e.source !== window || !e.data || e.data.source !== 'otto') return;
+          function receive(e) {
+            if (!active || e.source !== window || e.origin !== origin || !e.data || e.data.source !== 'otto') return;
             var m = e.data;
             if (m.type === 'ping') { ready(); return; }
             var send = { type: m.type };
@@ -247,7 +253,20 @@ final class DialerSiteRelay: NSObject, WKScriptMessageHandlerWithReply {
               if (m.type === 'dial') post({ type: 'error', number: String(m.number || ''), error: text });
               else if (m.type === 'getConfig' || m.type === 'setConfig') post({ type: m.type === 'getConfig' ? 'config' : 'configSaved', reqId: m.reqId, ok: false, error: text });
             });
-          });
+          }
+          var bridge = {
+            calls: function (list) { if (active) postCalls(list, false); },
+            dispose: function () {
+              active = false;
+              window.removeEventListener('message', receive);
+              if (window.__searchDialerSite === bridge) {
+                delete window.__searchDialerSite;
+                try { document.documentElement.removeAttribute('data-otto-dialer'); } catch (e) {}
+              }
+            }
+          };
+          window.__searchDialerSite = bridge;
+          window.addEventListener('message', receive);
           ready();
         })();
         """
@@ -257,8 +276,8 @@ final class DialerSiteRelay: NSObject, WKScriptMessageHandlerWithReply {
                                            replyHandler: @escaping (Any?, String?) -> Void) {
         MainActor.assumeIsolated {
             let origin = message.frameInfo.securityOrigin
-            guard message.frameInfo.isMainFrame, ["http", "https"].contains(origin.protocol.lowercased()),
-                  Dialer.shared.allows(host: origin.host),
+            guard message.frameInfo.isMainFrame, let tab, message.webView === tab.built, !tab.shy, !tab.usesTor,
+                  Dialer.shared.allows(scheme: origin.protocol, host: origin.host, port: origin.port),
                   let body = message.body as? [String: Any], let type = body["type"] as? String
             else { return replyHandler(["ok": false, "error": "Not a site the dialer answers"], nil) }
             replyHandler(answer(type, body), nil)
@@ -274,7 +293,9 @@ final class DialerSiteRelay: NSObject, WKScriptMessageHandlerWithReply {
             guard let tab, let browser = Browsers.all.first(where: { $0.tabs.contains { $0 === tab } })
             else { return ["ok": false, "error": "No window to call from"] }
             let name = String((body["name"] as? String ?? "").prefix(80))
-            browser.call(number, name: name, ref: Dialer.cleanRef(body["ref"]))
+            guard browser.call(number, name: name, ref: Dialer.cleanRef(body["ref"])) else {
+                return ["ok": false, "error": dialer.blockedReason ?? "The dialer is unavailable"]
+            }
             return ["ok": true, "number": number, "mode": "panel"]
         case "getConfig":
             return ["ok": true, "config": dialer.configForSites()]

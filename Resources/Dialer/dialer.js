@@ -1,7 +1,7 @@
 /* Ottocaller — the dialer window.
  *
- * Search: this is Otto's dialer.js as it is in web-dialer/extension, with the three lines marked
- * "Search:" changed. search.js (loaded first) stands in for chrome.*; see Dialer.swift.
+ * Search: adapted from Otto's web-dialer/extension. search.js stands in for chrome.*;
+ * call controls also follow the native panel's visibility and lifetime (see Dialer.swift).
  *
  * A SIP.js softphone that registers to FreeSWITCH over WebSocket and dials whatever otto (or
  * the keypad) hands it. Numero/Telicall routing lives entirely in the FreeSWITCH dialplan; this
@@ -37,7 +37,16 @@
   var tStart = 0, tInt = null, muted = false;
   var pending = null;          // { number, name } waiting for registration
   var generation = 0;          // bumps on every (re)boot so stale delegates are ignored
+  var panelVisible = false, stopped = false, incoming = false, endingCall = false;
+  var attempt = 0, activeAttempt = 0; // invalidates permission/media work after cancellation
+  var cancelEpoch = 0;        // a close/cancel, distinct from reconnecting or starting a call
+  var reconnectPending = false;
+  var recoveryRevision = 0, recovering = null;
+  var mediaWaiters = [], mediaFailure = null;
+  var MEDIA_START_TIMEOUT = 15000;
+  var MEDIA_TIMEOUT_NOTE = "The microphone didn't start. Keep Search in front and check microphone access in System Settings, then try again.";
   var provider = "numero";     // outbound trunk; "telicall" adds an X-Provider INVITE header
+  var numeroLine = "us";      // an owned Numero line, chosen explicitly in the Number menu
   var voice = "";              // voice changer: semitones sent as an X-Voice INVITE header, "" = off
   var region = "GB";           // default country for national numbers (options: region)
   var entry = "";              // canonical dial string (digits / + / * / #), no spaces
@@ -49,6 +58,213 @@
   var ending = [];             // calls that have ended and are about to be filed (see callEnd)
   var outbox = [];             // copy of chrome.storage.local "callOutbox", so a closing panel can add to it without reading first
   var Calls = window.OttoCalls;   // calls.js: the call record and how an ending maps to an outcome
+  var activeNetworkRoute = null, routeExpiryTimer = null, routeSettingsEpoch = 0, connectionRefreshID = 0;
+  var sessionHandlers = new Set();
+
+  function routeFailure(message) { var error = new Error(message); error.name = "ProtectedRouteError"; return error; }
+  function validatedNetworkRoute(value, allowExpired, minimumRemaining) {
+    if (!value || typeof value !== "object") throw routeFailure("The call route isn't ready. Try again when the proxy is connected");
+    if (value.mode === "blocked") throw routeFailure(typeof value.error === "string" && value.error ? value.error.slice(0, 240) : "The protected call route isn't ready");
+    if (value.mode === "direct") return Object.freeze({ mode: "direct" });
+    if (value.mode !== "proxy") throw routeFailure("The call route is invalid");
+    var match = typeof value.turnURL === "string" && /^turn:127\.0\.0\.1:([1-9]\d{0,4})\?transport=tcp$/.exec(value.turnURL);
+    if (!match || Number(match[1]) > 65535 || typeof value.revision !== "string" || !value.revision || value.revision.length > 256
+        || typeof value.username !== "string" || !value.username || value.username.length > 1024 || /[\r\n\0]/.test(value.username)
+        || typeof value.credential !== "string" || !value.credential || value.credential.length > 4096 || /[\r\n\0]/.test(value.credential)
+        || typeof value.expiresAt !== "number" || !Number.isFinite(value.expiresAt)) throw routeFailure("The protected call route is invalid");
+    if (!allowExpired && value.expiresAt * 1000 <= Date.now()) throw routeFailure("The protected call route expired. Reconnect the proxy before calling");
+    if (!allowExpired && minimumRemaining && value.expiresAt * 1000 < Date.now() + minimumRemaining) throw routeFailure("The protected call route needs to refresh before another call can start");
+    return Object.freeze({ mode: "proxy", revision: value.revision, turnURL: value.turnURL,
+      username: value.username, credential: value.credential, expiresAt: value.expiresAt });
+  }
+  function sameNetworkRoute(a, b) {
+    return !!(a && b && ["mode", "revision", "turnURL", "username", "credential", "expiresAt"].every(function (key) { return a[key] === b[key]; }));
+  }
+  function networkRouteCurrent(route, gen, allowExpired) {
+    if (stopped || !route || route !== activeNetworkRoute || gen !== generation) return false;
+    try { return sameNetworkRoute(route, validatedNetworkRoute(CFG && CFG.protectedRoute, allowExpired)); } catch (e) { return false; }
+  }
+  function closeSessionHandlers() {
+    sessionHandlers.forEach(function (handler) { try { handler.close(); } catch (e) { /* close every remaining peer as well */ } });
+    sessionHandlers.clear();
+  }
+  function stopNetworkRoute(message) {
+    generation++; recoveryRevision++; activeNetworkRoute = null;
+    clearTimeout(routeExpiryTimer); routeExpiryTimer = null;
+    closeSessionHandlers();
+    hangup();
+    var previous = simple; simple = null; registered = false; connecting = false; callBtn.disabled = true;
+    if (previous) { try { Promise.resolve(previous.disconnect()).catch(function () {}); } catch (e) { /* already closed */ } }
+    setStatus("Calls paused", "err"); subEl.textContent = message;
+  }
+  function requireNetworkRoute() {
+    try {
+      var current = validatedNetworkRoute(CFG && CFG.protectedRoute, false, 60000);
+      if (!sameNetworkRoute(current, activeNetworkRoute)) throw routeFailure("The call route changed. Wait for it to reconnect before calling");
+      return true;
+    } catch (error) { stopNetworkRoute(error.message); return false; }
+  }
+  function armRouteExpiry(route) {
+    clearTimeout(routeExpiryTimer); routeExpiryTimer = null;
+    if (route.mode !== "proxy") return;
+    routeExpiryTimer = setTimeout(function () {
+      if (route !== activeNetworkRoute) return;
+      routeExpiryTimer = null;
+      if (route.expiresAt * 1000 <= Date.now()) {
+        // An authenticated TURN allocation can refresh with its existing key.
+        // Keep an established call, but never create another peer from this lease.
+        callBtn.disabled = true;
+        if (!inCall) stopNetworkRoute("The protected call route expired. Reconnect the proxy before calling");
+      }
+      else armRouteExpiry(route);
+    }, Math.min(Math.max(0, route.expiresAt * 1000 - Date.now()), 2147483647));
+  }
+  function iceConfiguration(route) {
+    return { iceCandidatePoolSize: 0, iceTransportPolicy: route.mode === "proxy" ? "relay" : "all",
+      iceServers: route.mode === "proxy" ? [{ urls: route.turnURL, username: route.username, credential: route.credential }] : [] };
+  }
+  function callDescriptionFactory(route, gen) {
+    var make = SIP.Web.defaultSessionDescriptionHandlerFactory(function (constraints) { return localMedia(constraints, gen); });
+    return function (session, options) {
+      if (gen !== generation || route !== activeNetworkRoute) throw routeFailure("The call route changed or expired");
+      if (!networkRouteCurrent(route, gen)) {
+        if (!inCall || !networkRouteCurrent(route, gen, true)) stopNetworkRoute("The call route changed or expired. Reconnect before calling");
+        throw routeFailure("The call route changed or expired");
+      }
+      try { validatedNetworkRoute(CFG.protectedRoute, false, 60000); }
+      catch (error) {
+        if (!inCall) stopNetworkRoute(error.message);
+        throw routeFailure(error.message);
+      }
+      var handler;
+      try {
+        var settings = Object.assign({}, options, { peerConnectionConfiguration: Object.assign({}, options && options.peerConnectionConfiguration, iceConfiguration(route)) });
+        handler = make(session, settings);
+        var peer = handler && handler.peerConnection, config = peer && peer.getConfiguration();
+        var servers = config && config.iceServers, urls = servers && servers.length === 1 && servers[0].urls;
+        if (typeof urls === "string") urls = [urls];
+        if (!config || config.iceCandidatePoolSize !== 0 || config.iceTransportPolicy !== (route.mode === "proxy" ? "relay" : "all")
+            || !Array.isArray(servers) || (route.mode === "proxy" ? !Array.isArray(urls) || urls.length !== 1 || urls[0] !== route.turnURL : servers.length !== 0)) {
+          throw routeFailure("WebRTC couldn't enforce the selected call route");
+        }
+        var close = handler.close;
+        handler.close = function () { sessionHandlers.delete(handler); return close.apply(handler, arguments); };
+        sessionHandlers.add(handler);
+        return handler;
+      } catch (error) {
+        if (handler) { try { handler.close(); } catch (e) { /* already closed */ } }
+        stopNetworkRoute("WebRTC couldn't use the selected call route");
+        throw routeFailure("WebRTC couldn't use the selected call route");
+      }
+    };
+  }
+  function applyConfiguration(values, replace) {
+    CFG = replace ? values : Object.assign(CFG || {}, values);
+    if (!activeNetworkRoute) return false;
+    var matches = false;
+    try { matches = sameNetworkRoute(activeNetworkRoute, validatedNetworkRoute(CFG.protectedRoute, inCall)); } catch (e) { /* fail closed */ }
+    if (!matches) { stopNetworkRoute("The call route changed. Reconnecting…"); return true; }
+    return false;
+  }
+  async function freshConfiguration(keys) {
+    var epoch = routeSettingsEpoch;
+    var values = await chrome.storage.local.get(keys.concat(["protectedRoute"]));
+    return epoch === routeSettingsEpoch ? values : freshConfiguration(keys);
+  }
+  function refreshConnectionConfiguration(force) {
+    var request = ++connectionRefreshID;
+    freshConfiguration(CFG_KEYS.concat(NUMERO_KEYS, TELICALL_KEYS)).then(function (values) {
+      if (stopped || request !== connectionRefreshID) return;
+      var changedRoute = applyConfiguration(values, true);
+      if (force || changedRoute || (!inCall && !calling && !incoming && !endingCall)) boot();
+      else { reconnectPending = true; subEl.textContent = "Settings saved — reconnects after this call"; }
+    }).catch(function () { if (!stopped && request === connectionRefreshID) stopNetworkRoute("The call route couldn't be read. Try again"); });
+  }
+
+  function lineChoice(value) { return value == null ? "us" : value === "us" || value === "ca" ? value : ""; }
+  function numeroNumber(line) {
+    var value = CFG && CFG[line === "us" ? "numeroUS" : line === "ca" ? "numeroCA" : ""];
+    return typeof value === "string" && /^\+1[2-9]\d{2}[2-9]\d{6}$/.test(value) ? value : "";
+  }
+  function numeroBound() {
+    return !!(CFG && [CFG.numeroUS, CFG.numeroCA].some(function (value) { return typeof value === "string" && value.trim(); }));
+  }
+  function telicallNumber() {
+    var value = CFG && CFG.telicallUK;
+    return typeof value === "string" && /^\+44[1-9]\d{8,9}$/.test(value) ? value : "";
+  }
+  function telicallBound() { return !!(CFG && typeof CFG.telicallUK === "string" && CFG.telicallUK.trim()); }
+  function numberRoute(number) {
+    var route = { user: number, provider: provider, numeroLine: "", telicallLine: "", fromNumber: "" };
+    if (provider === "telicall" && Calls.external(number) && telicallBound()) {
+      var uk = telicallNumber();
+      if (!uk) return { error: "Set a valid UK number in Settings › Dialer before calling" };
+      route.telicallLine = "uk"; route.fromNumber = uk;
+      return route;
+    }
+    if (provider !== "numero" || !Calls.external(number) || !numeroBound()) return route;
+    var owned = numeroNumber(numeroLine);
+    if (!owned) return { error: "Choose an available Numero number before calling" };
+    if (!/^\+?[1-9]\d{5,14}$/.test(number)) return { error: "Use a complete international number for this call" };
+    route.user = "numero-" + numeroLine + "-" + number.replace(/^\+/, "");
+    route.numeroLine = numeroLine; route.fromNumber = owned;
+    return route;
+  }
+  function retryCurrent(context) {
+    if (!context || stopped || !panelVisible || context.token !== attempt || context.gen !== generation || context.client !== simple
+        || context.cancelEpoch !== cancelEpoch || context.revision !== recoveryRevision || !networkRouteCurrent(activeNetworkRoute, generation)) return false;
+    if (context.kind !== "out") return true;
+    var currentRoute = numberRoute(context.number);
+    return cleanNumber(entry) === context.number && !currentRoute.error
+      && ["user", "provider", "numeroLine", "telicallLine", "fromNumber"].every(function (key) { return currentRoute[key] === context.route[key]; });
+  }
+  function retryContext(kind, number, route, ref) {
+    return { microphoneRetry: true, kind: kind, number: number, route: route, ref: ref, name: whoEl.textContent,
+      client: simple, gen: generation, cancelEpoch: cancelEpoch, revision: recoveryRevision, offered: false,
+      session: simple && simple.session, call: cur };
+  }
+  async function recoverMicrophone(context) {
+    if (context.offered || !retryCurrent(context) || !window.__searchDialer || typeof window.__searchDialer.recoverMicrophone !== "function") return false;
+    context.offered = true;
+    var previous = { note: subEl.textContent, status: statEl.textContent, kind: dot.className.replace(/^dot\s*/, "") };
+    recovering = context; syncButtons();
+    subEl.textContent = "Choose Allow to retry this call with microphone access";
+    setStatus("Microphone permission");
+    var result;
+    try {
+      result = await window.__searchDialer.recoverMicrophone();
+      if (result && result.state === "granted" && retryCurrent(context) && context.cleanup) {
+        subEl.textContent = "Finishing the previous call before retrying…";
+        var timer, cleaned = await Promise.race([
+          context.cleanup.then(function () { return true; }),
+          new Promise(function (resolve) { timer = setTimeout(function () { resolve(false); }, 5000); })
+        ]);
+        clearTimeout(timer);
+        if (!cleaned || context.client.session) result = { state: "cleanup-pending" };
+      }
+    } catch (e) { result = { state: "denied" }; }
+    finally { if (recovering === context) { recovering = null; syncButtons(); } }
+    if (!retryCurrent(context)) {
+      if (!stopped && panelVisible && context.token === attempt) {
+        subEl.textContent = "Call cancelled — place a new call with the current settings";
+        setStatus(registered ? "Registered" : "Not registered", registered ? "reg" : "");
+      }
+      return false;
+    }
+    if (result && result.state === "granted") return true;
+    if (result && result.state === "cleanup-pending") {
+      subEl.textContent = "The previous call is still closing. Try Call again in a moment";
+      setStatus("Call still closing", "err");
+      return false;
+    }
+    subEl.textContent = previous.note;
+    setStatus(previous.status, previous.kind);
+    return false;
+  }
+  function sameIncoming(context) {
+    return retryCurrent(context) && context.client.session === context.session && cur === context.call
+      && context.session && (!context.session.state || context.session.state === "Initial");
+  }
 
   /* ------------------------------ number normalisation ------------------------------ */
   /* Turns any pasted text into a dial-ready number. Uses the global PhoneLib
@@ -148,10 +364,11 @@
   // hidden one is inert so it can't be clicked or tabbed to.
   var phoneEl = document.querySelector(".phone");
   function syncButtons() {
-    var busy = calling || inCall;
-    if (phoneEl) phoneEl.setAttribute("data-state", inCall ? "incall" : calling ? "calling" : "idle");
+    var busy = calling || inCall || incoming || recovering;
+    if (phoneEl) phoneEl.setAttribute("data-state", inCall ? "incall" : incoming && !recovering ? "incoming" : calling || recovering ? "calling" : "idle");
     callBtn.inert = busy; hangBtn.inert = !busy;
-    dot.className = "dot " + (inCall ? "oncall" : calling ? "calling" : (registered ? "reg" : ""));
+    $("incoming").hidden = !incoming || !!recovering;
+    dot.className = "dot " + (inCall ? "oncall" : calling || incoming ? "calling" : (registered ? "reg" : ""));
   }
 
   /* ------------------------------ recents ------------------------------ */
@@ -167,9 +384,10 @@
   /* A call from its first moment. What ends it is noted on the object as it happens — hung
    * (hang-up pressed before an answer), code (the final SIP status of our INVITE), error (placing
    * it threw), dropped (the server connection went) — and Calls.outcome() reads those at the end. */
-  function callStart(number, name, direction, ref) {
+  function callStart(number, name, direction, ref, route) {
     cur = { id: Calls.newId(), at: Date.now(), number: number, display: formatDisplay(number) || number, name: name || "",
-            provider: provider, direction: direction || "out", answeredAt: 0,
+            provider: route ? route.provider : provider, direction: direction || "out", answeredAt: 0,
+            numeroLine: route ? route.numeroLine : "", telicallLine: route ? route.telicallLine : "", fromNumber: route ? route.fromNumber : "",
             voice: (direction || "out") === "out" ? voice : "",     // only calls we place are shifted
             ref: ref || null, hung: false, code: 0, error: false, dropped: false, endedAt: 0, filed: false };
     return cur;
@@ -192,6 +410,7 @@
     ending = ending.filter(function (c) { return c !== call; });
     var rec = Calls.record(call, call.endedAt);
     history.unshift({ at: call.at, number: call.number, display: call.display, name: call.name, provider: call.provider,
+                      numeroLine: call.numeroLine, telicallLine: call.telicallLine, fromNumber: call.fromNumber,
                       direction: call.direction, voice: call.voice, outcome: rec.outcome, duration: rec.durationSec });
     if (history.length > HISTORY_MAX) history.length = HISTORY_MAX;
     try { chrome.storage.local.set({ history: history }); } catch (e) { /* storage unavailable */ }
@@ -250,7 +469,8 @@
       var o = OUTCOME[h.outcome] || ["", h.outcome || ""];
       var cls = h.direction === "in" ? "in" : o[0];
       var title = h.name || h.display || h.number;
-      var sub = (h.name ? (h.display || h.number) + " · " : "") + (h.provider === "telicall" ? "Telicall" : "Numero") +
+      var lineLabel = h.provider === "telicall" ? h.telicallLine === "uk" ? "Telicall UK" : "Telicall" : h.numeroLine === "us" ? "Numero US" : h.numeroLine === "ca" ? "Numero Canada" : "Numero";
+      var sub = (h.name ? (h.display || h.number) + " · " : "") + lineLabel + (h.fromNumber ? " · " + h.fromNumber : "") +
                 (h.direction === "in" ? " · incoming" : "");
       var right = h.outcome === "answered" ? fmt(h.duration || 0) : o[1];
       html += '<li style="--i:' + Math.min(i, 12) + '"><button type="button" class="rrow" data-i="' + i + '" title="Call again">' +
@@ -268,6 +488,19 @@
     closeSheet();
     if (inCall || calling) { subEl.textContent = "Hang up to call " + (h.display || h.number); return; }
     setEntry(h.number, ""); whoEl.textContent = h.name || "";
+    provider = h.provider === "telicall" ? "telicall" : "numero";
+    recoveryRevision++;
+    if (h.numeroLine === "us" || h.numeroLine === "ca") numeroLine = h.numeroLine;
+    renderProvider();
+    chrome.storage.local.set({ provider: provider, numeroLine: numeroLine }).catch(function () {});
+    if (provider === "numero" && h.fromNumber && h.fromNumber !== numeroNumber(numeroLine)) {
+      subEl.textContent = "That Numero number changed — choose a number before calling";
+      return;
+    }
+    if (provider === "telicall" && h.telicallLine === "uk" && h.fromNumber !== telicallNumber()) {
+      subEl.textContent = "That UK number changed — choose a number before calling";
+      return;
+    }
     if (registered) dial(); else subEl.textContent = "Not registered yet";
   });
   var rclearEl = $("rclear");
@@ -622,15 +855,45 @@
 
   // Number: which trunk (and therefore which caller number) the call goes out on.
   var providerBtn = $("provider"), providerMenu = $("providerMenu"), providerLbl = $("providerLbl");
+  function providerChoice() { return provider === "numero" && numeroBound() ? "numero-" + numeroLine : provider; }
+  // A line with a number is a row of its country's flag (search.css draws it from data-flag),
+  // a middle dot and the number as the readout would show it; the provider's name is the
+  // row's tooltip and what a screen reader says. A provider without a number is its name.
+  function lineRow(button, flag, name, number, otherwise) {
+    var shown = number ? formatDisplay(number) || number : otherwise;
+    button.setAttribute("data-flag", flag);
+    button.setAttribute("aria-label", flag ? name + " · " + shown : name);
+    button.title = flag ? name : "";
+    button.textContent = flag ? "· " + shown : name;
+  }
   function renderProvider() {
-    if (providerLbl) providerLbl.textContent = provider === "telicall" ? "Telicall" : "Numero";
+    var bound = numeroBound(), selected = numeroNumber(numeroLine), ukBound = telicallBound(), uk = telicallNumber();
+    if (providerLbl) providerLbl.textContent = provider === "telicall" ? ukBound ? uk ? "UK" : "Choose" : "Telicall" : !bound ? "Numero" : selected ? numeroLine === "ca" ? "Canada" : "US" : "Choose";
+    if (providerBtn) providerBtn.title = provider === "telicall" && ukBound ? uk ? "Telicall UK · " + (formatDisplay(uk) || uk) : "Set a valid UK number in Settings › Dialer" : provider === "numero" && bound ? selected ? "Numero " + (numeroLine === "ca" ? "Canada" : "US") + " · " + (formatDisplay(selected) || selected) : "Choose an available owned Numero number" : "Number the call goes out on";
+    lineRow($("telicallUK"), ukBound ? "GB" : "", ukBound ? "Telicall UK" : "Telicall", uk, "invalid number");
+    $("telicallUK").disabled = ukBound && !uk;
+    $("numeroDefault").hidden = bound;
+    ["us", "ca"].forEach(function (line) {
+      var button = $(line === "us" ? "numeroUS" : "numeroCA"), number = numeroNumber(line);
+      button.hidden = !bound; button.disabled = !number;
+      lineRow(button, line === "us" ? "US" : "CA", "Numero " + (line === "us" ? "US" : "Canada"), number, "not configured");
+    });
     if (providerMenu) providerMenu.querySelectorAll("[data-provider]").forEach(function (b) {
-      b.setAttribute("aria-checked", b.getAttribute("data-provider") === provider ? "true" : "false");
+      b.setAttribute("aria-checked", b.getAttribute("data-provider") === providerChoice() ? "true" : "false");
     });
   }
-  attachMenu(providerBtn, providerMenu, "data-provider", function () { return provider; }, function (v) {
-    provider = v === "telicall" ? "telicall" : "numero"; renderProvider();
-    try { chrome.storage.local.set({ provider: provider }); } catch (e) { /* storage unavailable */ }
+  attachMenu(providerBtn, providerMenu, "data-provider", providerChoice, function (v) {
+    var before = providerChoice();
+    if (v === "numero-us" || v === "numero-ca") {
+      var line = v.slice(7);
+      if (!numeroNumber(line)) return;
+      numeroLine = line; provider = "numero";
+    } else if (v === "telicall" && (!telicallBound() || telicallNumber())) provider = "telicall";
+    else if (v === "numero" && !numeroBound()) provider = "numero";
+    else return;
+    if (before !== providerChoice()) recoveryRevision++;
+    renderProvider();
+    try { chrome.storage.local.set({ provider: provider, numeroLine: numeroLine }); } catch (e) { /* storage unavailable */ }
   });
   renderProvider();
 
@@ -704,10 +967,65 @@
 
   /* SIP.js asks this for the call's local media (defaultSessionDescriptionHandlerFactory above).
    * A Mac voice hands back the service's converted stream; anything else is the plain microphone. */
-  async function localMedia(constraints) {
-    if (macVoice(voice)) return MacVoice.start(macVoice(voice), MAC_PITCH);
-    if (!constraints || (!constraints.audio && !constraints.video)) return new MediaStream();
-    return navigator.mediaDevices.getUserMedia(constraints);
+  function stopStream(stream) {
+    if (stream) stream.getTracks().forEach(function (track) { try { track.stop(); } catch (e) { /* already stopped */ } });
+  }
+  function cancelPendingMedia() { mediaWaiters.slice().forEach(function (cancel) { cancel(); }); }
+  function mediaFailed(token, gen) {
+    return !!(mediaFailure && mediaFailure.token === token && mediaFailure.gen === gen && attempt === token && generation === gen && !stopped && panelVisible);
+  }
+  function showMediaFailure() {
+    if (!mediaFailure || !mediaFailed(mediaFailure.token, mediaFailure.gen)) return;
+    subEl.textContent = mediaFailure.kind === "denied" ? "Microphone blocked — allow Search to use the microphone, then try again" : MEDIA_TIMEOUT_NOTE;
+    setStatus(mediaFailure.kind === "denied" ? "Microphone blocked" : "Microphone didn't start", "err");
+  }
+  function startMedia(start, token, gen, usesMacVoice) {
+    return new Promise(function (resolve, reject) {
+      var settled = false, timer;
+      function current() { return !settled && !stopped && panelVisible && token === activeAttempt && gen === generation && networkRouteCurrent(activeNetworkRoute, gen); }
+      function finish(error, stream) {
+        if (settled) { stopStream(stream); return; }
+        if (error && current() && /NotAllowed|PermissionDenied|permission|not allowed/i.test(String((error.name || "") + " " + (error.message || "")))) {
+          mediaFailure = { token: token, gen: gen, kind: "denied" };
+        }
+        settled = true; clearTimeout(timer);
+        mediaWaiters = mediaWaiters.filter(function (value) { return value !== cancel; });
+        if (error) reject(error); else resolve(stream);
+      }
+      function cancel(error) {
+        if (usesMacVoice && token === activeAttempt) MacVoice.stop();
+        finish(error || new DOMException("Call cancelled", "AbortError"));
+      }
+      mediaWaiters.push(cancel);
+      timer = setTimeout(function () {
+        if (!current()) { cancel(); return; }
+        mediaFailure = { token: token, gen: gen, kind: "timeout" };
+        var error = new Error("Microphone did not start in time"); error.name = "MediaStartTimeoutError";
+        cancel(error);
+      }, MEDIA_START_TIMEOUT);
+      Promise.resolve().then(function () {
+        if (!current()) throw new DOMException("Call cancelled", "AbortError");
+        return start(current);
+      }).then(function (stream) {
+        if (!current()) { stopStream(stream); if (!settled) cancel(); return; }
+        finish(null, stream);
+      }, function (error) { finish(error); });
+    });
+  }
+  async function localMedia(constraints, gen) {
+    var token = activeAttempt;
+    if (stopped || !panelVisible || !token || gen !== generation || !networkRouteCurrent(activeNetworkRoute, gen)) throw new DOMException("Call cancelled", "AbortError");
+    var stream;
+    if (macVoice(voice)) stream = await startMedia(function (current) { return MacVoice.start(macVoice(voice), MAC_PITCH, current); }, token, gen, true);
+    else if (!constraints || (!constraints.audio && !constraints.video)) stream = new MediaStream();
+    else stream = await startMedia(function () { return navigator.mediaDevices.getUserMedia(constraints); }, token, gen, false);
+    if (stopped || !panelVisible || token !== activeAttempt || gen !== generation || !networkRouteCurrent(activeNetworkRoute, gen)) {
+      stopStream(stream);
+      MacVoice.stop();
+      throw new DOMException("Call cancelled", "AbortError");
+    }
+    if (calling && cur && cur.direction === "out") { subEl.textContent = "Calling…"; setStatus("Calling…", "calling"); }
+    return stream;
   }
 
   /* ------------------------------ SIP ------------------------------ */
@@ -715,7 +1033,14 @@
   function configured(c) { return !!(c && c.wss && c.domain && c.user && c.password); }
 
   async function boot() {
+    if (stopped) return;
     var gen = ++generation;
+    activeNetworkRoute = null;
+    clearTimeout(routeExpiryTimer); routeExpiryTimer = null;
+    closeSessionHandlers();
+    reconnectPending = false;
+    cancelPendingMedia();
+    activeAttempt = 0; attempt++;
     stopRingback();
     if (cur) {                 // a call still dialing goes down with the old connection (its delegate is stale from here on)
       cur.dropped = true; callEnd(cur);
@@ -738,6 +1063,11 @@
       return;
     }
     setupEl.hidden = true;
+    var network;
+    try { network = validatedNetworkRoute(CFG.protectedRoute); }
+    catch (error) { stopNetworkRoute(error.message); return; }
+    activeNetworkRoute = network;
+    armRouteExpiry(network);
 
     var remote = $("remote");
     var su = new SIP.Web.SimpleUser(CFG.wss, {
@@ -747,47 +1077,84 @@
         authorizationUsername: CFG.user,
         authorizationPassword: CFG.password,
         displayName: CFG.user,
+        logConfiguration: false,
+        logBuiltinEnabled: false,
         // Where the call's microphone comes from: the real one, or the Mac voice service's
         // converted stream when a Mac voice is selected (macvoice.js, localMedia below).
-        sessionDescriptionHandlerFactory: SIP.Web.defaultSessionDescriptionHandlerFactory(localMedia)
+        sessionDescriptionHandlerFactoryOptions: { peerConnectionConfiguration: iceConfiguration(network) },
+        sessionDescriptionHandlerFactory: callDescriptionFactory(network, gen)
       }
     });
     su.delegate = {
       onCallReceived: async function () {
-        if (gen !== generation) return;
+        if (gen === generation && (inCall || calling || incoming)) {
+          // SimpleUser owns one session. A repeated callback must not replace it
+          // or expire an established allocation merely because another call arrived.
+          if (!networkRouteCurrent(network, gen, inCall)) stopNetworkRoute("The call route changed or expired. Reconnect before calling");
+          return;
+        }
+        if (gen !== generation || stopped || !panelVisible || endingCall || !networkRouteCurrent(network, gen)) {
+          try { await su.decline(); } catch (e) { /* the caller may already have left */ }
+          return;
+        }
         closeSheet();
-        subEl.textContent = "Incoming…";
+        attempt++; recovering = null;
+        subEl.textContent = "Incoming call — answer when you're ready";
         whoEl.textContent = "";
         var from = "";
         try { from = su.session && su.session.remoteIdentity && su.session.remoteIdentity.uri ? String(su.session.remoteIdentity.uri.user || "") : ""; } catch (e) { from = ""; }
         callStart(from || "unknown", "", "in");
-        try { await su.answer(); } catch (e) { subEl.textContent = "Could not answer"; }
+        incoming = true; syncButtons();
+        setStatus("Incoming call", "calling");
       },
       onCallAnswered: function () {
         if (gen !== generation) return;
+        if (stopped || !panelVisible || !activeAttempt || !networkRouteCurrent(network, gen)) {
+          try { Promise.resolve(su.hangup()).catch(function () {}); } catch (e) { /* already ended */ }
+          return;
+        }
         if (cur) cur.answeredAt = Date.now();
         stopRingback();
-        inCall = true; calling = false; syncButtons(); startTimer();
+        inCall = true; calling = false; incoming = false; syncButtons(); startTimer();
+        setStatus("In a call", "oncall");
         var vi = cur && cur.voice ? voiceInfo(cur.voice) : null;
         subEl.textContent = cur && cur.voice ? "Connected · voice " + (vi ? vi.label : cur.voice) : "Connected";
         sendPendingExt();
       },
       onCallHangup: function () {
         if (gen !== generation) return;
+        if (cur && mediaFailed(attempt, gen)) cur.error = true;
         callEnd(cur);
+        cancelPendingMedia();
         stopRingback();
         MacVoice.stop();
-        inCall = false; muted = false;
+        activeAttempt = 0; incoming = false; inCall = false; muted = false;
         $("mute").classList.remove("on"); $("muteLbl").textContent = "Mute";
         calling = false; syncButtons(); subEl.textContent = "Call ended"; stopTimer();
         setStatus(registered ? "Registered" : "Not registered", registered ? "reg" : "");
+        showMediaFailure();
+        if (network.mode === "proxy" && network.expiresAt * 1000 <= Date.now()) {
+          stopNetworkRoute("The protected call route expired. Reconnect the proxy before calling");
+          return;
+        }
+        if (reconnectPending) boot();
       },
       onRegistered: function () {
         if (gen !== generation) return;
+        if (!networkRouteCurrent(network, gen) && !(inCall && networkRouteCurrent(network, gen, true))) {
+          stopNetworkRoute("The call route changed or expired. Reconnect before calling"); return;
+        }
         registered = true; connecting = false;
+        if (inCall) return;
         setStatus("Registered", "reg");
         callBtn.disabled = false;
-        if (pending) { var p = pending; pending = null; setNumber(p.number, p.name); setLead(p.ref); dial(); }
+        if (pending) {
+          var p = pending; pending = null;
+          if (panelVisible && !stopped) {
+            setNumber(p.number, p.name); setLead(p.ref);
+            if (CFG.autodial !== false) dial();
+          }
+        }
       },
       onUnregistered: function () {
         if (gen !== generation) return;
@@ -832,51 +1199,61 @@
     subEl.textContent = "Sending extension " + ext;
   }
 
-  /* Chrome shows no permission prompts inside a side panel — a getUserMedia there just comes
-   * back "Permission dismissed". So the microphone is granted once from mic.html in a normal
-   * tab; the call resumes when that page reports back. */
-  var MIC_URL = chrome.runtime.getURL("mic.html");
+  /* Search asks macOS explicitly from a visible Call or Answer gesture. This bundled page
+   * shows a denial inline; it never queues an automatic retry or opens a permission page. */
   async function micState() {
+    if (window.__searchDialer && typeof window.__searchDialer.requestMicrophone === "function") {
+      try {
+        var permission = await window.__searchDialer.requestMicrophone();
+        return permission && permission.state === "granted" ? "granted" : "denied";
+      } catch (e) { return "denied"; }
+    }
     try { var st = await navigator.permissions.query({ name: "microphone" }); return st.state; }
     catch (e) { return "prompt"; }
   }
-  async function openMicSetup() {
-    try {
-      var ctxs = await chrome.runtime.getContexts({ contextTypes: ["TAB"] });
-      var open = ctxs.find(function (c) { return String(c.documentUrl || "").indexOf(MIC_URL) === 0; });
-      if (open) {
-        await chrome.tabs.update(open.tabId, { active: true });
-        await chrome.windows.update(open.windowId, { focused: true });
-      } else {
-        await chrome.tabs.create({ url: MIC_URL, active: true });
-      }
-    } catch (e) { console.error(e); }
-  }
   function needMic(n, state, ref) {
-    pending = { number: n, name: whoEl.textContent, ref: ref || null };   // resumes on the "mic-granted" message
-    // Search: macOS holds the microphone for Search as a whole; the page that opens is System Settings.
-    subEl.textContent = state === "denied" ? "Microphone blocked — allow Search in System Settings › Privacy & Security"
-                                           : "Allow the microphone for Search in System Settings › Privacy & Security";
-    openMicSetup();
+    // A denial never leaves an old number waiting to call after a later permission change.
+    pending = null; activeAttempt = 0;
+    subEl.textContent = "Microphone blocked — allow Search in System Settings › Privacy & Security, then try again";
+    setStatus("Microphone blocked", "err");
   }
 
-  async function dial() {
-    var n = cleanNumber(entry);
-    if (!n || !registered || inCall || calling || !simple) return;
-    var ref = lead && lead.number === n ? lead.ref : null;   // otto's lead, when this is the number it loaded
+  async function dial(retry) {
+    var context = retry && retry.microphoneRetry && retry.kind === "out" ? retry : null;
+    if (context && !retryCurrent(context)) return;
+    var n = context ? context.number : cleanNumber(entry);
+    if (!n || stopped || !panelVisible || !registered || inCall || calling || incoming || endingCall || recovering || !simple) return;
+    if (!requireNetworkRoute()) return;
+    var route = context ? context.route : numberRoute(n); // freeze the chosen line before permission/media work can yield
+    if (route.error) { subEl.textContent = route.error; return; }
+    var ref = context ? context.ref : lead && lead.number === n ? lead.ref : null;
+    context = context || retryContext("out", n, route, ref);
+    var token = ++attempt, gen = generation, client = simple;
+    context.token = token;
+    mediaFailure = null;
+    activeAttempt = token;
+    subEl.textContent = "Allow Search to use the microphone if macOS asks…";
+    setStatus("Checking microphone…");
     var mic = await micState();
-    if (mic !== "granted") { needMic(n, mic, ref); return; }
+    if (stopped || !panelVisible || token !== activeAttempt || gen !== generation || client !== simple) return;
+    if (mic !== "granted") {
+      needMic();
+      if (await recoverMicrophone(context)) return dial(context);
+      return;
+    }
     if (inCall || calling) return;               // a second tap got here while the first was checking the microphone
     if (macVoice(voice) && !MacVoice.online()) { subEl.textContent = "Voice service is off — start it or pick another voice"; return; }
-    subEl.textContent = "Calling…";
+    subEl.textContent = "Starting microphone…";
+    setStatus("Starting microphone…", "calling");
     calling = true; syncButtons();               // show the red hang-up straight away
     lead = null;                                 // one call per reference
-    var call = callStart(n, whoEl.textContent, "out", ref);
+    var call = callStart(n, context.name, "out", ref, route);
     // The final answer to our INVITE (486 busy, 480 no answer, …), kept for the call record.
     var finalStatus = function (resp) { var sc = resp && resp.message && resp.message.statusCode; if (sc) call.code = sc; };
     startRingback();                             // ring while dialing, not only once 180 arrives
     try {
-      var extraHeaders = provider === "telicall" ? ["X-Provider: telicall"] : [];
+      var extraHeaders = call.provider === "telicall" ? ["X-Provider: telicall"] : [];
+      if (call.provider === "numero" && call.numeroLine) extraHeaders.push("X-Numero-Line: " + call.numeroLine);
       if (voice && !macVoice(voice)) extraHeaders.push("X-Voice: " + voice);   // 00_voice.xml: semitones → mod_soundtouch, "female" → vc_start.lua; Mac voices are converted here
       // earlyMedia:true makes SIP.js apply the 183 Session Progress media and attach the remote
       // audio while it's still ringing. A bare 180 carries no audio, so we ring locally until
@@ -884,7 +1261,7 @@
       // extraHeaders must sit at the top level of the InviterOptions: SIP.js 0.21 builds the
       // INVITE in the Inviter constructor from options.extraHeaders. A nested requestOptions
       // object is only read for re-INVITEs, so headers placed there silently never leave.
-      await simple.call("sip:" + encodeURIComponent(n) + "@" + CFG.domain,
+      await client.call("sip:" + encodeURIComponent(route.user) + "@" + CFG.domain,
         { earlyMedia: true, inviteWithoutSdp: false, extraHeaders: extraHeaders },
         { requestDelegate: { onProgress: function (resp) {
             if (inCall) return;
@@ -894,6 +1271,12 @@
             else startRingback();                          // 180, or 183 without audio: keep ringing
         }, onAccept: finalStatus, onRedirect: finalStatus, onReject: finalStatus } });
     } catch (e) {
+      if (mediaFailed(token, gen)) {
+        context.cleanup = failMediaStart(client, call);
+        if (await recoverMicrophone(context)) return dial(context);
+        return;
+      }
+      if (token !== activeAttempt || gen !== generation || stopped || !panelVisible) return;
       // Nothing was sent, or it could not be: the microphone, the voice service, the connection.
       // A busy or unanswered number never lands here; it ends through onCallHangup with a status.
       stopRingback();
@@ -903,15 +1286,118 @@
       call.error = true; callEnd(call);
       nudge(displayEl, "shake");
       if (/voice service/i.test(text)) subEl.textContent = text.replace(/^\w*Error\s*/, "");
-      else if (/NotAllowed|permission|device/i.test(text)) needMic(n, "prompt", ref);
+      else if (/NotAllowed|PermissionDenied|permission|not allowed/i.test(text)) {
+        needMic();
+        context.cleanup = failMediaStart(client, call);
+        if (await recoverMicrophone(context)) return dial(context);
+      }
       else subEl.textContent = "Call failed";
       console.error(e);
     }
   }
-  async function hangup() { if (!inCall && cur) cur.hung = true; stopRingback(); try { await simple.hangup(); } catch (e) { /* no session */ } }
+  function failMediaStart(client, call) {
+    if (call) { call.error = true; callEnd(call); }
+    stopRingback(); MacVoice.stop();
+    activeAttempt = 0; incoming = false; calling = false; inCall = false; syncButtons();
+    var cleanup;
+    try { cleanup = Promise.resolve(client.hangup()).catch(function () {}); } catch (e) { cleanup = Promise.resolve(); }
+    showMediaFailure();
+    return cleanup;
+  }
+  async function hangup() {
+    // A queued number or permission check is a call too, even while the red button is inert.
+    cancelPendingMedia();
+    pending = null; activeAttempt = 0; attempt++; cancelEpoch++; recovering = null; entryExt = ""; lead = null;
+    var client = simple, decline = incoming, hadCall = !!cur;
+    if (!inCall && cur) cur.hung = true;
+    if (cur) callEnd(cur, stopped);
+    stopRingback(); MacVoice.stop(); stopTimer();
+    incoming = false; calling = false; inCall = false; muted = false;
+    $("mute").classList.remove("on"); $("muteLbl").textContent = "Mute";
+    syncButtons();
+    if (hadCall) subEl.textContent = "Call ended";
+    if (!client || endingCall) return;
+    endingCall = true;
+    try { await (decline ? client.decline() : client.hangup()); } catch (e) { /* no session, or it already ended */ }
+    finally {
+      endingCall = false;
+      if (!stopped && client === simple && reconnectPending) boot();
+    }
+  }
+
+  async function answerIncoming(retry) {
+    var context = retry && retry.microphoneRetry && retry.kind === "in" ? retry : null;
+    if (context && !sameIncoming(context)) return;
+    if (!incoming || stopped || !panelVisible || endingCall || recovering || !simple) return;
+    if (!requireNetworkRoute()) return;
+    context = context || retryContext("in", cur && cur.number || "", null, null);
+    var client = simple, token = ++attempt, gen = generation;
+    context.token = token;
+    mediaFailure = null;
+    activeAttempt = token;
+    incoming = false; calling = true; syncButtons(); subEl.textContent = "Answering…";
+    setStatus("Answering…", "calling");
+    try {
+      subEl.textContent = "Allow Search to use the microphone if macOS asks…";
+      var mic = await micState();
+      if (token !== activeAttempt || gen !== generation || stopped || !panelVisible) return;
+      if (mic !== "granted") {
+        calling = false; incoming = true; syncButtons(); needMic();
+        if (await recoverMicrophone(context)) {
+          if (sameIncoming(context)) return answerIncoming(context);
+          subEl.textContent = "Microphone allowed. The incoming call ended — ask the caller to try again";
+          return;
+        }
+        if (sameIncoming(context)) { await hangup(); needMic(); }
+        return;
+      }
+      subEl.textContent = "Starting microphone…";
+      await client.answer();
+    }
+    catch (e) {
+      if (mediaFailed(token, gen) || /NotAllowed|PermissionDenied|permission|not allowed/i.test(String((e && e.name || "") + " " + (e && e.message || "")))) {
+        if (!retryCurrent(context)) return;
+        // SIP may already have terminated an Invitation whose media failed. Never
+        // treat a later incoming call as the one the user originally answered.
+        if (sameIncoming(context)) {
+          activeAttempt = 0; calling = false; incoming = true; syncButtons(); showMediaFailure();
+        } else failMediaStart(client, context.call);
+        if (await recoverMicrophone(context)) {
+          if (sameIncoming(context)) return answerIncoming(context);
+          subEl.textContent = "Microphone allowed. The incoming call ended — ask the caller to try again";
+          setStatus(registered ? "Registered" : "Not registered", registered ? "reg" : "");
+          return;
+        }
+        if (sameIncoming(context)) { await hangup(); needMic(); }
+        return;
+      }
+      if (token !== activeAttempt || gen !== generation || stopped || !panelVisible) return;
+      await hangup();
+      subEl.textContent = "Could not answer";
+    }
+  }
+
+  function setVisible(value) {
+    panelVisible = !!value && !stopped;
+    if (!panelVisible) return hangup();
+    return true;
+  }
+  function shutdown() {
+    if (stopped) return false;
+    stopped = true; panelVisible = false; generation++;
+    activeNetworkRoute = null;
+    clearTimeout(routeExpiryTimer); routeExpiryTimer = null;
+    closeSessionHandlers();
+    var client = simple, hangupTask = hangup();
+    ending.slice().forEach(function (call) { fileCall(call, true); });
+    simple = null; registered = false; connecting = false;
+    return Promise.allSettled([hangupTask, client ? Promise.resolve().then(function () { return client.disconnect(); }) : Promise.resolve()]);
+  }
 
   callBtn.addEventListener("click", dial);
   hangBtn.addEventListener("click", hangup);
+  $("answer").addEventListener("click", answerIncoming);
+  $("decline").addEventListener("click", hangup);
   $("mute").addEventListener("click", function () {
     if (!inCall || !simple) return;
     muted = !muted;
@@ -925,16 +1411,28 @@
   /* ------------------------------ requests from otto ------------------------------ */
 
   function requestDial(number, name, ref) {
+    if (stopped || !panelVisible) return;
     var r = NORMALIZE(number, region);
     var n = r.dial || cleanNumber(number);
     if (!n) return;
-    closeSheet();
-    if (inCall || calling) {
+    if (inCall || calling || incoming || endingCall) {
+      // A new dial request cannot use this lease, and must not expire a healthy
+      // established call. A different native route still cancels that call.
+      if (activeNetworkRoute && !networkRouteCurrent(activeNetworkRoute, generation, inCall)) {
+        stopNetworkRoute("The call route changed or expired. Reconnect before calling"); return;
+      }
+      closeSheet();
       subEl.textContent = "Hang up to call " + (r.display || n);
       return;
     }
+    if (CFG) {
+      try { validatedNetworkRoute(CFG.protectedRoute); }
+      catch (error) { stopNetworkRoute(error.message); return; }
+    }
+    closeSheet();
     setEntry(n, r.ext); whoEl.textContent = name ? String(name) : "";
     setLead(ref);
+    if (CFG && CFG.autodial === false) { pending = null; subEl.textContent = "Ready to call"; return; }
     if (registered) dial();
     else {
       pending = { number: number, name: name, ref: ref };
@@ -952,13 +1450,14 @@
     if (!msg) return;
     if (msg.type === "mic-granted") {
       // the one-time microphone tab reported back: resume the call it interrupted
-      if (pending && registered && !inCall) { var p = pending; pending = null; setNumber(p.number, p.name); setLead(p.ref); dial(); }
-      else if (!inCall) subEl.textContent = "Microphone allowed";
+      if (panelVisible && !stopped && pending && registered && !inCall) { var p = pending; pending = null; setNumber(p.number, p.name); setLead(p.ref); dial(); }
+      else if (panelVisible && !stopped && !inCall) subEl.textContent = "Microphone allowed";
       return;
     }
     if (msg.type !== "dialer:dial") return;
+    var requestEpoch = cancelEpoch, wasVisible = panelVisible;
     windowReady.then(function () {
-      if (!forMe(msg.windowId)) return;
+      if (!wasVisible || requestEpoch !== cancelEpoch || !forMe(msg.windowId)) return;
       chrome.storage.session.remove("pendingDial").catch(function () {});
       requestDial(msg.number, msg.name, Calls.cleanRef(msg.ref));
     });
@@ -974,12 +1473,41 @@
   // chrome.storage.local and never trigger a reconnect.
 
   var CFG_KEYS = ["wss", "domain", "user", "password", "autodial"];
+  var NUMERO_KEYS = ["numeroUS", "numeroCA"];
+  var TELICALL_KEYS = ["telicallUK"];
   chrome.storage.onChanged.addListener(function (changes, area) {
     if (area !== "local") return;
+    var changedNetwork = "protectedRoute" in changes;
+    if (changedNetwork) {
+      routeSettingsEpoch++;
+      CFG = Object.assign(CFG || {}, { protectedRoute: changes.protectedRoute.newValue });
+      stopNetworkRoute("The call route changed. Reconnecting…");
+    }
+    if (CFG_KEYS.concat(NUMERO_KEYS, TELICALL_KEYS).some(function (key) { return key in changes; })) recoveryRevision++;
     if (changes[Calls.OUTBOX_KEY]) outbox = Calls.list(changes[Calls.OUTBOX_KEY].newValue);
     if (changes.provider) {  // trunk choice — sync the selector, never reconnect
+      if ((changes.provider.newValue === "telicall" ? "telicall" : "numero") !== provider) recoveryRevision++;
       provider = changes.provider.newValue === "telicall" ? "telicall" : "numero";
       renderProvider();
+    }
+    if (changes.numeroLine) {
+      if (lineChoice(changes.numeroLine.newValue) !== numeroLine) recoveryRevision++;
+      numeroLine = lineChoice(changes.numeroLine.newValue);
+      renderProvider();
+    }
+    if (NUMERO_KEYS.some(function (key) { return key in changes; })) {
+      freshConfiguration(NUMERO_KEYS).then(function (values) {
+        if (stopped) return;
+        if (applyConfiguration(values, false)) boot();
+        renderProvider();
+      }).catch(function () { if (!stopped) stopNetworkRoute("The call route couldn't be read. Try again"); });
+    }
+    if (TELICALL_KEYS.some(function (key) { return key in changes; })) {
+      freshConfiguration(TELICALL_KEYS).then(function (values) {
+        if (stopped) return;
+        if (applyConfiguration(values, false)) boot();
+        renderProvider();
+      }).catch(function () { if (!stopped) stopNetworkRoute("The call route couldn't be read. Try again"); });
     }
     if (changes.voice) {     // voice changer — sync the menu, never reconnect
       voice = validVoice(changes.voice.newValue);
@@ -989,12 +1517,8 @@
       region = (changes.region.newValue || "GB").toUpperCase();
       renderNum();
     }
-    if (!CFG_KEYS.some(function (k) { return k in changes; })) return;
-    chrome.storage.local.get(CFG_KEYS).then(function (c) {
-      CFG = c;
-      if (!inCall) boot();
-      else subEl.textContent = "Settings saved — reconnects after this call";
-    });
+    if (changedNetwork) { refreshConnectionConfiguration(true); return; }
+    if (CFG_KEYS.some(function (key) { return key in changes; })) refreshConnectionConfiguration(false);
   });
 
   /* ------------------------------ window size (popup fallback only) ------------------------------ */
@@ -1012,6 +1536,7 @@
   /* ------------------------------ start ------------------------------ */
 
   callBtn.disabled = true;
+  window.__searchDialer.bindLifecycle({ setVisible: setVisible, hangup: hangup, shutdown: shutdown });
   placeSheet();
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(placeSheet);
   var q = new URLSearchParams(location.search);
@@ -1021,23 +1546,26 @@
   try { startRef = q.get("ref") ? Calls.cleanRef(JSON.parse(q.get("ref"))) : null; } catch (e) { startRef = null; }
   if (startNumber) { setNumber(q.get("n"), startName); setLead(startRef); }
 
-  Promise.all([chrome.storage.local.get(CFG_KEYS.concat(["provider", "region", "voice"])), chrome.storage.session.get("pendingDial"), windowReady]).then(function (r) {
+  var startupEpoch = cancelEpoch;
+  Promise.all([freshConfiguration(CFG_KEYS.concat(NUMERO_KEYS, TELICALL_KEYS, ["provider", "numeroLine", "region", "voice"])), chrome.storage.session.get("pendingDial"), windowReady]).then(function (r) {
+    if (stopped) return;
     CFG = r[0];
     provider = r[0].provider === "telicall" ? "telicall" : "numero";
+    numeroLine = lineChoice(r[0].numeroLine);
     renderProvider();
     voice = validVoice(r[0].voice);
     renderVoice();
     region = (r[0].region || "GB").toUpperCase();
     if (entry) renderNum();                       // re-render a URL-supplied number with the real region
     var pd = r[1] && r[1].pendingDial;
-    if (startNumber && q.get("auto") === "1" && CFG.autodial !== false) {
+    if (cancelEpoch === startupEpoch && panelVisible && startNumber && q.get("auto") === "1" && CFG.autodial !== false) {
       pending = { number: q.get("n"), name: startName, ref: startRef };   // popup fallback: request in the URL
     } else if (pd && pd.number && Date.now() - (pd.at || 0) < 60000 && forMe(pd.windowId)) {
       chrome.storage.session.remove("pendingDial").catch(function () {});
       var pdRef = Calls.cleanRef(pd.ref);
       setNumber(pd.number, pd.name); setLead(pdRef);              // with autodial off, the Call button still dials for this lead
-      if (CFG.autodial !== false) pending = { number: pd.number, name: pd.name, ref: pdRef };
+      if (cancelEpoch === startupEpoch && panelVisible && CFG.autodial !== false) pending = { number: pd.number, name: pd.name, ref: pdRef };
     }
     boot();
-  });
+  }).catch(function () { if (!stopped) stopNetworkRoute("The call route couldn't be read. Try again"); });
 })();

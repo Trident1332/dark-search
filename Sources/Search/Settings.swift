@@ -636,6 +636,7 @@ struct SettingsPanel: View {
     /// Settings › Dialer › Status: what this window's dialer says, when it
     /// has been opened.
     private var dialerStatusDetail: String {
+        if let reason = dialer.blockedReason { return reason }
         guard let page = browser.dialerPage else {
             return prefs.dialerSetup.complete
                 ? (DialerPassword.kept(prefs.dialerSetup) ? "Opens with the dialer: ⇧⌘K" : "Enter the seat's password first")
@@ -931,7 +932,7 @@ struct SettingsPanel: View {
                         .controlSize(.small)
                         .transition(.opacity)
                 }
-                Pill(proxy.check == .testing ? "Poking" : "Poke") { proxy.test() }
+                Pill(proxy.check == .testing ? "Poking" : "Poke") { proxy.test(allowCredentialPrompt: true) }
                     .disabled(proxy.check == .testing || !proxy.setup.complete)
                     .opacity(proxy.check == .testing || !proxy.setup.complete ? 0.5 : 1)
             }
@@ -972,6 +973,7 @@ struct SettingsPanel: View {
         case "dialer.on": Switch(on: $prefs.dialerOn)
         case "dialer.open":
             Pill(browser.dialerShown ? "Close" : "Show", filled: !browser.dialerShown) { browser.toggleDialer() }
+                .disabled(dialer.blockedReason != nil && !browser.dialerShown)
         case "dialer.autodial": Switch(on: $prefs.dialerAutodial)
         case "dialer.region": DialerRegionPicker(prefs: prefs)
         case "dialer.sites":
@@ -1096,6 +1098,8 @@ struct SettingsPanel: View {
             DialerServerFields(prefs: prefs)
         case "dialer.seat":
             DialerSeatFields(prefs: prefs)
+        case "dialer.numbers":
+            DialerPhoneFields(prefs: prefs)
         case "dialer.sites":
             if !searched {
                 DialerSitesList(prefs: prefs, draft: $dialerSiteDraft)

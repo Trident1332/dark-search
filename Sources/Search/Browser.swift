@@ -3146,6 +3146,7 @@ final class Browser: NSObject, ObservableObject {
 
     /// Its window closed for good, with others open: every page let go.
     func closeAll() {
+        dropDialer()
         cancelDisplay()
         cancelCapture()
         for questions in heldDialogs.values { questions.forEach { $0.dismiss() } }
@@ -3302,8 +3303,7 @@ final class Browser: NSObject, ObservableObject {
         if floating == shown.id { land() }
         let current = splittable(shown)
         let right = Tab(shy: current.shy,
-                        configuration: current.shy || current.usesTor ? Web.configuration(shy: true, store: current.store)
-                            : Web.configuration(space: spaceID))
+                        configuration: Web.configuration(forNewTabFrom: current, space: spaceID))
         prepare(right)
         right.groupID = current.groupID
         guard let index = tabs.firstIndex(where: { $0.id == current.id }) else { return }
@@ -4780,7 +4780,7 @@ final class Browser: NSObject, ObservableObject {
     /// after the ones that page already opened (see placeForLink).
     ///
     /// `from`: the tab it was opened out of. A private one's opens private,
-    /// in the same store, as a link that asks for a new window already does.
+    /// with a fresh session for the new tab.
     ///
     /// `mayWait`: opened behind the page by hand, or one of a batch of links
     /// from another app. With Settings › Tabs › Load background tabs when
@@ -4804,7 +4804,7 @@ final class Browser: NSObject, ObservableObject {
         // A new tab is in this window's space, with its sign-ins — not the
         // space of whichever window is in front, when this one is behind it.
         let tab = if let source, source.shy || source.usesTor, page == nil {
-            Tab(shy: source.shy, configuration: Web.configuration(shy: true, store: source.store))
+            Tab(shy: source.shy, configuration: Web.configuration(forNewTabFrom: source, space: spaceID))
         } else {
             Tab(configuration: page ?? Web.configuration(space: spaceID))
         }
@@ -5024,19 +5024,8 @@ final class Browser: NSObject, ObservableObject {
     /// history, and no place in tomorrow's session.
     func newShyTab() {
         if websitePopup { tabDestination.newShyTab(); return }
-        // Never two empty private tabs, as ⌘T never makes two empty ones:
-        // one already open is moved to the chosen position.
-        if let blank = tabs.last(where: { $0.isBlank && $0.shy && !$0.bench && split(for: $0) == nil }) {
-            placeBlank(blank)
-            if activeID != blank.id { leaving() }
-            activeID = blank.id
-            summoning = false
-            typed = ""
-            blank.draft = ""
-            editing = false
-            focusRequest += 1
-            return
-        }
+        // Even a blank tab can have cookies after a download. A new private
+        // tab always means a new session, never a recycled empty page.
         let tab = Tab(shy: true)
         prepare(tab)
         tabs.insert(tab, at: placeForFront())
@@ -6237,7 +6226,9 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
                 owner?.failure = "This address is blocked in Tor tabs to protect the connection"
                 return
             }
-            if OnionAddress.isOnion(url), owner?.usesTor != true {
+            // A new-window request goes through popup policy and gets its
+            // own tab first. Routing it here would replace the opener.
+            if OnionAddress.isOnion(url), owner?.usesTor != true, action.targetFrame != nil {
                 decisionHandler(.cancel)
                 guard action.targetFrame?.isMainFrame ?? true else { return }
                 let request = action.request
@@ -6504,9 +6495,9 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         }, drop: {})
     }
 
-    /// A link that asks for a new window gets a new tab. The configuration
-    /// WebKit hands over has to be the one the new view is built with, or the
-    /// opener and the opened can't talk to each other.
+    /// Ordinary popups keep WebKit's opener relationship. Private pages open
+    /// independently: WebKit requires related views to share website data,
+    /// so their request is loaded separately and no related view is returned.
     func webView(
         _ webView: WKWebView,
         createWebViewWith configuration: WKWebViewConfiguration,
@@ -6535,6 +6526,9 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         let beside = (webView as? PageView)?.takeBeside() == true
         let popup = windowFeatures.width != nil || windowFeatures.height != nil
             || windowFeatures.toolbarsVisibility?.boolValue == false
+        let sourceSpace = parked.first { $0.value.tabs.contains { $0 === opener } }?.key ?? spaceID
+        let configuration = opener.shy
+            ? Web.configuration(forNewTabFrom: opener, space: sourceSpace) : configuration
         // WebKit's copy of the opener's configuration still holds the
         // opener's user content controller — its scripts and its message
         // handlers. Shared, the new tab claimed the opener's handlers as its
@@ -6559,6 +6553,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
            let url = action.request.url, Browser.peekable(url) {
             let page = peekWindow(configuration, from: opener, going: url)
             opener.popupGesture.opened(page.id)
+            if opener.shy { page.openPrivatePopup(action.request); return nil }
             return page.web
         }
         let tab = Tab(shy: opener.shy, configuration: configuration)
@@ -6566,7 +6561,6 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         tab.opener = from
         if clicked { opener.popupGesture.opened(tab.id) }
         if prefs.popupWindows, windowFeatures.width != nil || windowFeatures.height != nil {
-            let sourceSpace = parked.first { $0.value.tabs.contains { $0 === opener } }?.key ?? spaceID
             let popup = Browser(record: WindowRecord(space: sourceSpace), websitePopup: true)
             popup.prepare(tab)
             popup.tabs = [tab]
@@ -6576,6 +6570,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
             let frame = screen.map { Browsers.popupFrame(width: windowFeatures.width?.doubleValue,
                                                         height: windowFeatures.height?.doubleValue, on: $0) }
             Browsers.open(popup, frame: frame)
+            if opener.shy { tab.openPrivatePopup(action.request); return nil }
             return tab.web
         }
         // The link menu's Open Link in New Tab: behind this tab, where a
@@ -6602,6 +6597,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // Returning the view is what makes it the target. WebKit loads the
         // request into it itself when the action carries one.
         if let url = action.request.url { tab.setAddressOptimistically(url) }
+        if opener.shy { tab.openPrivatePopup(action.request); return nil }
         return tab.web
     }
 
