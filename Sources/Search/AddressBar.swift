@@ -68,6 +68,7 @@ private struct AddressWell: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
+            AskAIDoor(browser: browser, compact: true)
             // The bookmark, in the field's own end, as Chrome's star is.
             BookmarkDoor(browser: browser, arrowEdge: .bottom)
         }

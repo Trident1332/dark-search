@@ -47,6 +47,144 @@ final class AddressFocusTests: XCTestCase {
         }
     }
 
+    func testAskAIKeepsBlankAddressMountedAndEachEditorOwnsItsTypingAndTab() async throws {
+        // The panel reads model labels on appearance, even with a synthetic
+        // provider selected. Keep that read inside an empty test directory.
+        let fixture = FileManager.default.temporaryDirectory.appendingPathComponent("address-ai-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        let config = fixture.appendingPathComponent("opencode.json")
+        try Data("{}".utf8).write(to: config)
+        let environmentKeys = ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "OPENCODE_CONFIG"]
+        let savedEnvironment = ProcessInfo.processInfo.environment
+        setenv("XDG_CONFIG_HOME", fixture.path, 1)
+        setenv("XDG_DATA_HOME", fixture.path, 1)
+        setenv("OPENCODE_CONFIG", config.path, 1)
+        defer {
+            for name in environmentKeys {
+                if let value = savedEnvironment[name] { setenv(name, value, 1) }
+                else { unsetenv(name) }
+            }
+            try? FileManager.default.removeItem(at: fixture)
+        }
+
+        for split in [false, true] {
+            try await withWindow(split: split) { browser, window, field in
+                let prefs = browser.prefs
+                let saved = (prefs.ai, prefs.aiProvider, prefs.aiModels[AIProvider.openAI.rawValue] ?? "", prefs.searchesSites, prefs.engineSuggests)
+                let savedPanelWidth = prefs.sidePanelWidth
+                let savedConsent = Store.settings.object(forKey: "ai.told.openAI")
+                prefs.ai = true
+                prefs.aiProvider = .openAI
+                prefs.setAIModel("synthetic-focus-model", for: .openAI)
+                prefs.searchesSites = true
+                prefs.engineSuggests = false
+                prefs.sidePanelWidth = 380
+                _ = AIKeys.save("synthetic-address-focus-key", for: .openAI)
+                Store.settings.removeObject(forKey: "ai.told.openAI")
+                defer {
+                    browser.closeAssistant()
+                    AIKeys.forget(.openAI)
+                    prefs.ai = saved.0
+                    prefs.aiProvider = saved.1
+                    prefs.setAIModel(saved.2, for: .openAI)
+                    prefs.searchesSites = saved.3
+                    prefs.engineSuggests = saved.4
+                    prefs.sidePanelWidth = savedPanelWidth
+                    if let savedConsent { Store.settings.set(savedConsent, forKey: "ai.told.openAI") }
+                    else { Store.settings.removeObject(forKey: "ai.told.openAI") }
+                }
+
+                browser.typed = "red"
+                try await settle()
+                XCTAssertEqual(browser.siteOffer?.host, "reddit.com", "This fixture needs a real Tab completion to keep away from the composer")
+                browser.askFromAddress()
+                try await settle()
+
+                let assistant = try XCTUnwrap(browser.assisting)
+                XCTAssertTrue(assistant.standalone)
+                XCTAssertTrue(browser.fieldShowing, "Ask AI must leave the new-tab search visible (split: \(split))")
+                let host = try XCTUnwrap(window.contentView)
+                XCTAssertTrue(addressField(in: host) === field, "Opening Ask AI must keep the same native address editor mounted")
+                XCTAssertTrue(field.window === window)
+                XCTAssertFalse(field.isHiddenOrHasHiddenAncestor)
+                XCTAssertFalse(field.visibleRect.isEmpty)
+                let fieldRect = field.convert(field.bounds, to: host)
+                XCTAssertGreaterThanOrEqual(fieldRect.minX, host.bounds.minX)
+                XCTAssertLessThanOrEqual(fieldRect.maxX, host.bounds.maxX - 381,
+                                         "The search editor must stay inside the page's room, beside the 380-point panel")
+                let composer = try XCTUnwrap(window.firstResponder as? NSTextView, "Ask AI must focus its native composer")
+                XCTAssertFalse(composer === field.currentEditor(), "Keeping the search visible must not steal the composer's focus")
+                XCTAssertEqual(composer.string, "red")
+                composer.setSelectedRange(NSRange(location: composer.string.utf16.count, length: 0))
+
+                try await key("x", code: 7, in: window)
+                try await settle()
+                XCTAssertEqual(assistant.draft, "redx", "Typed characters must reach the composer once")
+                XCTAssertEqual(browser.typed, "red", "Composer typing must preserve the address draft")
+                let picked = browser.picked
+                try await key("\t", code: 48, in: window)
+                try await settle()
+                XCTAssertNil(browser.siteChip, "Tab in Ask AI must not accept a hidden address completion")
+                XCTAssertEqual(browser.picked, picked, "Tab in Ask AI must not walk address suggestions")
+                XCTAssertEqual(browser.typed, "red")
+                XCTAssertEqual(browser.siteOffer?.host, "reddit.com")
+
+                // Returning from a web tab makes the search visible again.
+                // Its delayed autofocus must leave the cached AI composer's
+                // native focus alone. The optimistic fixture never loads.
+                let source = try XCTUnwrap(browser.active)
+                source.draft = browser.typed
+                let other = Tab(configuration: Web.configuration(space: browser.spaceID))
+                other.setAddressOptimistically(URL(string: "https://address-focus.invalid/other")!)
+                browser.prepare(other)
+                browser.showRow([source, other], active: other.id)
+                browser.typed = ""
+                try await settle()
+                XCTAssertFalse(browser.fieldShowing)
+                browser.select(source)
+                try await settle()
+                XCTAssertTrue(browser.assisting === assistant)
+                XCTAssertTrue(browser.fieldShowing)
+                XCTAssertNotNil(addressField(in: host))
+                let restoredComposer = try XCTUnwrap(window.firstResponder as? NSTextView)
+                // An animated outgoing field can still be in the view tree;
+                // identify keyboard ownership through the live field editor.
+                XCTAssertFalse((restoredComposer.delegate as? NSTextField)?.delegate is AddressField.Coordinator,
+                               "Showing the restored search must not steal the cached composer's focus")
+                let returnedDraft = assistant.draft
+                XCTAssertEqual(restoredComposer.string, returnedDraft)
+                restoredComposer.setSelectedRange(NSRange(location: restoredComposer.string.utf16.count, length: 0))
+                try await key("y", code: 16, in: window)
+                try await settle()
+                XCTAssertEqual(assistant.draft, returnedDraft + "y")
+                XCTAssertEqual(browser.typed, "red", "Typing after tab return still belongs to the AI composer")
+
+                // The retained address field still has its ordinary native
+                // typing and Tab completion after focus returns to it.
+                let composerDraft = assistant.draft
+                browser.askFocus()
+                try await settle()
+                let addressEditor = try XCTUnwrap(window.firstResponder as? NSTextView)
+                let restoredField = try XCTUnwrap(addressEditor.delegate as? AddressField.Field,
+                                                  "An explicit address-focus request must reach the live native address field")
+                XCTAssertTrue(restoredField.delegate is AddressField.Coordinator)
+                XCTAssertTrue(restoredField.isDescendant(of: host))
+                XCTAssertFalse(restoredField.isHiddenOrHasHiddenAncestor)
+                try await key("\t", code: 48, in: window)
+                try await settle()
+                XCTAssertEqual(browser.siteChip?.host, "reddit.com")
+                XCTAssertEqual(browser.typed, "")
+                try await key("q", code: 12, in: window)
+                try await settle()
+                XCTAssertEqual(browser.typed, "q")
+                XCTAssertEqual(assistant.draft, composerDraft, "Address typing must not alter the AI draft")
+                XCTAssertTrue(assistant.turns.isEmpty, "Focus checks must never submit a provider request")
+                XCTAssertNil(assistant.notice)
+                XCTAssertFalse(Store.settings.bool(forKey: "ai.told.openAI"))
+            }
+        }
+    }
+
     func testNavigationAndModifiedKeysDoNotAutofocusBlankSearch() async throws {
         try await withWindow(split: false) { browser, window, field in
             try await blur(window)
