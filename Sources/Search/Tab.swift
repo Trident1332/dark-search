@@ -639,6 +639,7 @@ final class Tab: ObservableObject, Identifiable {
     var onCall: ((Tab, String) -> Void)?
     /// Ask AI was chosen for this page, with its selected words when any.
     var onAskAI: ((Tab, String?) -> Void)?
+    let aiInspection = AIInspection()
     var searchName: (() -> String?)?
     var onSearch: ((Tab, String) -> Void)?
     /// "Add to Search" was pressed on the Chrome Web Store page this tab shows.
@@ -2170,6 +2171,7 @@ final class Tab: ObservableObject, Identifiable {
         built = nil
         Passkeys.shared.forget(web)
         let controller = web.configuration.userContentController
+        aiInspection.stop()
         Web.release(controller)
         controller.removeAllUserScripts()
         // Other extension tabs still use this controller. Their existing

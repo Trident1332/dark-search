@@ -1975,6 +1975,44 @@ final class Bench {
             // seen is checked on a release candidate instead.
             answer(["error": "visible is switched off: it made a window, and no bench verb makes one for now — check this on a release candidate"])
 
+        case "aiInspect":
+            guard Store.testing, let tab = find(request, in: browser) ?? browser.active else { answer(["error":"Inspection probe requires a tab"]); return }
+            let capture = tab.aiInspection
+            func state() -> [String: Any] {
+                ["recording":capture.recording,"connecting":capture.connecting,"requests":capture.requestCount,"bodies":capture.bodyCount,
+                 "lastStop":capture.lastStopReason,"problem":capture.problem ?? "","enabled":browser.assisting?.inspectEnabled ?? false,"busy":browser.assisting?.busy ?? false,
+                 "actions":capture.actions.map { ["expression":$0.expression,"result":$0.result ?? ""] }]
+            }
+            switch request["action"] as? String {
+            case "start":
+                Task { await capture.start(in: tab); answer(state()) }; return
+            case "enable":
+                browser.assisting?.setInspection(request["enabled"] as? Bool ?? true)
+            case "snapshot":
+                Task {
+                    do { let snapshot = try await capture.snapshot(); answer(["network":snapshot.network,"page":snapshot.page]) }
+                    catch { answer(["error":error.localizedDescription]) }
+                }; return
+            case "tool":
+                Task { answer(["value":await capture.tool(request["name"] as? String ?? "read_inspection",arguments:request["arguments"] as? [String:Any] ?? [:])]) }; return
+            case "stop": capture.stop()
+            case "picture":
+                guard let assistant = browser.assisting, let path = request["path"] as? String else { answer(["error":"Missing assistant/path"]); return }
+                let host = NSHostingView(rootView:AssistantPanel(browser:browser,assistant:assistant,drawn:true).frame(width:380,height:780).environment(\.colorScheme,.dark))
+                host.frame = NSRect(origin:.zero,size:host.fittingSize)
+                let window = NSWindow(contentRect:host.frame,styleMask:.borderless,backing:.buffered,defer:false)
+                window.appearance = NSAppearance(named:.darkAqua);window.contentView = host;host.layoutSubtreeIfNeeded()
+                DispatchQueue.main.asyncAfter(deadline:.now()+0.4) {
+                    guard let bitmap = host.bitmapImageRepForCachingDisplay(in:host.bounds) else { answer(["error":"Nothing drawn"]);return }
+                    host.cacheDisplay(in:host.bounds,to:bitmap)
+                    do { try bitmap.representation(using:.png,properties:[:])?.write(to:URL(fileURLWithPath:path));answer(["saved":path]) }
+                    catch { answer(["error":error.localizedDescription]) }
+                    window.contentView = nil
+                };return
+            default: break
+            }
+            answer(state())
+
         case "ai":
             // The AI add-on's requests against a stand-in on this Mac: "mock"
             // points every provider at it, "key" keeps a made-up key for the

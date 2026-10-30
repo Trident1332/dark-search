@@ -3279,6 +3279,7 @@ final class Browser: NSObject, ObservableObject {
 
     /// Its window closed for good, with others open: every page let go.
     func closeAll() {
+        tabs.forEach { $0.aiInspection.stop() }
         cancelChosenLogin()
         invalidateAccountField()
         closeAllAssistants()
@@ -3886,6 +3887,7 @@ final class Browser: NSObject, ObservableObject {
     /// ⌘W, or the cross on the tab. Closing the last one leaves a blank tab
     /// behind; closing that blank tab closes the window.
     func close(_ tab: Tab) {
+        tab.aiInspection.stop()
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
         closeAssistant(for: tab.id)
         cancelChosenLogin(in: tab.id)
@@ -4448,6 +4450,7 @@ final class Browser: NSObject, ObservableObject {
 
     /// Out of this row, not closed: it is on its way to another window.
     private func detach(_ tab: Tab) {
+        tab.aiInspection.stop()
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
         closeAssistant(for: tab.id)
         if let web = tab.built { cancelDisplay(for: web) }
@@ -4971,6 +4974,7 @@ final class Browser: NSObject, ObservableObject {
     /// the site: to the eye, the page went there. The other way round too:
     /// an extension sending a website's tab to one of its own pages.
     func replace(_ tab: Tab, going url: URL) {
+        tab.aiInspection.stop()
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
         closeAssistant(for: tab.id)
         // A private tab stays private, and keeps its own sign-ins when it
@@ -5734,7 +5738,7 @@ final class Browser: NSObject, ObservableObject {
         tab.onSignIn = { [weak self] tab in self?.continueChosenLogin(in: tab) }
         tab.onExplicitNavigation = { [weak self] tab in
             self?.cancelChosenLogin(in: tab.id)
-            self?.closeAssistant(for: tab.id)
+            if self?.assistantSessions[tab.id]?.inspectEnabled != true { self?.closeAssistant(for: tab.id) }
         }
         tab.onSignInName = { [weak self] tab, user in
             guard let self, let choice = chosenLogin ?? loginFill, choice.tab == tab.id else { return }
@@ -5786,7 +5790,7 @@ final class Browser: NSObject, ObservableObject {
                 guard let self else { return }
                 if let tab {
                     invalidateAccountField(in: tab.id)
-                    if let assistant = assistantSessions[tab.id], assistant.sourceURL != address {
+                    if let assistant = assistantSessions[tab.id], !assistant.inspectEnabled, assistant.sourceURL != address {
                         closeAssistant(for: tab.id)
                     }
                     if let choice = chosenLogin ?? loginFill, choice.tab == tab.id, LoginOrigin(address) != choice.origin {
@@ -7245,7 +7249,10 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         Dialogs.invalidateTrust(for: webView)
         if let tab = anyTab(for: webView) {
             invalidateAccountField(in: tab.id)
-            closeAssistant(for: tab.id)
+            tab.aiInspection.navigated(to: webView.url)
+            if assistantSessions[tab.id]?.inspectEnabled != true || (tab.usesTor && assistantSessions[tab.id]?.provider.isLocal != true) || !tab.isWeb {
+                closeAssistant(for: tab.id)
+            }
         }
         if websitePopup { cancelCapture() }
         popupTab(for: webView)?.popupGesture.clear()
