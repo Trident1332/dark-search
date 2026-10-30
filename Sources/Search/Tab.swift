@@ -1,4 +1,5 @@
 import Combine
+import CryptoKit
 import ImageIO
 import SwiftUI
 import WebKit
@@ -613,6 +614,10 @@ final class Tab: ObservableObject, Identifiable {
     var onPick: ((Tab, String, String, String) -> Void)?
     /// The page has a sign-in on it; the page has just sent one.
     var onSignIn: ((Tab) -> Void)?
+    /// A user-selected username changed, or browser chrome explicitly left
+    /// the sign-in flow. Neither event may carry an earlier account choice.
+    var onSignInName: ((Tab, String) -> Void)?
+    var onExplicitNavigation: ((Tab) -> Void)?
     /// The caret has entered or left one of the sign-in boxes; where the box
     /// is, in the web view's points, or nil when it has left. Then whether
     /// it goes with a password, and whether it is a first step's name box,
@@ -827,6 +832,7 @@ final class Tab: ObservableObject, Identifiable {
     /// leaves is one Back comes back to — not for another section of the
     /// same page, which only moves the address.
     func show(_ next: InternalPage, stepping: Bool = true) {
+        onExplicitNavigation?(self)
         if let page, page != next, stepping, page.kind != next.kind {
             trail.append(page)
             ahead = []
@@ -1271,8 +1277,33 @@ final class Tab: ObservableObject, Identifiable {
     /// a few minutes, and only for the same site: a private tab's name
     /// never reaches another tab, and another site never sees it.
     private var named: (site: String, user: String, at: Date)?
+    private let passwordFillSalt = UUID().uuidString
+    private var passwordFill: (host: String, user: String, digest: Data, at: Date)?
+
+    /// Recognize a password we just filled without decrypting it again
+    /// after submission, or retaining another plaintext copy in this tab.
+    func rememberPasswordFill(host: String, user: String, password: String) {
+        passwordFill = (Self.passwordHost(host), user, passwordFingerprint(user: user, password: password), Date())
+    }
+
+    func matchesPasswordFill(host: String, user: String, password: String) -> Bool {
+        guard let fill = passwordFill, Date().timeIntervalSince(fill.at) < 300,
+              fill.host == Self.passwordHost(host), fill.user == user else { return false }
+        return fill.digest == passwordFingerprint(user: user, password: password)
+    }
+
+    private static func passwordHost(_ host: String) -> String {
+        let host = host.lowercased()
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
+    private func passwordFingerprint(user: String, password: String) -> Data {
+        let data = (try? JSONEncoder().encode([passwordFillSalt, user, password])) ?? Data()
+        return Data(SHA256.hash(data: data))
+    }
 
     func gaveName(_ user: String) {
+        onSignInName?(self, user)
         guard !user.isEmpty, user.count <= 256,
               let host = pageAddress?.host()?.lowercased()
         else { return }
@@ -1355,8 +1386,8 @@ final class Tab: ObservableObject, Identifiable {
     func fill(user: String, password: String, onlyOn page: URL? = nil, done: ((Bool) -> Void)? = nil) {
         var still = ""
         if let page {
-            guard let scheme = page.scheme?.lowercased(), let host = page.host()?.lowercased() else { done?(false); return }
-            still = "location.protocol === `\(escape(scheme)):` && location.hostname.toLowerCase() === `\(escape(host))` && "
+            guard let check = loginOriginCheck(page) else { done?(false); return }
+            still = check + " && "
         }
         web.evaluateInSearch(
             "\(still)window.__officeForms && window.__officeForms.fill(`\(escape(user))`, `\(escape(password))`)"
@@ -1366,12 +1397,43 @@ final class Tab: ObservableObject, Identifiable {
     }
 
     /// A first step's name alone, picked from the accounts under its box.
-    func fillName(_ user: String, done: ((Bool) -> Void)? = nil) {
+    func fillName(_ user: String, onlyOn page: URL? = nil, done: ((Bool) -> Void)? = nil) {
+        var still = ""
+        if let page {
+            guard let check = loginOriginCheck(page) else { done?(false); return }
+            still = check + " && "
+        }
         web.evaluateInSearch(
-            "window.__officeForms && window.__officeForms.name(`\(escape(user))`)"
+            "\(still)window.__officeForms && window.__officeForms.name(`\(escape(user))`)"
         ) { result in
             done?((result as? Bool) ?? false)
         }
+    }
+
+    /// Preflight without a secret, then recheck the exact document, field
+    /// and origin immediately before filling the selected account's password.
+    func passwordStep(for user: String, on page: URL, done: @escaping ([String: Any]?) -> Void) {
+        guard let web = built, let check = loginOriginCheck(page) else { done(nil); return }
+        web.evaluateInSearch("(\(check)) && window.__officeForms && window.__officeForms.passwordStep(`\(escape(user))`)") {
+            done($0 as? [String: Any])
+        }
+    }
+
+    func fillPasswordStep(user: String, password: String, on page: URL, document: String, field: String,
+                          done: @escaping (Bool) -> Void) {
+        guard let web = built, let check = loginOriginCheck(page) else { done(false); return }
+        web.evaluateInSearch("""
+        (\(check)) && window.__officeForms && window.__officeForms.fillPasswordStep(
+          `\(escape(user))`, `\(escape(password))`, `\(escape(document))`, `\(escape(field))`)
+        """) { done(($0 as? Bool) == true) }
+    }
+
+    private func loginOriginCheck(_ page: URL) -> String? {
+        guard let scheme = page.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = page.host()?.lowercased() else { return nil }
+        let usual = scheme == "https" ? 443 : 80
+        let port = page.port ?? usual
+        return "location.protocol === `\(escape(scheme)):` && location.hostname.toLowerCase() === `\(escape(host))` && Number(location.port || \(usual)) === \(port)"
     }
 
     func picked(selector: String, label: String, note: String) {
@@ -1410,6 +1472,7 @@ final class Tab: ObservableObject, Identifiable {
     }
 
     func go(to url: URL) {
+        onExplicitNavigation?(self)
         if let own = InternalPage(url: url) {
             show(own)
             return
@@ -1537,6 +1600,7 @@ final class Tab: ObservableObject, Identifiable {
     /// Back still going back. What was typed and not sent is the one thing
     /// that can't come back, which is why the browser asks `unsaved` first.
     func sleep(picture: Data?) {
+        onExplicitNavigation?(self)
         guard let url = address, let built else { return }
         memory = built.interactionState
         self.picture = picture
@@ -1744,6 +1808,9 @@ final class Tab: ObservableObject, Identifiable {
         }
         guard let built else { return done(nil) }
         let configuration = WKSnapshotConfiguration()
+        // The tab is about to leave its window. Waiting for another screen
+        // update here can queue work behind a page that is already hidden.
+        configuration.afterScreenUpdates = false
         configuration.snapshotWidth = NSNumber(value: Double(width))
         built.takeSnapshot(with: configuration) { image, _ in done(image) }
     }
@@ -1953,6 +2020,7 @@ final class Tab: ObservableObject, Identifiable {
     /// A view that has lost its document is given the address back instead:
     /// there is nothing else for it to reload.
     func reload(fromOrigin: Bool = false) {
+        onExplicitNavigation?(self)
         guard !proxyPaused else { pending = address; proxyWasOpen = true; return }
         if usesTor, let address { loadOnion(onionRequest ?? URLRequest(url: address)); return }
         // Search's own pages are drawn from what is there now, always.
@@ -1974,6 +2042,7 @@ final class Tab: ObservableObject, Identifiable {
     /// Straight through, every time. A page that has to be fetched again is
     /// fetched again — nothing is kept behind to make that look otherwise.
     func back() {
+        onExplicitNavigation?(self)
         if let page {
             guard let last = trail.popLast() else { return }
             ahead.append(page)
@@ -1991,6 +2060,7 @@ final class Tab: ObservableObject, Identifiable {
         web.goBack()
     }
     func forward() {
+        onExplicitNavigation?(self)
         if let page {
             guard let next = ahead.popLast() else { return }
             trail.append(page)
@@ -2011,11 +2081,13 @@ final class Tab: ObservableObject, Identifiable {
         return back ? built.backForwardList.backList.reversed() : built.backForwardList.forwardList
     }
     /// Straight to a page several steps away, as one step.
-    func go(to item: WKBackForwardListItem) { web.go(to: item) }
+    func go(to item: WKBackForwardListItem) { onExplicitNavigation?(self); web.go(to: item) }
 
     /// Called when the tab is thrown away. Without it the view keeps running
     /// whatever the page left behind — timers, video, sockets.
     func close() {
+        onExplicitNavigation?(self)
+        passwordFill = nil
         onionNavigation = UUID()
         onionTask?.cancel()
         onionTask = nil
@@ -2026,6 +2098,8 @@ final class Tab: ObservableObject, Identifiable {
         onPick = nil
         onPickEnd = nil
         onSignIn = nil
+        onSignInName = nil
+        onExplicitNavigation = nil
         onField = nil
         onCredentials = nil
         discard()
@@ -2081,6 +2155,7 @@ final class Tab: ObservableObject, Identifiable {
         quiet = nil
         media.forget()
         guard let web = built else { return }
+        Dialogs.invalidateTrust(for: web)
         (delegate as? Browser)?.cancelDisplay(for: web)
         built = nil
         Passkeys.shared.forget(web)

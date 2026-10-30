@@ -67,6 +67,8 @@ final class Browser: NSObject, ObservableObject {
                 DispatchQueue.main.async { held.forEach { $0.present() } }
             }
             guard oldValue != activeID else { return }
+            cancelChosenLogin()
+            invalidateAccountField()
             // Going to another tab ends a page's run of links (see placeForLink).
             linkRun = nil
             if displayTab?.id == oldValue { cancelDisplay() }
@@ -773,12 +775,115 @@ final class Browser: NSObject, ObservableObject {
     /// the caret has left since is dropped.
     private var appleAsk = 0
 
+    private struct LoginOrigin: Equatable {
+        let scheme: String
+        let host: String
+        let port: Int
+        init?(_ url: URL?) {
+            guard let url, let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+                  let host = url.host()?.lowercased() else { return nil }
+            self.scheme = scheme
+            self.host = host
+            port = url.port ?? (scheme == "https" ? 443 : 80)
+        }
+    }
+
+    /// Only the identity of the account the person chose is carried to the
+    /// password step. Its secret is read after Touch ID, never for the name.
+    private struct ChosenLogin {
+        let id = UUID()
+        let tab: Tab.ID
+        let login: Kept
+        let page: URL
+        let origin: LoginOrigin
+        let expires: Date
+        var armed: Bool
+        var checking = false
+        var checkAgain = false
+    }
+    private var chosenLogin: ChosenLogin?
+    private var loginFill: ChosenLogin?
+    private var loginFillTask: Task<Void, Never>?
+    /// A controllable clock lets tests verify expiry without holding a secret.
+    var loginContinuationNow: () -> Date = Date.init
+
+    private func cancelChosenLogin(in id: Tab.ID? = nil) {
+        if let id, chosenLogin?.tab != id, loginFill?.tab != id { return }
+        chosenLogin = nil
+        loginFill = nil
+        loginFillTask?.cancel()
+        loginFillTask = nil
+    }
+
+    private func current(_ choice: ChosenLogin, in tab: Tab) -> Bool {
+        prefs.fillsPasswords && tab.id == activeID && tab.id == choice.tab && tabs.contains(where: { $0 === tab })
+            && loginContinuationNow() < choice.expires
+            && LoginOrigin(tab.pageAddress) == choice.origin && LoginOrigin(tab.address) == choice.origin
+    }
+
+    private func continueChosenLogin(in tab: Tab) {
+        guard let choice = chosenLogin, choice.tab == tab.id, choice.armed else { return }
+        guard current(choice, in: tab) else { cancelChosenLogin(in: tab.id); return }
+        if choice.checking { chosenLogin?.checkAgain = true; return }
+        chosenLogin?.checking = true
+        tab.passwordStep(for: choice.login.user, on: choice.page) { [weak self, weak tab] answer in
+            guard let self, let tab, var latest = chosenLogin, latest.id == choice.id else { return }
+            let again = latest.checkAgain
+            latest.checking = false
+            latest.checkAgain = false
+            chosenLogin = latest
+            guard current(latest, in: tab) else { cancelChosenLogin(in: tab.id); return }
+            if answer?["status"] as? String == "blocked" { cancelChosenLogin(in: tab.id); return }
+            guard answer?["status"] as? String == "ready",
+                  let document = answer?["document"] as? String, !document.isEmpty,
+                  let field = answer?["field"] as? String, !field.isEmpty else {
+                if again { DispatchQueue.main.async { [weak self, weak tab] in
+                    if let tab { self?.continueChosenLogin(in: tab) }
+                } }
+                return
+            }
+            // Consume the account choice before asking for authentication.
+            // Canceling Touch ID never retries or opens the legacy Keychain.
+            chosenLogin = nil
+            loginFill = latest
+            invalidateAccountField(in: tab.id)
+            pickedInto = tab.id
+            loginFillTask = Task { [weak self, weak tab] in
+                guard let self, let tab else { return }
+                guard let login = await Vault.loginForFill(latest.login) else {
+                    if loginFill?.id == latest.id {
+                        loginFill = nil
+                        loginFillTask = nil
+                        if let problem = Vault.lastFailure { announce(problem) }
+                    }
+                    return
+                }
+                guard !Task.isCancelled, loginFill?.id == latest.id, current(latest, in: tab) else {
+                    if loginFill?.id == latest.id { loginFill = nil; loginFillTask = nil }
+                    return
+                }
+                tab.fillPasswordStep(user: login.user, password: login.password, on: latest.page,
+                                     document: document, field: field) { [weak self, weak tab] worked in
+                    guard let self, let tab, loginFill?.id == latest.id else { return }
+                    loginFill = nil
+                    loginFillTask = nil
+                    if worked {
+                        tab.rememberPasswordFill(host: tab.pageAddress?.host() ?? login.host, user: login.user, password: login.password)
+                        Vault.touch(login)
+                    } else {
+                        announce("The sign-in fields changed. Choose your login again")
+                    }
+                }
+            }
+        }
+    }
+
     func keepOffer() {
         guard let offer = offering else { return }
         offering = nil
         let login = offer.login
         guard Vault.save(host: login.host, user: login.user, password: login.password, used: Date(), clear: login.clear) else {
-            announce("The keychain refused it")
+            announce(Vault.lastFailure ?? "The password could not be saved")
             return
         }
         relist()
@@ -794,6 +899,22 @@ final class Browser: NSObject, ObservableObject {
         Vault.never(offer.login.host)
         offering = nil
         announce("Never for \(offer.login.host)")
+    }
+
+    /// Field-bound UI belongs to one page. Navigation must retire the field
+    /// and pending lookups too, so a late helper/passkey result cannot put
+    /// the old list back over a different document.
+    private func invalidateAccountField(in id: Tab.ID? = nil) {
+        if let id {
+            guard field?.tab == id || looked?.tab == id || suggesting?.tab == id || pickedInto == id else { return }
+        }
+        lowering?.cancel()
+        lowering = nil
+        field = nil
+        looked = nil
+        pickedInto = nil
+        appleAsk += 1
+        suggesting = nil
     }
 
     /// The caret in a sign-in box: the accounts kept for this site, and the
@@ -815,9 +936,11 @@ final class Browser: NSObject, ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
             return
         }
+        guard tab.id == activeID else { return }
+        if passwords, !name { continueChosenLogin(in: tab) }
         lowering?.cancel()
         field = (tab.id, spot, passwords, name)
-        guard tab.id == activeID, pickedInto != tab.id,
+        guard pickedInto != tab.id,
               let host = curtain.host(of: tab.pageAddress)
         else { return }
         // A page that came over plain http can have been written by
@@ -933,6 +1056,7 @@ final class Browser: NSObject, ObservableObject {
         lowering?.cancel()
         guard let list = suggesting, let tab = tabs.first(where: { $0.id == list.tab }), let appleHost = list.appleHost else { return }
         guard Date().timeIntervalSince(list.shown) > 0.5 else { return }
+        cancelChosenLogin()
         suggesting = nil
         guard ApplePasswords.offers(on: tab.pageAddress, privateTab: tab.shy || tab.usesTor) == appleHost,
               ApplePasswords.belongs(apple.sites, to: appleHost)
@@ -1067,6 +1191,7 @@ final class Browser: NSObject, ObservableObject {
         lowering?.cancel()
         guard let list = suggesting, let tab = tabs.first(where: { $0.id == list.tab }) else { return }
         guard Date().timeIntervalSince(list.shown) > 0.5 else { return }
+        cancelChosenLogin()
         suggesting = nil
         // The tab may have gone somewhere else while the list was up: a
         // redirect, a script. What was offered for one site is never put
@@ -1075,22 +1200,26 @@ final class Browser: NSObject, ObservableObject {
               (tab.pageAddress?.scheme?.lowercased() == "http") == list.clear
         else { return }
         pickedInto = tab.id
+        guard let page = tab.pageAddress, let origin = LoginOrigin(page), LoginOrigin(tab.address) == origin else { return }
+        let choice = ChosenLogin(tab: tab.id, login: login, page: page, origin: origin,
+                                 expires: loginContinuationNow().addingTimeInterval(60), armed: !list.nameOnly)
+        chosenLogin = choice
         // A first step: the name alone, the password waits for its page.
         if list.nameOnly {
-            tab.fillName(login.user) { [weak self] worked in
-                if !worked { self?.announce("Couldn't find the sign-in fields anymore") }
+            tab.fillName(login.user, onlyOn: page) { [weak self, weak tab] worked in
+                guard let self, let tab, chosenLogin?.id == choice.id else { return }
+                guard worked, current(choice, in: tab) else {
+                    cancelChosenLogin(in: tab.id)
+                    if !worked { announce("Couldn't find the sign-in fields anymore") }
+                    return
+                }
+                tab.gaveName(login.user)
+                chosenLogin?.armed = true
+                continueChosenLogin(in: tab)
             }
             return
         }
-        // Its secret is read now, once it is picked: see `Vault.kept(for:)`.
-        guard let login = Vault.login(login) else {
-            announce("The keychain refused it")
-            return
-        }
-        tab.fill(user: login.user, password: login.password, onlyOn: tab.pageAddress) { [weak self] worked in
-            if !worked { self?.announce("Couldn't find the sign-in fields anymore") }
-        }
-        Vault.touch(login)
+        continueChosenLogin(in: tab)
     }
 
     /// One of the passkeys in the list: the Mac's sheet for it, and the
@@ -1099,6 +1228,7 @@ final class Browser: NSObject, ObservableObject {
         lowering?.cancel()
         guard let list = suggesting, let tab = tabs.first(where: { $0.id == list.tab }), let web = tab.built else { return }
         guard Date().timeIntervalSince(list.shown) > 0.5 else { return }
+        cancelChosenLogin()
         suggesting = nil
         guard curtain.host(of: tab.pageAddress) == list.host,
               (tab.pageAddress?.scheme?.lowercased() == "http") == list.clear
@@ -1107,7 +1237,7 @@ final class Browser: NSObject, ObservableObject {
         Passkeys.shared.sign(in: web, with: passkey.id)
     }
 
-    func dropChoice() { suggesting = nil }
+    func dropChoice() { cancelChosenLogin(); suggesting = nil }
 
     // The list of what is kept.
 
@@ -1158,7 +1288,7 @@ final class Browser: NSObject, ObservableObject {
 
     func keep(host: String, user: String, password: String, notes: String? = nil) {
         guard Vault.save(host: host, user: user, password: password, notes: notes) else {
-            announce("The keychain refused it")
+            announce(Vault.lastFailure ?? "The password could not be saved")
             return
         }
         relist()
@@ -1174,7 +1304,7 @@ final class Browser: NSObject, ObservableObject {
     /// typed. The site isn't told: change it there first, or next.
     func change(_ login: Kept, to password: String, notes: String? = nil) {
         guard Vault.save(host: login.host, user: login.user, password: password, used: login.used, clear: login.clear, notes: notes) else {
-            announce("The keychain refused it")
+            announce(Vault.lastFailure ?? "The password could not be saved")
             return
         }
         relist()
@@ -1225,7 +1355,7 @@ final class Browser: NSObject, ObservableObject {
         let many = count == 1 ? "1 password" : "\(count) passwords"
         Ask.sure(
             count == 1 ? "Remove 1 Password?" : "Remove \(count) Passwords?",
-            detail: "They're taken out of your keychain. Only the passwords Dark Search keeps are removed: password managers, other apps and other browsers keep theirs. This can't be undone.",
+            detail: "They're removed from Dark Search Passwords. Original Keychain copies and other password managers keep theirs. This can't be undone.",
             confirm: "Remove",
             returnCancels: true
         ) { [weak self] in
@@ -1243,7 +1373,7 @@ final class Browser: NSObject, ObservableObject {
                         self.relist()
                         let removed = gone == 1 ? "1 password" : "\(gone) passwords"
                         self.announce(gone == count ? "Removed \(removed)"
-                            : gone == 0 ? "The keychain refused them"
+                            : gone == 0 ? "The passwords could not be removed"
                             : "Removed \(gone) of \(many)")
                     }
                 }
@@ -1262,7 +1392,7 @@ final class Browser: NSObject, ObservableObject {
             // Read here, once the Mac has said who this is: what the panel
             // drew its list from holds no secrets.
             guard let password = Vault.secret(of: login) else {
-                self.announce("The keychain refused it")
+                self.announce(Vault.lastFailure ?? "The password could not be opened")
                 return
             }
             copyPassword(password)
@@ -3146,6 +3276,8 @@ final class Browser: NSObject, ObservableObject {
 
     /// Its window closed for good, with others open: every page let go.
     func closeAll() {
+        cancelChosenLogin()
+        invalidateAccountField()
         dropDialer()
         cancelDisplay()
         cancelCapture()
@@ -3341,8 +3473,7 @@ final class Browser: NSObject, ObservableObject {
             // this page instead (see activeID).
             cancelTabEdit()
             summoning = false
-            suggesting = nil
-            looked = nil
+            invalidateAccountField()
             editing = false
             typed = ""
             activeID = tab.id
@@ -3645,9 +3776,9 @@ final class Browser: NSObject, ObservableObject {
         if tab.id != activeID, !summoning, let here = active, here.isBlank { here.draft = typed }
         cancelTabEdit()
         summoning = false
-        suggesting = nil
-        // Back on a tab with the caret still in a box, the list may come again.
-        looked = nil
+        // Back on a tab with the caret still in a box, a new focus report
+        // may offer accounts again; the old page's lookup is retired now.
+        invalidateAccountField()
         guard tab.id != activeID else { return }
         // The AI panel is about the page it was opened on.
         if assisting != nil { closeAssistant() }
@@ -3756,6 +3887,8 @@ final class Browser: NSObject, ObservableObject {
     /// behind; closing that blank tab closes the window.
     func close(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+        cancelChosenLogin(in: tab.id)
+        invalidateAccountField(in: tab.id)
         let pair = split(for: tab)
         let partner = pair.flatMap { pair in tabs.first { $0.id == pair.partner(of: tab.id) } }
         detachSplit(tab)
@@ -5594,6 +5727,12 @@ final class Browser: NSObject, ObservableObject {
         tab.onField = { [weak self] tab, spot, passwords, name, wide in
             self?.hang(from: tab, spot, passwords: passwords, name: name, wide: wide)
         }
+        tab.onSignIn = { [weak self] tab in self?.continueChosenLogin(in: tab) }
+        tab.onExplicitNavigation = { [weak self] tab in self?.cancelChosenLogin(in: tab.id) }
+        tab.onSignInName = { [weak self] tab, user in
+            guard let self, let choice = chosenLogin ?? loginFill, choice.tab == tab.id else { return }
+            if user != choice.login.user { cancelChosenLogin(in: tab.id) }
+        }
 
         tab.onCredentials = { [weak self] tab, host, user, password, clear in
             // an extension's own page isn't a site: Bitwarden's unlock pin was offered as its password.
@@ -5604,16 +5743,11 @@ final class Browser: NSObject, ObservableObject {
             // saving itself.
             if #available(macOS 15.4, *), Extensions.shared.passwordSavingTakenBy != nil { return }
             // Just filled from the Passwords app: it is kept there already.
-            if tab.appleFill?.matches(host: host, user: user, password: password) == true { return }
+            if tab.appleFill?.matches(host: host, user: user, password: password) == true
+                || tab.matchesPasswordFill(host: host, user: user, password: password) { return }
             let known = Vault.kept(for: host)
-            // Nothing to ask about one that is already known. Only that
-            // account's secret is read, not every one kept for the site.
-            if var same = known.first(where: { $0.user == user }).flatMap(Vault.login), same.password == password {
-                // Where it was last used is where it is offered from now on.
-                same.clear = clear
-                Vault.touch(same)
-                return
-            }
+            // Comparing a submitted password must not silently decrypt the
+            // vault or trigger another Touch ID request after signing in.
             let offer = Offer(
                 login: Login(host: host, user: user, password: password, used: nil, clear: clear),
                 changed: known.contains { $0.user == user }
@@ -5639,8 +5773,18 @@ final class Browser: NSObject, ObservableObject {
         // entry that only ever holds an address is half a memory.
         // Anywhere a tab lands is worth remembering for next launch.
         tab.$address
+            .removeDuplicates()
             .dropFirst()
-            .sink { [weak self] _ in self?.rememberSession() }
+            .sink { [weak self, weak tab] address in
+                guard let self else { return }
+                if let tab {
+                    invalidateAccountField(in: tab.id)
+                    if let choice = chosenLogin ?? loginFill, choice.tab == tab.id, LoginOrigin(address) != choice.origin {
+                        cancelChosenLogin(in: tab.id)
+                    }
+                }
+                rememberSession()
+            }
             .store(in: &bag)
 
         tab.$muted
@@ -6435,6 +6579,8 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        Dialogs.invalidateTrust(for: webView)
+        if let tab = anyTab(for: webView) { invalidateAccountField(in: tab.id) }
         cancelDisplay(for: webView)
         guard let navigation else { return }
         tab(for: webView)?.extensionReturn.started(navigation, at: webView.url)
@@ -7086,6 +7232,8 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        Dialogs.invalidateTrust(for: webView)
+        if let tab = anyTab(for: webView) { invalidateAccountField(in: tab.id) }
         if websitePopup { cancelCapture() }
         popupTab(for: webView)?.popupGesture.clear()
         guard let tab = tab(for: webView) else {
@@ -7146,6 +7294,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         tellStore(tab)
         // A page that arrived after a password went out: did the sign-in take?
         tab.settleSignIn()
+        continueChosenLogin(in: tab)
         // A page in a language you always translate, or one that slept
         // translated (Translate.swift). Nothing at all while it's off.
         tab.translateIfWanted()

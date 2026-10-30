@@ -9,6 +9,7 @@ import SwiftUI
 @MainActor
 final class TabSwitcher: ObservableObject {
     enum Direction { case left, right, up, down }
+    typealias PreviewProvider = @MainActor (Tab, CGFloat, @escaping (NSImage?) -> Void) -> Void
 
     /// A letter pressed with ⌃ still held, on the card picked: what its ⌘
     /// key does to the tab on screen, done to that card instead. Only with
@@ -54,7 +55,7 @@ final class TabSwitcher: ObservableObject {
     var moonsPerColumn: Int { moonColumns == 0 ? 0 : (moons.count + moonColumns - 1) / moonColumns }
     @Published private(set) var selectedID: Tab.ID?
     @Published private(set) var visible = false
-    @Published private var previews: [Tab.ID: (address: URL, image: NSImage)] = [:]
+    @Published private var previews: [Tab.ID: (address: URL, image: NSImage, captured: TimeInterval, viewID: ObjectIdentifier?)] = [:]
 
     /// A pair's other page, by its first: the pair is one card, with both
     /// pages pictured side by side (see Browser.switchTabs).
@@ -114,11 +115,40 @@ final class TabSwitcher: ObservableObject {
     /// or the moons first when the gesture started on one.
     private var ring: [Tab.ID] { moonsLead ? moons + candidates : candidates + moons }
 
-    private var previewRequests: [Tab.ID: UUID] = [:]
+    private struct PreviewRequest {
+        let token = UUID()
+        let address: URL
+        let started: TimeInterval
+        let gesture: UUID?
+        let viewID: ObjectIdentifier?
+    }
+    private struct PreviewCapture {
+        let tab: Tab.ID
+        weak var view: PageView?
+        let viewID: ObjectIdentifier?
+    }
+    private var previewRequests: [Tab.ID: PreviewRequest] = [:]
+    private var previewAttempts: [Tab.ID: (address: URL, started: TimeInterval, gesture: UUID?, viewID: ObjectIdentifier?)] = [:]
+    /// Timed-out native snapshots cannot be cancelled. Keep their slots
+    /// until completion, even after a gesture/cache is pruned, so retries
+    /// cannot silently build an unlimited WebKit queue. References are weak.
+    private var previewCaptures: [UUID: PreviewCapture] = [:]
+    private let previewProvider: PreviewProvider
+    private let previewNow: () -> TimeInterval
+    private static let previewRefresh: TimeInterval = 2
+    private static let previewTimeout: TimeInterval = 5
+    private static let capturesPerView = 2
+    private static let maximumCaptures = 8
     private var reveal: DispatchWorkItem?
     private var previewRequested = false
     private var generation = UUID()
     var active: Bool { home != nil }
+
+    init(previewProvider: @escaping PreviewProvider = { tab, width, done in tab.preview(width: width, done) },
+         previewNow: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.previewProvider = previewProvider
+        self.previewNow = previewNow
+    }
 
     /// The latest tab left that is still among `row`, other than `id`: where
     /// a pin's number pressed again goes back to.
@@ -286,6 +316,7 @@ final class TabSwitcher: ObservableObject {
         cancel()
         recentIDs = []
         previewRequests = [:]
+        previewAttempts = [:]
         if !previews.isEmpty { previews = [:] }
     }
 
@@ -293,7 +324,15 @@ final class TabSwitcher: ObservableObject {
     /// nothing goes.
     private func prune(to keep: (Tab.ID) -> Bool) {
         previewRequests = previewRequests.filter { keep($0.key) }
+        previewAttempts = previewAttempts.filter { keep($0.key) }
         if previews.keys.contains(where: { !keep($0) }) { previews = previews.filter { keep($0.key) } }
+        pruneCaptures()
+    }
+
+    private func pruneCaptures() {
+        previewCaptures = previewCaptures.filter {
+            $0.value.viewID == nil || $0.value.view != nil
+        }
     }
 
     func preview(for id: Tab.ID, address: URL?) -> NSImage? {
@@ -301,10 +340,10 @@ final class TabSwitcher: ObservableObject {
         return cached.image
     }
 
-    func cachePreview(_ image: NSImage, for id: Tab.ID, address: URL) {
+    func cachePreview(_ image: NSImage, for id: Tab.ID, address: URL, viewID: ObjectIdentifier? = nil) {
         let shown = ring.contains(id) || candidates.contains { partners[$0] == id }
         guard kept(id) || (visible && shown) else { return }
-        previews[id] = (address, image)
+        previews[id] = (address, image, previewNow(), viewID)
     }
 
     /// `tab`: a card's tab by its id, whether the row's or a small window's.
@@ -328,15 +367,45 @@ final class TabSwitcher: ObservableObject {
     private func requestPreview(of tab: Tab, gesture: UUID?) {
         guard let address = tab.address else { return }
         let id = tab.id
-        let request = UUID()
+        let now = previewNow()
+        let view = tab.built
+        let viewID = view.map(ObjectIdentifier.init)
+        if let cached = previews[id] {
+            if cached.viewID != viewID { previews[id] = nil }
+            else if cached.address == address, now - cached.captured < Self.previewRefresh { return }
+        }
+        if let pending = previewRequests[id] {
+            let obsolete = pending.address != address || pending.viewID != viewID
+                || pending.gesture.map { $0 != generation } == true
+            guard obsolete || now - pending.started >= Self.previewTimeout else { return }
+            if obsolete {
+                previewRequests[id] = nil
+                previewAttempts[id] = nil
+            }
+        }
+        // A failure or an unanswered snapshot must not turn fast tab
+        // switching into an unbounded queue of native rendering requests.
+        if let attempt = previewAttempts[id], attempt.address == address,
+           attempt.viewID == viewID,
+           attempt.gesture == nil || attempt.gesture == generation,
+           now - attempt.started < Self.previewRefresh { return }
+        pruneCaptures()
+        guard previewCaptures.count < Self.maximumCaptures,
+              previewCaptures.values.filter({ $0.tab == id && $0.viewID == viewID }).count < Self.capturesPerView else { return }
+        let request = PreviewRequest(address: address, started: now, gesture: gesture, viewID: viewID)
         previewRequests[id] = request
-        tab.preview(width: 180) { [weak self, weak tab] image in
-            guard let self, self.previewRequests[id] == request else { return }
+        previewAttempts[id] = (address, now, gesture, viewID)
+        previewCaptures[request.token] = PreviewCapture(tab: id, view: view, viewID: viewID)
+        previewProvider(tab, 180) { [weak self, weak tab, weak view] image in
+            guard let self else { return }
+            self.previewCaptures[request.token] = nil
+            guard self.previewRequests[id]?.token == request.token else { return }
             self.previewRequests[id] = nil
             guard let tab, let image, tab.address == address,
+                  request.viewID == nil ? tab.built == nil : (view != nil && tab.built === view),
                   gesture == nil || (self.generation == gesture && self.visible)
             else { return }
-            self.cachePreview(image, for: id, address: address)
+            self.cachePreview(image, for: id, address: address, viewID: request.viewID)
         }
     }
 
@@ -357,7 +426,7 @@ struct TabSwitcherOverlay: View {
     @ObservedObject private var prefs = Shared.prefs
     /// A card's tab by its id: one of the row's, or a small window's.
     let tab: (Tab.ID) -> Tab?
-    /// The tab on screen, whose picture is always taken fresh.
+    /// The tab on screen, whose picture is refreshed as needed.
     let current: Tab.ID?
     /// Only over the window whose tab this is: the small windows share one
     /// switcher, and each has this over its page. None for a browser's,

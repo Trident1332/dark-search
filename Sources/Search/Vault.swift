@@ -2,13 +2,9 @@ import Foundation
 import Security
 import LocalAuthentication
 
-// Where passwords live: the macOS keychain, under this app's own name, as
-// internet passwords keyed by site and account. Nothing is written to disk by
-// this app in any other form, and nothing is ever logged.
-//
-// This is the same coffer Safari's are in, but not the same drawer: Apple keeps
-// Safari's behind an entitlement no other browser gets. So these are Office
-// Browser's — in the system's vault, unlocked with the Mac, shown with Touch ID.
+// Website passwords live in Search's encrypted store. Listing an account
+// never reads its secret. Filling a website requires a fresh Touch ID proof;
+// the old per-site Keychain items are read only by an explicit import.
 
 struct Login: Identifiable, Equatable, Hashable {
     var host: String
@@ -28,11 +24,8 @@ struct Login: Identifiable, Equatable, Hashable {
     var id: String { host + "\u{1}" + user }
 }
 
-/// What an item's data holds: the password alone, as every item written
-/// before there were notes was, or the password with a note beside it. The
-/// second starts with a byte no password can hold, so neither is ever read
-/// as the other. Both are one encrypted value to the keychain; a note is
-/// never an attribute, which the keychain keeps in the clear.
+/// A password and its private note. The legacy codec below is used only
+/// for explicit imports; the website vault seals each field separately.
 struct Secret: Equatable {
     var password: String
     var notes = ""
@@ -65,10 +58,8 @@ struct Secret: Equatable {
 }
 
 /// One item as a list needs it: the site, the account, and when it was last
-/// used, without the secret. Reading a secret is one keychain call, and the
-/// list asks for one only when a password is shown or copied: a drawer of four
-/// hundred kept passwords would otherwise be four hundred calls before the
-/// panel could draw itself. Nothing that writes a password or fills one into a
+/// used, without the secret. The list never unlocks a password. Nothing
+/// that writes a password or fills one into a
 /// page takes this type, so a row cannot be handed on as though it held one.
 struct Kept: Identifiable, Equatable, Hashable {
     var host: String
@@ -77,207 +68,256 @@ struct Kept: Identifiable, Equatable, Hashable {
     var used: Date?
     /// Kept from a page sent in the clear, over plain http. See `Login`.
     var clear = false
-    /// When it went into the keychain, by the keychain's own clock.
+    /// When it went into the website vault, or the original import date.
     var since: Date?
 
     var id: String { host + "\u{1}" + user }
 }
 
 enum Vault {
-    /// What every item of ours is tagged with. A test run tags its own, so a
-    /// password saved while trying something never sits among the real ones.
-    private static let label = Store.world.map { "Search (\($0))" } ?? "Search"
+    /// The old per-site Keychain label, used only by explicit migration.
+    private static let legacyLabel = Store.world.map { "Search (\($0))" } ?? "Search"
 
-    // MARK: - reading
-
-    /// The keychain will list many items, or hand over one secret — not
-    /// both in one call. Asked for every item's data at once it answers
-    /// errSecParam, and it did so quietly enough that for a while this app
-    /// saved passwords it could never read back. So: the list first, without
-    /// secrets, then each secret on its own.
-
-    /// What is kept for a host, exactly, without secrets. See
-    /// `kept(matching:)` for the version that also looks across a site's
-    /// subdomains.
-    ///
-    /// No secret is read here, and none is read for a list. Every secret
-    /// read is the keychain's to allow: one kept by a build signed by
-    /// someone else — the release, before a build of your own — asks for
-    /// the login password, once per item, and a Deny is never remembered.
-    /// Reading every account's secret to draw the list under a sign-in box
-    /// asked for each of them each time the caret went in.
-    static func kept(for host: String) -> [Kept] {
-        rows(where: [kSecAttrServer as String: host]).compactMap(kept(from:))
+    /// The facade's test driver supplies an isolated in-memory store. A
+    /// missing own-vault item never authorizes reading the legacy Keychain.
+    struct Backend {
+        var entries: () throws -> [Kept]
+        var read: (Kept, LAContext?) throws -> Secret
+        var save: (String, String, String, Date?, Bool, String?) throws -> Void
+        var touch: (Kept, Date) throws -> Void
+        var forget: (Kept) throws -> Void
+        /// The returned undo removes only the exact newly inserted record.
+        /// Nil means another own-vault record already owns this identity.
+        var importNew: ((Kept, Secret) throws -> (() throws -> Void)?)? = nil
     }
 
+    private static let backendLock = NSLock()
+    private static var testingBackend: Backend?
+    private static var failure: String?
+
+    private static func locked<T>(_ body: () -> T) -> T {
+        backendLock.lock()
+        defer { backendLock.unlock() }
+        return body()
+    }
+
+    static var lastFailure: String? { locked { failure } ?? WebsitePasswordAuthentication.lastFailure }
+
+    private static func failed(_ error: Error) { locked { failure = error.localizedDescription } }
+    private static func clearFailure() {
+        locked { failure = nil }
+        WebsitePasswordAuthentication.clearFailure()
+    }
+
+    static func useBackendForTesting(_ backend: Backend?) {
+        guard Store.testing else { return }
+        locked { testingBackend = backend; failure = nil }
+        WebsitePasswordAuthentication.revokeManagerAccess()
+    }
+
+    private static var backend: Backend {
+        if Store.testing, let given = locked({ testingBackend }) { return given }
+        let vault = WebsitePasswordVault.shared
+        return Backend(entries: { try vault.entries() }, read: { try vault.read($0, context: $1) },
+                       save: { try vault.save(host: $0, user: $1, password: $2, used: $3, clear: $4, notes: $5) },
+                       touch: { try vault.touch($0, at: $1) }, forget: { try vault.forget($0) },
+                       importNew: { kept, secret in
+                           guard let receipt = try vault.insertImported(kept, secret: secret) else { return nil }
+                           return { _ = try vault.discardImported(receipt) }
+                       })
+    }
+
+    // MARK: - metadata, without unlocking a password
+
+    private static func entries() -> [Kept] {
+        do { return try backend.entries() }
+        catch { failed(error); return [] }
+    }
+
+    static func kept(for host: String) -> [Kept] { entries().filter { $0.host == host } }
+
     /// Whether an account kept for `server` is offered on `host`: the same
-    /// host, or with `wide`, another host of the same site.
+    /// host, or with `wide`, another host of the same registrable site.
     static func belongs(_ server: String, to host: String, wide: Bool = true, domain: String? = nil) -> Bool {
         server == host || (wide && registrable(server) == (domain ?? registrable(host)))
     }
 
-    /// The keychain matches a server name exactly, and a sign-in rarely lives
-    /// on the page you saved it from — accounts.example.com asks, and the
-    /// password was kept for example.com. So the site is matched as a site:
-    /// the host first, then anything sharing its registrable domain.
-    ///
-    /// `wide` false: the host alone. For a box that only might be a sign-in's
-    /// — accounts.google.com's Gmail account has nothing to do in a project's
-    /// name on console.cloud.google.com.
     static func kept(matching host: String, wide: Bool = true) -> [Kept] {
         let domain = registrable(host)
-        let exact = kept(for: host)
-        let wider = !wide ? [] : rows(where: [:])
-            .filter { ($0[kSecAttrServer as String] as? String).map { $0 != host && belongs($0, to: host, domain: domain) } ?? false }
-            .compactMap(kept(from:))
-        return (exact + wider).sorted { ($0.used ?? .distantPast) > ($1.used ?? .distantPast) }
+        return entries().filter { belongs($0.host, to: host, wide: wide, domain: domain) }
+            .sorted { ($0.used ?? .distantPast) > ($1.used ?? .distantPast) }
     }
 
-    /// Everything this app holds, as the list needs it: no secrets. Each one
-    /// is `secret(of:)`, a call of its own, and only when it is asked for.
-    /// Read on demand and never kept in a property.
     static func all() -> [Kept] {
-        rows(where: [:]).compactMap(kept(from:))
-            .sorted { $0.host == $1.host ? $0.user < $1.user : $0.host < $1.host }
+        entries().sorted { $0.host == $1.host ? $0.user < $1.user : $0.host < $1.host }
     }
 
-    /// The items' attributes — no secrets — narrowed by whatever is given.
-    private static func rows(where extra: [String: Any]) -> [[String: Any]] {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassInternetPassword,
-            kSecAttrLabel as String: label,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-        ]
-        extra.forEach { query[$0] = $1 }
-        var out: CFTypeRef?
-        let status = KeychainAccess.copyMatching(query as CFDictionary, &out)
-        guard status == errSecSuccess, let rows = out as? [[String: Any]] else {
-            // Nothing kept reads as "not found"; anything else is worth a
-            // line in the log, because the panel will only say "nothing".
-            if status != errSecItemNotFound { NSLog("Vault: keychain list failed (%d)", status) }
-            return []
-        }
-        return rows
-    }
+    // MARK: - explicit secret access
 
-    /// One item's data, by the two things that name it: the password, and
-    /// the note beside it if there is one.
-    private static func read(host: String, user: String) -> Secret? {
-        var out: CFTypeRef?
-        let status = KeychainAccess.copyMatching([
-            kSecClass as String: kSecClassInternetPassword,
-            kSecAttrLabel as String: label,
-            kSecAttrServer as String: host,
-            kSecAttrAccount as String: user,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ] as CFDictionary, &out)
-        guard status == errSecSuccess, let data = out as? Data else {
-            if status != errSecItemNotFound { NSLog("Vault: keychain read failed (%d)", status) }
+    /// Only the Passwords page's biometric unlock opens synchronous access.
+    /// Website insertion uses its own proof below, even while that page is open.
+    static func details(of kept: Kept) -> Secret? {
+        guard let context = WebsitePasswordAuthentication.managerContext() else {
+            locked { failure = "Unlock Dark Search Passwords with Touch ID first" }
             return nil
         }
-        return Secret(data)
+        do { let secret = try backend.read(kept, context); clearFailure(); return secret }
+        catch { failed(error); return nil }
     }
 
-    /// One item's secret, by the two things that name it.
-    private static func secret(host: String, user: String) -> String? { read(host: host, user: user)?.password }
+    static func secret(of kept: Kept) -> String? { details(of: kept)?.password }
 
-    /// One item's secret, where a list holds only the item: read when a
-    /// password is shown or copied, and never as part of a list.
-    static func secret(of kept: Kept) -> String? { secret(host: kept.host, user: kept.user) }
-
-    /// The password and the note beside it, for the page that shows both.
-    static func details(of kept: Kept) -> Secret? { read(host: kept.host, user: kept.user) }
-
-    /// What an item's attributes say beyond its name: when it was last used,
-    /// and whether it was kept from a page sent in the clear.
-    private static func noted(_ row: [String: Any]) -> (used: Date?, clear: Bool) {
-        // The keychain has no "last used" of its own; it rides in the comment.
-        let used = (row[kSecAttrComment as String] as? String)
-            .flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
-        let clear = (row[kSecAttrProtocol as String] as? String) == (kSecAttrProtocolHTTP as String)
-        return (used, clear)
-    }
-
-    /// One item with its secret, for the paths that hand a password over:
-    /// filling a sign-in in, and telling whether one is already kept. One
-    /// keychain read, for the one account picked.
     static func login(_ kept: Kept) -> Login? {
         guard let secret = details(of: kept) else { return nil }
         return Login(host: kept.host, user: kept.user, password: secret.password, used: kept.used, clear: kept.clear, notes: secret.notes)
     }
 
-    /// The account an item is kept under. A sign-in with a password box
-    /// alone — an access code, a dashboard's — is kept under no name, and
-    /// the keychain lists such an item with no account at all, not an
-    /// empty one: read as missing, it was saved and never offered again,
-    /// nor shown in Settings, nor forgotten.
-    private static func account(of row: [String: Any]) -> String {
-        row[kSecAttrAccount as String] as? String ?? ""
+    @MainActor
+    static func loginForFill(_ kept: Kept) async -> Login? {
+        clearFailure()
+        // A removed account does not deserve an unnecessary biometric prompt.
+        guard let current = entries().first(where: { $0.id == kept.id }) else { return nil }
+        guard current.clear == kept.clear else {
+            locked { failure = "This saved login changed. Choose it again before filling" }
+            return nil
+        }
+        guard let context = await WebsitePasswordAuthentication.authorize("fill your saved login for \(current.host)") else { return nil }
+        defer { context.invalidate() }
+        guard !Task.isCancelled else { return nil }
+        do {
+            let secret = try backend.read(current, context)
+            guard !Task.isCancelled else { return nil }
+            clearFailure()
+            return Login(host: current.host, user: current.user, password: secret.password, used: current.used,
+                         clear: current.clear, notes: secret.notes)
+        } catch { failed(error); return nil }
     }
 
-    /// One item without its secret, for the list.
-    private static func kept(from row: [String: Any]) -> Kept? {
-        guard let host = row[kSecAttrServer as String] as? String else { return nil }
-        let user = account(of: row)
-        let (used, clear) = noted(row)
-        return Kept(host: host, user: user, used: used, clear: clear, since: row[kSecAttrCreationDate as String] as? Date)
-    }
+    // MARK: - writes, using the vault's public encryption key
 
-    // MARK: - writing
-
-    /// `notes`: what goes beside the password, or nil to leave what is there
-    /// — a sign-in that updates the password keeps the note written for it.
     @discardableResult
     static func save(host: String, user: String, password: String, used: Date? = nil, clear: Bool = false, notes: String? = nil) -> Bool {
         guard !host.isEmpty, !password.isEmpty else { return false }
-        let kept = notes ?? (read(host: host, user: user)?.notes ?? "")
-        guard let data = Secret(password: password, notes: kept).packed else { return false }
-
-        // Ours only. Server and account alone also match what other apps
-        // keep for the same site — git's token for github.com under your
-        // username — and an update would write this password over it.
-        let identity: [String: Any] = [
-            kSecClass as String: kSecClassInternetPassword,
-            kSecAttrServer as String: host,
-            kSecAttrAccount as String: user,
-            kSecAttrLabel as String: label,
-        ]
-        // A web form's, which also keeps ours apart from another app's item
-        // in the keychain's eyes: one for the same server, account and
-        // protocol — git's — makes adding ours fail as a duplicate.
-        var fields: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrLabel as String: label,
-            kSecAttrAuthenticationType as String: kSecAttrAuthenticationTypeHTMLForm,
-            kSecAttrProtocol as String: clear ? kSecAttrProtocolHTTP : kSecAttrProtocolHTTPS,
-        ]
-        if let used { fields[kSecAttrComment as String] = String(used.timeIntervalSince1970) }
-
-        let status = KeychainAccess.update(identity as CFDictionary, fields as CFDictionary)
-        if status == errSecSuccess { return true }
-        guard status == errSecItemNotFound else { return false }
-
-        var fresh = identity.merging(fields) { _, new in new }
-        fresh[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
-        return KeychainAccess.add(fresh as CFDictionary, nil) == errSecSuccess
+        do { try backend.save(host, user, password, used, clear, notes); clearFailure(); return true }
+        catch { failed(error); return false }
     }
 
-    /// It was just used to sign in. Lists put it first from now on.
     static func touch(_ login: Login) {
-        save(host: login.host, user: login.user, password: login.password, used: Date(), clear: login.clear, notes: login.notes)
+        touch(Kept(host: login.host, user: login.user, used: login.used, clear: login.clear, since: nil))
     }
 
-    /// Whether the keychain let it go: Remove All… counts only those.
+    static func touch(_ kept: Kept) {
+        do { try backend.touch(kept, Date()); clearFailure() }
+        catch { failed(error) }
+    }
+
     @discardableResult
     static func forget(host: String, user: String) -> Bool {
-        KeychainAccess.delete([
-            kSecClass as String: kSecClassInternetPassword,
-            kSecAttrServer as String: host,
-            kSecAttrAccount as String: user,
-            kSecAttrLabel as String: label,
-        ] as CFDictionary) == errSecSuccess
+        do {
+            try backend.forget(Kept(host: host, user: user, used: nil, clear: false, since: nil))
+            clearFailure()
+            return true
+        } catch { failed(error); return false }
+    }
+
+    // MARK: - explicit migration from Search's old per-site Keychain items
+
+    /// Attributes only, with all Keychain interaction forbidden. Existing
+    /// own-vault accounts are omitted so repeated imports cannot replace them.
+    static func legacyKept() -> [Kept] {
+        let existing = Set(entries().map(migrationID))
+        return legacyRows().compactMap(legacyKept(from:)).filter { !existing.contains(migrationID($0)) }
+    }
+    static var legacyCount: Int { legacyKept().count }
+
+    private static func migrationID(_ kept: Kept) -> String {
+        kept.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() + "\u{1}" + kept.user
+    }
+
+    private static func legacyRows() -> [[String: Any]] {
+        var result: CFTypeRef?
+        let status = KeychainAccess.copyMatching([
+            kSecClass as String: kSecClassInternetPassword, kSecAttrLabel as String: legacyLabel,
+            kSecReturnAttributes as String: true, kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail
+        ] as CFDictionary, &result)
+        guard status == errSecSuccess else { return [] }
+        return result as? [[String: Any]] ?? []
+    }
+
+    private static func legacyKept(from row: [String: Any]) -> Kept? {
+        guard let host = row[kSecAttrServer as String] as? String else { return nil }
+        let used = (row[kSecAttrComment as String] as? String).flatMap(Double.init).map(Date.init(timeIntervalSince1970:))
+        return Kept(host: host, user: row[kSecAttrAccount as String] as? String ?? "", used: used,
+                    clear: row[kSecAttrProtocol as String] as? String == kSecAttrProtocolHTTP as String,
+                    since: row[kSecAttrCreationDate as String] as? Date)
+    }
+
+    /// The caller's explicit import is the only secret-query entry point.
+    /// Run it off the UI actor because an old item's system approval can wait.
+    private static func legacySecret(_ kept: Kept) -> Secret? {
+        var result: CFTypeRef?
+        let status = KeychainAccess.copyMatching([
+            kSecClass as String: kSecClassInternetPassword, kSecAttrLabel as String: legacyLabel,
+            kSecAttrServer as String: kept.host, kSecAttrAccount as String: kept.user,
+            kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIAllow
+        ] as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data,
+              let secret = Secret(data), !secret.password.isEmpty else { return nil }
+        return secret
+    }
+
+    /// Called only by the person's Import from Keychain action. The legacy
+    /// copy survives even after the new encrypted copy is verified.
+    @MainActor
+    static func importLegacyLogins() async -> (kept: Int, skipped: Int) {
+        clearFailure()
+        let candidates = legacyKept()
+        guard !candidates.isEmpty else { return (0, 0) }
+        guard let insert = backend.importNew else {
+            locked { failure = "This password store does not support importing old Keychain logins" }
+            return (0, candidates.count)
+        }
+        guard let context = await WebsitePasswordAuthentication.authorize("import your saved website logins into Dark Search Passwords") else {
+            return (0, candidates.count)
+        }
+        defer { context.invalidate() }
+        var imported = 0, skipped = 0
+        for kept in candidates {
+            guard !Task.isCancelled else { return (imported, skipped + candidates.count - imported - skipped) }
+            // Recheck after approval: an existing destination is never replaced.
+            guard !entries().contains(where: { migrationID($0) == migrationID(kept) }) else { skipped += 1; continue }
+            let secret = await Task.detached(priority: .userInitiated) { legacySecret(kept) }.value
+            guard !Task.isCancelled else { return (imported, candidates.count - imported) }
+            guard let secret else {
+                locked { failure = "The old Keychain login could not be imported. Its original copy was left in place" }
+                skipped += 1
+                continue
+            }
+            guard !entries().contains(where: { migrationID($0) == migrationID(kept) }) else { skipped += 1; continue }
+            var rollback: (() throws -> Void)?
+            do {
+                guard let undo = try insert(kept, secret) else { skipped += 1; continue }
+                rollback = undo
+                guard try backend.read(kept, context) == secret else { throw ImportFailure.verification }
+                imported += 1
+            } catch {
+                // The undo is bound to ciphertext, not just host/account or
+                // timestamps. A concurrent newer password is never removed.
+                do { try rollback?() } catch { }
+                failed(error)
+                skipped += 1
+            }
+        }
+        return (imported, skipped)
+    }
+
+    private enum ImportFailure: LocalizedError {
+        case verification
+        var errorDescription: String? {
+            "The imported login could not be verified. Its original Keychain copy was left in place"
+        }
     }
 
     // MARK: - sites that asked not to be asked
@@ -294,27 +334,26 @@ enum Vault {
 
     // MARK: - showing one
 
-    /// A password is shown only to the person the Mac belongs to. Touch ID,
-    /// the watch, or the account password — whatever the Mac itself takes.
-    @MainActor static func prove(_ reason: String, _ done: @escaping (Bool) -> Void) {
-        // A test run answers as it answers Ask.sure (`ui confirm on|off`).
-        if Store.testing, let yes = Ask.testing {
-            done(yes)
-            return
-        }
-        let context = LAContext()
-        var trouble: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &trouble) else {
-            // No way to ask at all — a Mac with no password set. Then there is
-            // nothing to prove. Any other reason it can't ask is a no: a lock
-            // that opened because the question couldn't be put was no lock.
-            done((trouble as? LAError)?.code == .passcodeNotSet)
-            return
-        }
-        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, _ in
-            DispatchQueue.main.async { done(ok) }
+    /// The Passwords page's open spell also requires biometrics, without
+    /// silently falling back to the Mac login password.
+    @discardableResult
+    @MainActor static func prove(_ reason: String, _ done: @escaping (Bool) -> Void) -> Task<Void, Never> {
+        clearFailure()
+        let generation = WebsitePasswordAuthentication.managerGeneration
+        return Task {
+            guard let context = await WebsitePasswordAuthentication.authorize(reason) else { done(false); return }
+            guard WebsitePasswordAuthentication.rememberManagerAccess(context, until: Date().addingTimeInterval(VaultLock.lockAfter.interval),
+                                                                      generation: generation) else {
+                context.invalidate()
+                done(false)
+                return
+            }
+            done(true)
         }
     }
+
+    static func revokeAccess() { WebsitePasswordAuthentication.revokeManagerAccess() }
+    static func extendAccess(until: Date) { WebsitePasswordAuthentication.extendManagerAccess(until: until) }
 
     // MARK: - the site behind a host
 
@@ -340,7 +379,7 @@ enum Vault {
     // MARK: - taking in an export
 
     /// A CSV as Google Password Manager, Chrome or Dia write it: name, url,
-    /// username, password, note. Read once, put in the keychain, and the file
+    /// username, password, note. Read once, encrypted into Search's store, and the file
     /// is yours to delete — this never keeps a copy of it.
     static func take(csv text: String) -> (kept: Int, skipped: Int) {
         var rows = parse(csv: text)

@@ -191,27 +191,53 @@ enum Store {
 /// on the way out.
 enum Disk {
     private static let queue = DispatchQueue(label: "search.disk", qos: .utility)
+    /// Metadata only. Encoding, waiting for a file, and filesystem work
+    /// must never hold up a caller publishing its next background save.
     private static let lock = NSLock()
     /// The newest write asked for, by file.
     nonisolated(unsafe) private static var newest: [URL: Int] = [:]
+    nonisolated(unsafe) private static var mutations: [URL: NSLock] = [:]
     nonisolated(unsafe) private static var count = 0
+    typealias Writer = @Sendable (Data, URL) throws -> Void
+    nonisolated(unsafe) private static var testingWriter: Writer?
+
+    /// Tests can hold the physical write after its final generation check.
+    /// The injected writer is captured with each published request.
+    static func useWriterForTesting(_ writer: Writer?) {
+        guard Store.testing else { return }
+        lock.withLock { testingWriter = writer }
+    }
+
+    private static func publish(_ file: URL) -> (turn: Int, mutation: NSLock, writer: Writer?) {
+        lock.withLock {
+            count += 1
+            newest[file] = count
+            let mutation = mutations[file] ?? NSLock()
+            mutations[file] = mutation
+            return (count, mutation, testingWriter)
+        }
+    }
+
+    private static func current(_ file: URL, _ turn: Int) -> Bool {
+        lock.withLock { newest[file] == turn }
+    }
 
     /// `encode` runs where the write does. `now` writes on the calling
     /// thread: quitting doesn't wait for a queue.
     static func write(_ file: URL, now: Bool = false, _ encode: @escaping @Sendable () -> Data?) {
-        lock.lock()
-        count += 1
-        let turn = count
-        newest[file] = turn
-        lock.unlock()
+        let request = publish(file)
         let put: @Sendable () -> Void = {
             guard let data = encode() else { return }
-            lock.lock()
-            defer { lock.unlock() }
+            // An immediate write may run beside the background queue.
+            // Serialize commits of this file without blocking publication
+            // or an immediate save of any other file.
+            request.mutation.lock()
+            defer { request.mutation.unlock() }
             // Overtaken: something newer of this file was asked for since.
-            guard newest[file] == turn else { return }
+            guard current(file, request.turn) else { return }
             try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? data.write(to: file, options: .atomic)
+            if let writer = request.writer { try? writer(data, file) }
+            else { try? data.write(to: file, options: .atomic) }
         }
         if now { put() } else { queue.async(execute: put) }
     }
@@ -219,15 +245,11 @@ enum Disk {
     /// The file gone, after any write of it already asked for — and none
     /// asked for before this lands it again.
     static func remove(_ file: URL) {
-        lock.lock()
-        count += 1
-        let turn = count
-        newest[file] = turn
-        lock.unlock()
+        let request = publish(file)
         queue.async {
-            lock.lock()
-            defer { lock.unlock() }
-            guard newest[file] == turn else { return }
+            request.mutation.lock()
+            defer { request.mutation.unlock() }
+            guard current(file, request.turn) else { return }
             try? FileManager.default.removeItem(at: file)
         }
     }
