@@ -1092,17 +1092,17 @@ private struct SideRow: View {
                     TabAddressField(browser: browser)
                         .frame(height: 16)
                 } else {
+                    if tab.shy {
+                        Image(systemName: "eye.slash")
+                            .font(.system(size: 9))
+                            .foregroundStyle(colour.opacity(0.7))
+                    }
                     if prefs.glyph == .icons, !tab.isBlank {
                         Mark(icon: tab.icon, letter: tab.monogram, size: prefs.roomyTabs ? 17 : 15)
                     }
                     if tab.bench {
                         // A script's tab, not yours.
                         Image(systemName: "flask")
-                            .font(.system(size: 9))
-                            .foregroundStyle(colour.opacity(0.7))
-                    }
-                    if tab.shy {
-                        Image(systemName: "eye.slash")
                             .font(.system(size: 9))
                             .foregroundStyle(colour.opacity(0.7))
                     }

@@ -146,9 +146,98 @@ final class FormFocusLifecycleTests: XCTestCase {
         XCTAssertTrue(fixture.messages.hasField)
     }
 
+    func testExplicitEventsReannounceUnchangedLoginAfterNativeStateWasCleared() async throws {
+        let fixture = try await page()
+        try await focus(fixture)
+        for event in ["focusin", "mouseup", "pageshow", "popstate", "hashchange"] {
+            // Browser can clear its native account row on tab/URL changes
+            // while the document's field and geometry remain unchanged.
+            fixture.messages.focus.removeAll()
+            try await call(fixture.web, """
+            var target = event === 'focusin' || event === 'mouseup' ? document.getElementById('user') : window;
+            target.dispatchEvent(new Event(event, { bubbles: true }));
+            return true;
+            """, arguments: ["event": event])
+            try await until { fixture.messages.hasField }
+            XCTAssertEqual(fixture.messages.latest?["passwords"] as? Bool, true, event)
+        }
+    }
+
+    func testQuietMutationReannouncesReplacementFieldWithIdenticalGeometry() async throws {
+        let fixture = try await page()
+        try await focus(fixture)
+        let count = fixture.messages.focus.count
+        try await call(fixture.web, """
+        // Suppress an optional focus event to isolate mutation recovery.
+        window.addEventListener('focusin', function (event) { event.stopImmediatePropagation(); }, true);
+        var old = document.getElementById('user'), replacement = old.cloneNode(true);
+        old.replaceWith(replacement);
+        replacement.focus();
+        return true;
+        """)
+        try await until { fixture.messages.focus.count > count && fixture.messages.hasField }
+    }
+
+    func testPasswordDiscoveryCacheHandlesSynchronousDOMEditsAndDocumentOrder() async throws {
+        let fixture = try await page(firstStep: true)
+        let result = try await call(fixture.web, """
+        var api = window.__officeForms, form = document.getElementById('login');
+        var checks = { initiallyEmpty: !api.hasPassword() };
+        var first = document.createElement('input');
+        first.type = 'password';
+        form.appendChild(first);
+        checks.inserted = api.hasPassword();
+        checks.filledInserted = api.fill('synthetic-user', 'synthetic-secret') && first.value === 'synthetic-secret';
+        first.type = 'text';
+        checks.retypedAway = !api.hasPassword() && !api.fill('synthetic-user', 'must-not-fill');
+        first.type = 'password';
+        checks.retypedBack = api.hasPassword();
+        var second = document.createElement('input');
+        second.type = 'password';
+        form.appendChild(second);
+        api.hasPassword();
+        first.value = '';
+        form.insertBefore(second, first);
+        checks.movedOrder = api.fill('synthetic-user', 'second-secret') && second.value === 'second-secret' && first.value === '';
+        var replacement = document.createElement('input');
+        replacement.type = 'password';
+        first.remove();
+        second.replaceWith(replacement);
+        checks.replaced = api.fill('synthetic-user', 'replacement-secret') && replacement.value === 'replacement-secret';
+        replacement.remove();
+        checks.removed = !api.hasPassword();
+        return checks;
+        """)
+        let checks = try XCTUnwrap(result as? [String: Bool])
+        XCTAssertEqual(checks.count, 8)
+        for (name, passed) in checks { XCTAssertTrue(passed, name) }
+    }
+
+    func testSiblingCSSCanRevealAnExistingPasswordStageWithoutAutofocus() async throws {
+        let fixture = try await page(firstStep: true)
+        // The observer, rather than either startup probe, must discover it.
+        try await Task.sleep(for: .milliseconds(3_500))
+        try await call(fixture.web, """
+        var style = document.createElement('style');
+        style.textContent = '#password-stage { visibility: hidden; } #step.done + #password-stage { visibility: visible; }';
+        document.head.appendChild(style);
+        var step = document.createElement('div'); step.id = 'step';
+        var form = document.createElement('form'); form.id = 'password-stage';
+        form.innerHTML = '<input type="password" autocomplete="current-password">';
+        document.body.append(step, form);
+        return window.__officeForms.hasPassword();
+        """)
+        try await Task.sleep(for: .milliseconds(350))
+        XCTAssertEqual(fixture.messages.forms, 0)
+        try await call(fixture.web, "document.getElementById('step').className = 'done'; return true;")
+        try await until { fixture.messages.forms > 0 }
+        XCTAssertFalse(fixture.messages.hasField, "The stage appears without moving the caret into a login")
+    }
+
     func testRelayIgnoresMessagesFromAViewNoLongerOwnedByItsTab() async throws {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
+        configuration.preferences.inactiveSchedulingPolicy = .none
         let tab = Tab(shy: true, configuration: configuration)
         let current = tab.web
         views.append(current)
@@ -172,6 +261,7 @@ final class FormFocusLifecycleTests: XCTestCase {
     private func page(firstStep: Bool = false, handler: WKScriptMessageHandler? = nil) async throws -> Fixture {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
+        configuration.preferences.inactiveSchedulingPolicy = .none
         let messages = FocusMessages()
         configuration.userContentController.add(handler ?? messages, contentWorld: Web.world, name: FormRelay.name)
         configuration.userContentController.addUserScript(WKUserScript(source: FormRelay.script,
@@ -205,7 +295,7 @@ final class FormFocusLifecycleTests: XCTestCase {
     }
 
     @discardableResult
-    private func call(_ web: WKWebView, _ body: String) async throws -> Any? {
+    private func call(_ web: WKWebView, _ body: String, arguments: [String: Any] = [:]) async throws -> Any? {
         try await withCheckedThrowingContinuation { continuation in
             var finished = false
             let timeout = DispatchWorkItem {
@@ -217,7 +307,7 @@ final class FormFocusLifecycleTests: XCTestCase {
                     userInfo: [NSLocalizedDescriptionKey: "WebKit JavaScript callback timed out: \(context)"]))
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
-            web.callAsyncJavaScript(body, arguments: [:], in: nil, in: Web.world) { (result: Result<Any, Error>) in
+            web.callAsyncJavaScript(body, arguments: arguments, in: nil, in: Web.world) { (result: Result<Any, Error>) in
                 guard !finished else { return }
                 finished = true
                 timeout.cancel()
@@ -237,10 +327,13 @@ final class FormFocusLifecycleTests: XCTestCase {
 
     private final class FocusMessages: NSObject, WKScriptMessageHandler {
         var focus: [[String: Any]] = []
+        var forms = 0
         var latest: [String: Any]? { focus.last }
         var hasField: Bool { latest?["rect"] as? [String: Any] != nil }
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard let body = message.body as? [String: Any], body["kind"] as? String == "focus" else { return }
+            guard let body = message.body as? [String: Any] else { return }
+            if body["kind"] as? String == "form" { forms += 1; return }
+            guard body["kind"] as? String == "focus" else { return }
             focus.append(body)
         }
     }
