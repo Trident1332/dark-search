@@ -720,12 +720,11 @@ struct ContentView: View {
         // an ordinary tab that is not currently paired. Drawing it here too
         // leaves two offset address fields on a blank tab.
         if !browser.prefs.splitView {
-            Omnibox(browser: browser, over: !(browser.active?.isBlank ?? true))
+            Omnibox(browser: browser, over: !(browser.active?.isBlank ?? true), fitted: true)
                 // Centred on the page, not on the window. The column of tabs
-                // is not what the field is standing over, and dimming it along
-                // with the page says otherwise.
-                .padding(.leading, sidebar && !sideOnRight ? browser.prefs.columnWidth : 0)
-                .padding(.trailing, sidebar && sideOnRight ? browser.prefs.columnWidth : 0)
+                // and an open side panel keep their own room and controls.
+                .padding(.leading, (sidebar && !sideOnRight ? browser.prefs.columnWidth : 0) + (sideOnRight ? panelRoom : 0))
+                .padding(.trailing, (sidebar && sideOnRight ? browser.prefs.columnWidth : 0) + (sideOnRight ? 0 : panelRoom))
         }
     }
 
@@ -866,7 +865,14 @@ struct ContentView: View {
             }
             .onChange(of: browser.fieldShowing) { _, showing in
                 if showing {
-                    DispatchQueue.main.async { browser.askFocus() }
+                    DispatchQueue.main.async {
+                        // A cached blank-tab conversation brings its own
+                        // composer back. Merely showing the search beside it
+                        // must not take the keyboard away from that editor.
+                        guard browser.fieldShowing,
+                              browser.assisting?.standalone != true || browser.editing else { return }
+                        browser.askFocus()
+                    }
                 } else {
                     handBack()
                 }
@@ -1540,10 +1546,15 @@ struct ContentView: View {
         if event.keyCode == 48, !flags.contains(.command), !flags.contains(.option), !flags.contains(.control) {
             if browser.editingTab != nil { return true }
             // "red" then Tab: Reddit, in the field (SiteSearch.swift).
-            if browser.fieldShowing, !flags.contains(.shift), browser.lockSiteOffer() { return true }
-            if browser.fieldShowing, !browser.offers.isEmpty {
-                browser.walk(flags.contains(.shift) ? -1 : 1)
-                return true
+            // A blank tab keeps its address field beside Ask AI; the panel's
+            // editor still owns Tab while it has the keyboard.
+            if browser.fieldShowing, let window, event.window === window,
+               ContentView.inAddressField(window) {
+                if !flags.contains(.shift), browser.lockSiteOffer() { return true }
+                if !browser.offers.isEmpty {
+                    browser.walk(flags.contains(.shift) ? -1 : 1)
+                    return true
+                }
             }
             return false
         }

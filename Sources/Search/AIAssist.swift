@@ -29,6 +29,7 @@ final class Assistant: ObservableObject, Identifiable {
     let id = UUID()
     let tab: Tab.ID
     let sourceURL: URL?
+    let standalone: Bool
     let provider: AIProvider
     @Published private(set) var model: String
     /// The exact quote captured by the context menu, or nil for the page.
@@ -54,9 +55,10 @@ final class Assistant: ObservableObject, Identifiable {
     private var connection: OpenCodeAI.Connection?
     private var consentKey: String?
 
-    init(tab: Tab, provider: AIProvider, model: String, summary: Bool, selection: String? = nil) {
+    init(tab: Tab, provider: AIProvider, model: String, summary: Bool, selection: String? = nil, standalone: Bool = false) {
         self.tab = tab.id
         self.sourceURL = tab.pageAddress
+        self.standalone = standalone
         self.provider = provider
         self.model = model
         self.summary = summary
@@ -64,6 +66,11 @@ final class Assistant: ObservableObject, Identifiable {
         self.selection = quote.isEmpty ? nil : String(quote.prefix(AIPage.limit))
         self.destinationHost = provider == .openCode
             ? ((try? OpenCodeAI.catalogue())?.first { $0.id == model }?.host ?? "your OpenCode provider") : provider.host
+        if standalone {
+            self.context = AIPage.Read(title: "", url: nil, text: "", links: [], cut: false)
+            self.reading = false
+            return
+        }
         let address = tab.pageAddress
         task = Task { @MainActor [weak self, weak tab] in
             guard let self, let tab else { return }
@@ -156,14 +163,15 @@ final class Assistant: ObservableObject, Identifiable {
             messages = [AIMessage(role: .user, text: AIPage.opening(read, .summary, fence: fence))]
             turns.append(Turn(question: nil))
         case .question(let question):
-            messages.append(AIMessage(role: .user, text: messages.isEmpty ? AIPage.opening(read, ask, fence: fence) : question))
+            messages.append(AIMessage(role: .user, text: !standalone && messages.isEmpty ? AIPage.opening(read, ask, fence: fence) : question))
             turns.append(Turn(question: question))
         }
         // The key, read now and let go with the request.
         let key = provider.isLocal || provider == .openCode ? nil : AIKeys.key(for: provider)
+        let system = standalone ? "You are a helpful assistant. Answer the person directly in plain text. You have no access to their tabs, files or device. Distinguish uncertain claims from facts." : AIPage.system(fence: fence)
         let stream = provider == .thisMac
-            ? AIEngine.shared.stream(system: AIPage.system(fence: fence), messages: messages)
-            : AIClient.shared.stream(provider, model: model, system: AIPage.system(fence: fence), messages: messages, key: key,
+            ? AIEngine.shared.stream(system: system, messages: messages)
+            : AIClient.shared.stream(provider, model: model, system: system, messages: messages, key: key,
                                      connection: connection)
         connection = nil
         let turnID = turns[turns.count - 1].id
@@ -192,9 +200,9 @@ final class Assistant: ObservableObject, Identifiable {
         turn.failed = failed
         turns[turns.count - 1] = turn
         // Checked away from the window's thread: a long answer is a long look.
-        let id = turn.id, answer = turn.answer
+        let id = turn.id, answer = turn.answer, standalone = self.standalone
         Task.detached(priority: .userInitiated) { [weak self] in
-            let strays = AIPage.strays(in: answer, from: read)
+            let strays = standalone ? [] : AIPage.strays(in: answer, from: read)
             await MainActor.run {
                 guard let self, let index = self.turns.firstIndex(where: { $0.id == id }) else { return }
                 self.turns[index].strays = strays
@@ -252,12 +260,21 @@ enum AIAssist {
 }
 
 extension Browser {
+    func askFromAddress() {
+        let question = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if launching || (active?.isWeb != true && active?.isBlank != true) { newTab() }
+        startAssistant(summary: false, standalone: active?.isBlank == true)
+        if let assistant = assisting, !question.isEmpty, question != active?.pageAddress?.absoluteString {
+            assistant.draft = question
+        }
+        if active?.isBlank == true { editing = false } else { dismiss() }
+    }
     func summarizePage() { startAssistant(summary: true) }
     func askAboutPage() { startAssistant(summary: false) }
     func askAboutPage(from tab: Tab, selection: String? = nil) { startAssistant(summary: false, from: tab, selection: selection) }
 
-    private func startAssistant(summary: Bool, from source: Tab? = nil, selection: String? = nil) {
-        guard AI.shipped || Store.testing, let tab = source ?? active, tab.isWeb, !isPopup else { return }
+    private func startAssistant(summary: Bool, from source: Tab? = nil, selection: String? = nil, standalone: Bool = false) {
+        guard AI.shipped || Store.testing, let tab = source ?? active, tab.isWeb || (standalone && tab.isBlank), !isPopup else { return }
         if source != nil {
             guard tabs.contains(where: { $0 === tab }) else { return }
             select(tab)
@@ -273,7 +290,7 @@ extension Browser {
             return
         }
         // A web page, nothing else: not a file, not an extension's page.
-        guard let scheme = tab.pageAddress?.scheme?.lowercased(), scheme == "https" || scheme == "http" else {
+        guard standalone || ["https", "http"].contains(tab.pageAddress?.scheme?.lowercased() ?? "") else {
             announce("AI works on web pages")
             return
         }
@@ -315,7 +332,7 @@ extension Browser {
         }
         if sidePanel != .assistant { closeSidePanel() }
         closeAssistant(for: tab.id)
-        let assistant = Assistant(tab: tab, provider: provider, model: model, summary: summary, selection: selection)
+        let assistant = Assistant(tab: tab, provider: provider, model: model, summary: summary, selection: selection, standalone: standalone)
         assistantSessions[tab.id] = assistant
         assisting = assistant
         sidePanel = .assistant
@@ -336,7 +353,7 @@ extension Browser {
         sidePanelFollows(tab)
         guard let assistant = assistantSessions[tab.id] else { return }
         let privatePage = tab.shy || tab.usesTor || !tab.store.isPersistent
-        guard tab.isWeb, assistant.sourceURL == tab.pageAddress,
+        guard tab.isWeb || (assistant.standalone && tab.isBlank), assistant.sourceURL == tab.pageAddress,
               !privatePage || assistant.provider.isLocal else {
             closeAssistant(for: tab.id)
             return
@@ -381,9 +398,10 @@ extension Browser {
 
     /// The panel again with nothing said yet, about the page it is on.
     func restartAssistant() {
-        guard assisting != nil else { return }
+        guard let open = assisting else { return }
+        let standalone = open.standalone
         closeAssistant()
-        startAssistant(summary: false)
+        startAssistant(summary: false, standalone: standalone)
     }
 }
 
@@ -736,8 +754,8 @@ struct AssistantPanel: View {
     private var chosenModel: OpenCodeAI.Model? { catalogue.first { $0.id == assistant.model } }
     private var modelName: String { Self.modelLabel(for: assistant.model, provider: assistant.provider, models: catalogue) }
     private var selected: Bool { assistant.selection != nil }
-    /// About a page: so far, every conversation is.
-    private var conversational: Bool { true }
+    /// About a page, rather than a conversation begun from the address bar.
+    private var conversational: Bool { !assistant.standalone }
     private var empty: Bool {
         assistant.turns.isEmpty && assistant.notice == nil && assistant.trouble == nil && assistant.pendingQuestion == nil
     }
@@ -748,10 +766,10 @@ struct AssistantPanel: View {
     private var stopping: Bool { assistant.busy && !assistant.reading }
     private var suggestable: Bool { !assistant.busy && assistant.notice == nil && assistant.context != nil }
     private var placeholder: String {
-        !assistant.turns.isEmpty ? "Ask a follow-up…" : selected ? "Ask about this selection…" : "Ask about this page…"
+        assistant.standalone ? "Message Ask AI…" : !assistant.turns.isEmpty ? "Ask a follow-up…" : selected ? "Ask about this selection…" : "Ask about this page…"
     }
     private var invitation: String {
-        selected ? "Ask about the selected passage." : "Ask about this page, or select a passage on it first."
+        assistant.standalone ? "Ask a question to get started." : selected ? "Ask about the selected passage." : "Ask about this page, or select a passage on it first."
     }
 
     static func modelLabel(for id: String, provider: AIProvider, models: [OpenCodeAI.Model]) -> String {

@@ -386,7 +386,7 @@ final class Browser: NSObject, ObservableObject {
     var cycling = false
 
     var active: Tab? { tabs.first { $0.id == activeID } }
-    var fieldShowing: Bool { editing || active?.isBlank ?? true }
+    var fieldShowing: Bool { editing || (active?.isBlank ?? true) }
 
     /// Typed plus whatever the field is quietly finishing for you.
     var completed: String {

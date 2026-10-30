@@ -7,7 +7,7 @@ extension PageView {
     func askAIItem() -> NSMenuItem? {
         guard AI.shipped || Store.testing, onAskAI != nil, canAskAI?() != false,
               let scheme = url?.scheme?.lowercased(), ["http", "https"].contains(scheme) else { return nil }
-        let item = NSMenuItem(title: "Ask AI…", action: #selector(askAI(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: "Ask AI", action: #selector(askAI(_:)), keyEquivalent: "")
         item.identifier = NSUserInterfaceItemIdentifier("SearchAskAI")
         item.target = self
         return item

@@ -13,7 +13,7 @@ struct Omnibox: View {
     /// The field's own height — the 22 of text and 14 of air above and below it
     /// that `field` lays out — so the list can sit below it without being
     /// stacked with it.
-    private static let fieldHeight: CGFloat = 22 + 14 * 2
+    private static let fieldHeight: CGFloat = 30 + 14 * 2
 
     @State private var shake: CGFloat = 0
     @State private var refused = false
@@ -90,9 +90,10 @@ struct Omnibox: View {
                     .transition(.scale(scale: 0.9, anchor: .leading).combined(with: .opacity))
             }
             AddressField(browser: browser)
+            AskAIDoor(browser: browser)
         }
             .animation(Motion.quick, value: browser.siteChip)
-            .frame(height: 22)
+            .frame(height: 30)
             .padding(.horizontal, 22)
             .padding(.vertical, 14)
             .background {
@@ -103,7 +104,7 @@ struct Omnibox: View {
                     // an app.
                     Breath()
 
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    RoundedRectangle(cornerRadius: 29, style: .continuous)
                         .fill(Palette.ground)
                         // Only the rounded field casts this shadow. Applying
                         // it to the whole field also composites Breath's
@@ -112,7 +113,7 @@ struct Omnibox: View {
                 }
             }
             .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: 29, style: .continuous)
                     .strokeBorder(
                         refused ? Color.red.opacity(0.35) : Palette.hairline,
                         lineWidth: 1
@@ -421,7 +422,7 @@ struct AddressField: NSViewRepresentable {
         // SwiftUI picks its own colour for a placeholder, and on a pale ground
         // that colour was near-white.
         field.placeholderAttributedString = NSAttributedString(
-            string: "Enter a web address",
+            string: "Search or enter a web address",
             attributes: [
                 .font: NSFont.systemFont(ofSize: 15.5),
                 .foregroundColor: NSColor(Palette.ink.opacity(0.3)),
@@ -450,8 +451,14 @@ struct AddressField: NSViewRepresentable {
         }
 
         if coordinator.answered != browser.focusRequest {
+            let firstUpdate = coordinator.answered < 0
             coordinator.answered = browser.focusRequest
-            DispatchQueue.main.async { coordinator.focus(field) }
+            // A blank tab's field remounts when its cached AI conversation
+            // returns. Its old focus request belongs to the previous mount;
+            // leave the new composer focused until the address is asked for.
+            if !firstUpdate || browser.assisting?.standalone != true || browser.editing {
+                DispatchQueue.main.async { coordinator.focus(field) }
+            }
         }
     }
 
