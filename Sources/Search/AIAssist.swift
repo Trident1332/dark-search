@@ -378,22 +378,105 @@ extension Browser {
         assistant.chooseModel(model)
         prefs.setAIModel(assistant.model, for: .openCode)
     }
+
+    /// The panel again with nothing said yet, about the page it is on.
+    func restartAssistant() {
+        guard assisting != nil else { return }
+        closeAssistant()
+        startAssistant(summary: false)
+    }
 }
 
 // MARK: - the panel
 
 /// Color stays in small surfaces and accents so long answers remain easy to read.
 private enum AssistantStyle {
+    static let blue = Color(red: 0.34, green: 0.48, blue: 0.96)
+    static let violet = Color(red: 0.64, green: 0.40, blue: 0.90)
+    static let teal = Color(red: 0.20, green: 0.69, blue: 0.73)
+
+    /// The one gradient, kept for the few things that earn it: the spark,
+    /// the send button, the thinking dots and the ring round a composer
+    /// being typed in. Everything else is the panel's greys.
     static func gradient(_ opacity: Double = 1) -> LinearGradient {
-        LinearGradient(colors: [Color(red: 0.34, green: 0.48, blue: 0.96).opacity(opacity),
-                                Color(red: 0.64, green: 0.40, blue: 0.90).opacity(opacity),
-                                Color(red: 0.20, green: 0.69, blue: 0.73).opacity(opacity)],
+        LinearGradient(colors: [blue.opacity(opacity), violet.opacity(opacity), teal.opacity(opacity)],
                        startPoint: .topLeading, endPoint: .bottomTrailing)
     }
-    static let arrival = Animation.easeOut(duration: 0.24)
+
+    /// The one tinted ink: the arrow a suggestion grows under the pointer,
+    /// the check after a copy, the arc round Stop.
+    static let accent = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.55, green: 0.61, blue: 1.0, alpha: 1)
+            : NSColor(srgbRed: 0.30, green: 0.39, blue: 0.88, alpha: 1)
+    })
+    /// Text a step short of ink: a suggestion at rest, the model's name.
+    static let soft = grey(light: 0.30, dark: 0.73)
+    /// The composer, and a row under the pointer: a step up from the ground.
+    static let raised = grey(light: 0.957, dark: 0.14)
+
+    private static func grey(light: CGFloat, dark: CGFloat) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            NSColor(white: appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light, alpha: 1)
+        })
+    }
+
+    /// Two curves, so the panel moves as one thing: an ease-out for what
+    /// arrives and leaves, a short spring for what pops into place.
+    static let arrival = Animation.timingCurve(0.2, 0.8, 0.2, 1, duration: 0.26)
+    static let pop = Animation.spring(response: 0.36, dampingFraction: 0.72)
+    /// Siblings arrive one after another, this far apart.
+    static let step = 0.06
 }
 
-/// Only the three dots redraw on the clock, never the conversation or its layout.
+/// One element's entrance: it fades up into place a few steps after the
+/// one above it. Off when drawn; under Reduce Motion it only fades.
+private struct Arriving: ViewModifier {
+    let step: Int
+    let on: Bool
+    let moves: Bool
+    @State private var shown = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(shown || !on ? 1 : 0)
+            .offset(y: shown || !on || !moves ? 0 : 6)
+            .onAppear {
+                guard on, !shown else { return }
+                withAnimation(AssistantStyle.arrival.delay(Double(step) * AssistantStyle.step)) { shown = true }
+            }
+    }
+}
+
+private extension View {
+    func arriving(_ step: Int, on: Bool, moves: Bool) -> some View {
+        modifier(Arriving(step: step, on: on, moves: moves))
+    }
+}
+
+/// The gradient spark: it turns into place, then breathes while the panel
+/// waits. The breathing is the symbol's own, off the window's thread.
+private struct SparkMark: View {
+    var drawn = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var arrived = false
+
+    var body: some View {
+        Image(systemName: "sparkles")
+            .font(.system(size: 24, weight: .medium))
+            .foregroundStyle(AssistantStyle.gradient())
+            .symbolEffect(.pulse, options: .repeating.speed(0.4), isActive: !reduceMotion && !drawn)
+            .rotationEffect(.degrees(arrived || drawn || reduceMotion ? 0 : -20))
+            .scaleEffect(arrived || drawn || reduceMotion ? 1 : 0.6)
+            .opacity(arrived || drawn ? 1 : 0)
+            .frame(width: 30, height: 30, alignment: .leading)
+            .onAppear { withAnimation(drawn || reduceMotion ? nil : AssistantStyle.pop) { arrived = true } }
+            .accessibilityHidden(true)
+    }
+}
+
+/// Only the glyph, the shimmer and the three dots redraw on the clock,
+/// never the conversation or its layout.
 private struct AssistantThinking: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
@@ -402,26 +485,223 @@ private struct AssistantThinking: View {
     var title = "Thinking"
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text(title).font(.system(size: 12.5)).foregroundStyle(Palette.muted)
+        HStack(spacing: 9) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(AssistantStyle.gradient())
+                .symbolEffect(.pulse, options: .repeating, isActive: !reduceMotion && !drawn)
             TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || drawn || scenePhase != .active)) { clock in
                 let time = reduceMotion || drawn ? 0 : max(0, clock.date.timeIntervalSince(started))
-                HStack(spacing: 3) {
-                    ForEach(0..<3) { index in
-                        let wave = (sin(time * 4 - Double(index) * 0.8) + 1) / 2
-                        Circle().fill(AssistantStyle.gradient())
-                            .frame(width: 4, height: 4)
-                            .opacity(0.4 + wave * 0.6)
-                            .offset(y: reduceMotion || drawn ? 0 : -wave * 3)
+                HStack(spacing: 8) {
+                    Text(title).font(.system(size: 13)).foregroundStyle(shimmer(at: time))
+                    HStack(spacing: 3) {
+                        ForEach(0..<3) { index in
+                            let wave = (sin(time * 4 - Double(index) * 0.8) + 1) / 2
+                            Circle().fill(AssistantStyle.gradient())
+                                .frame(width: 4, height: 4)
+                                .opacity(0.4 + wave * 0.6)
+                                .offset(y: reduceMotion || drawn ? 0 : -wave * 3)
+                        }
                     }
+                    .frame(height: 12)
                 }
-                .frame(height: 12)
             }
-            .accessibilityHidden(true)
         }
+        .frame(height: 22)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
         .onAppear { started = Date() }
+    }
+
+    /// A band of ink sweeps the muted word once every 1.8 s, then rests.
+    private func shimmer(at time: Double) -> LinearGradient {
+        let phase = time.truncatingRemainder(dividingBy: 1.8) / 1.8
+        let x = phase * 3 - 2
+        return LinearGradient(stops: [.init(color: Palette.muted, location: 0), .init(color: Palette.muted, location: 0.38),
+                                      .init(color: Palette.ink, location: 0.5),
+                                      .init(color: Palette.muted, location: 0.62), .init(color: Palette.muted, location: 1)],
+                              startPoint: UnitPoint(x: x, y: 0.5), endPoint: UnitPoint(x: x + 3, y: 0.5))
+    }
+}
+
+/// A short track the gradient sweeps along while the page is being read.
+private struct ReadingSweep: View {
+    var drawn = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var started = Date()
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || drawn || scenePhase != .active)) { clock in
+            let time = reduceMotion || drawn ? 0.4 : max(0, clock.date.timeIntervalSince(started))
+            let phase = time.truncatingRemainder(dividingBy: 1.2) / 1.2
+            let eased = phase < 0.5 ? 2 * phase * phase : 1 - pow(-2 * phase + 2, 2) / 2
+            Capsule().fill(Palette.wash)
+                .frame(width: 56, height: 2)
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(LinearGradient(colors: [AssistantStyle.blue, AssistantStyle.violet, AssistantStyle.teal],
+                                             startPoint: .leading, endPoint: .trailing))
+                        .frame(width: 22, height: 2)
+                        .offset(x: -22 + eased * 78)
+                }
+                .clipShape(Capsule())
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// A faint gradient ring that turns slowly round the composer while it is
+/// being typed in. Only the ring redraws on the clock, and only then.
+private struct FocusRing: View {
+    let on: Bool
+    var drawn = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var started = Date()
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24, paused: !on || reduceMotion || drawn || scenePhase != .active)) { clock in
+            let time = reduceMotion || drawn ? 0 : max(0, clock.date.timeIntervalSince(started))
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(AngularGradient(colors: [AssistantStyle.blue, AssistantStyle.violet, AssistantStyle.teal, AssistantStyle.blue],
+                                              center: .center, angle: .degrees(time / 8 * 360)), lineWidth: 1)
+        }
+        .opacity(on ? 0.75 : 0)
+        .allowsHitTesting(false)
+    }
+}
+
+/// The arc that orbits Stop while an answer is on its way.
+private struct StopArc: View {
+    var drawn = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var started = Date()
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || drawn || scenePhase != .active)) { clock in
+            let time = reduceMotion || drawn ? 0 : max(0, clock.date.timeIntervalSince(started))
+            Circle().trim(from: 0, to: 0.28)
+                .stroke(AssistantStyle.accent, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                .rotationEffect(.degrees(time / 0.9 * 360 - 90))
+        }
+        .padding(-3)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Send gives under the pointer, as a tab does.
+private struct SendStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.9 : 1)
+            .animation(Motion.reduced ? nil : AssistantStyle.pop, value: configuration.isPressed)
+    }
+}
+
+/// A question offered as a line of text: under the pointer it brightens,
+/// gives a little to the right, and grows its arrow.
+private struct AskSuggestion: View {
+    let title: String
+    let on: Bool
+    let act: () -> Void
+    @State private var hovering = false
+
+    init(_ title: String, on: Bool, act: @escaping () -> Void) {
+        self.title = title
+        self.on = on
+        self.act = act
+    }
+
+    var body: some View {
+        Button(action: act) {
+            HStack(spacing: 8) {
+                Text(title).font(.system(size: 13)).lineLimit(2)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(AssistantStyle.accent)
+                    .opacity(hovering ? 1 : 0)
+                    .offset(x: hovering ? 0 : -4)
+            }
+            .foregroundStyle(hovering ? Palette.ink : AssistantStyle.soft)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(hovering ? AssistantStyle.raised : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .offset(x: hovering ? 2 : 0)
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!on)
+        .opacity(on ? 1 : 0.5)
+        .onHover { hovering = $0 && on }
+        .animation(Motion.quick, value: hovering)
+    }
+}
+
+/// A small icon button with nothing round it until the pointer is over it.
+private struct AskQuiet: View {
+    let icon: String
+    var help = ""
+    var label = ""
+    var tint: Color? = nil
+    let act: () -> Void
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button(action: act) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(tint ?? (hovering ? Palette.ink : Palette.muted))
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 26, height: 24)
+                .background(hovering ? AssistantStyle.raised : Color.clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(help)
+        .accessibilityLabel(label)
+        .animation(Motion.quick, value: hovering)
+        .animation(reduceMotion ? nil : AssistantStyle.pop, value: icon)
+    }
+}
+
+/// The notice's two answers: Continue in the gradient, the other quiet.
+private struct AssistantPill: View {
+    let title: String
+    var filled = false
+    let act: () -> Void
+    @State private var hovering = false
+
+    init(_ title: String, filled: Bool = false, act: @escaping () -> Void) {
+        self.title = title
+        self.filled = filled
+        self.act = act
+    }
+
+    var body: some View {
+        Button(action: act) {
+            Text(title)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(filled ? Color.white : (hovering ? Palette.ink : Palette.muted))
+                .padding(.horizontal, 18)
+                .frame(height: 34)
+                .background {
+                    if filled {
+                        Capsule().fill(AssistantStyle.gradient())
+                    } else if hovering {
+                        Capsule().fill(AssistantStyle.raised)
+                    }
+                }
+                .brightness(filled && hovering ? 0.06 : 0)
+                .offset(y: hovering ? -1 : 0)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(Motion.quick, value: hovering)
     }
 }
 
@@ -436,10 +716,16 @@ struct AssistantPanel: View {
     @FocusState private var typing: Bool
     @State private var models: [OpenCodeAI.Model] = []
     @State private var expandedContext = false
+    @State private var overSend = false
+    @State private var overModel = false
 
-    private var motion: Animation? { reduceMotion || drawn ? nil : AssistantStyle.arrival }
-    private var arrival: AnyTransition {
-        reduceMotion || drawn ? .opacity : .opacity.combined(with: .offset(y: 8))
+    private var moves: Bool { !reduceMotion && !drawn }
+    private var motion: Animation? { moves ? AssistantStyle.arrival : nil }
+    private var popping: Animation? { moves ? AssistantStyle.pop : nil }
+    private var arrival: AnyTransition { moves ? .opacity.combined(with: .offset(y: 6)) : .opacity }
+    /// A question, or the notice: from its corner, as a thing set down.
+    private var popIn: AnyTransition {
+        moves ? .opacity.combined(with: .scale(scale: 0.97, anchor: .bottomTrailing)).combined(with: .offset(y: 6)) : .opacity
     }
 
     private var catalogue: [OpenCodeAI.Model] {
@@ -450,15 +736,22 @@ struct AssistantPanel: View {
     private var chosenModel: OpenCodeAI.Model? { catalogue.first { $0.id == assistant.model } }
     private var modelName: String { Self.modelLabel(for: assistant.model, provider: assistant.provider, models: catalogue) }
     private var selected: Bool { assistant.selection != nil }
+    /// About a page: so far, every conversation is.
+    private var conversational: Bool { true }
     private var empty: Bool {
-        assistant.turns.isEmpty && assistant.notice == nil && assistant.trouble == nil && !assistant.reading
+        assistant.turns.isEmpty && assistant.notice == nil && assistant.trouble == nil && assistant.pendingQuestion == nil
     }
     private var canSend: Bool {
         !assistant.busy && assistant.notice == nil && assistant.context != nil &&
             !assistant.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
+    private var stopping: Bool { assistant.busy && !assistant.reading }
+    private var suggestable: Bool { !assistant.busy && assistant.notice == nil && assistant.context != nil }
     private var placeholder: String {
         !assistant.turns.isEmpty ? "Ask a follow-up…" : selected ? "Ask about this selection…" : "Ask about this page…"
+    }
+    private var invitation: String {
+        selected ? "Ask about the selected passage." : "Ask about this page, or select a passage on it first."
     }
 
     static func modelLabel(for id: String, provider: AIProvider, models: [OpenCodeAI.Model]) -> String {
@@ -474,29 +767,21 @@ struct AssistantPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            modelControl
-                .padding(.horizontal, 14)
-                .padding(.bottom, 12)
-            Rectangle().fill(Palette.hairline).frame(height: 1).padding(.horizontal, 14)
-            if let context = assistant.context { contextCard(context) }
             if drawn {
                 conversation
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: empty ? .center : .topLeading)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 14)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: empty ? .leading : .topLeading)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+                    .padding(.bottom, empty ? 64 : 12)
             } else {
                 scrolling
             }
+            contextLine
             composer
-            privacyNote
+            footer
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background {
-            Palette.ground
-            AssistantStyle.gradient(0.07)
-                .mask(LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom))
-                .allowsHitTesting(false)
-        }
+        .background(Palette.ground)
         .opacity(appeared || drawn ? 1 : 0)
         .offset(x: appeared || drawn || reduceMotion ? 0 : 10)
         .animation(motion, value: appeared)
@@ -507,186 +792,32 @@ struct AssistantPanel: View {
         }
     }
 
+    /// A small name and Close; a plus to start over once something was said.
     private var header: some View {
-        HStack(spacing: 9) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(AssistantStyle.gradient())
-                .frame(width: 28, height: 28)
-                .background(AssistantStyle.gradient(0.13), in: RoundedRectangle(cornerRadius: 9))
-            Text("Ask AI").font(.system(size: 13, weight: .semibold))
-            Spacer(minLength: 0)
-            Door(icon: "gearshape", help: "Settings › AI") { _ = browser.show(InternalPage(.settings, SettingsPanel.Page.ai.rawValue)) }
-            Door(icon: "xmark", help: "Close") { browser.closeAssistant() }
-        }
-        .foregroundStyle(Palette.ink)
-        .padding(.horizontal, 14)
-        .padding(.top, 12)
-        .padding(.bottom, 10)
-    }
-
-    @ViewBuilder
-    private var modelControl: some View {
-        HStack(spacing: 0) {
-            Spacer(minLength: 0)
-            if assistant.provider == .openCode && !drawn {
-                Menu {
-                    ForEach(Array(Set(catalogue.map(\.providerName))).sorted(), id: \.self) { provider in
-                        Section(provider) {
-                            ForEach(catalogue.filter { $0.providerName == provider }) { model in
-                                Button { browser.chooseAssistantModel(model.id) } label: {
-                                    if model.id == assistant.model {
-                                        Label(model.name, systemImage: "checkmark")
-                                    } else {
-                                        Text(model.name)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } label: { modelChip }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize(horizontal: false, vertical: true)
-                .disabled(assistant.busy || assistant.notice != nil)
-                .accessibilityLabel("AI model")
-            } else {
-                modelChip
-            }
-        }
-    }
-
-    private var modelChip: some View {
-        HStack(spacing: 14) {
-            Text(verbatim: modelName)
-                .font(.system(size: 12))
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Image(systemName: "chevron.down").font(.system(size: 9, weight: .medium)).foregroundStyle(Palette.muted)
-        }
-        .foregroundStyle(Palette.ink)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Palette.wash.opacity(0.65), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
-    }
-
-    private func contextCard(_ context: AIPage.Read) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Button {
-                withAnimation(motion) { expandedContext.toggle() }
-            } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: selected ? "text.quote" : "doc.text")
-                    Text(selected ? "Selected text" : "Page context")
-                    Spacer(minLength: 4)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .medium))
-                        .rotationEffect(.degrees(expandedContext ? 180 : 0))
-                }
-                .font(.system(size: 11))
+        HStack(spacing: 2) {
+            Text("Ask AI")
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Palette.muted)
-                .contentShape(Rectangle())
+                .arriving(0, on: !drawn, moves: moves)
+            Spacer(minLength: 0)
+            if !empty {
+                Door(icon: "plus", help: "New conversation") { browser.restartAssistant() }
+                    .transition(.opacity)
             }
-            .buttonStyle(.plain)
-            .help(expandedContext ? "Collapse context" : "Show the full context sent with your question")
-            .accessibilityLabel(expandedContext ? "Collapse context" : "Expand context")
-            if (!selected || expandedContext), !context.title.isEmpty {
-                Text(verbatim: context.title)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(2)
-            }
-            if expandedContext {
-                ScrollView {
-                    contextText(context.text)
-                }
-                .frame(maxHeight: 180)
-            } else if selected {
-                Text(verbatim: String(context.text.prefix(900)))
-                    .font(.system(size: 12.5))
-                    .lineSpacing(2)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-            }
-            if let host = context.url?.host() {
-                Text(verbatim: host)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Palette.muted)
-                    .lineLimit(1)
-            }
+            Door(icon: "xmark", help: "Close") { browser.closeAssistant() }
+                .arriving(1, on: !drawn, moves: moves)
         }
-        .foregroundStyle(Palette.ink)
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Palette.wash.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
-        .padding(.horizontal, 14)
-        .padding(.top, 14)
-    }
-
-    private func contextText(_ text: String) -> some View {
-        Text(verbatim: text)
-            .font(.system(size: 12.5))
-            .lineSpacing(2)
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 17) {
-            VStack(alignment: .leading, spacing: 7) {
-                Text("What would you like to know?")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(selected ? "Ask about the selected passage." : "Ask about this page or a selected passage.")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Palette.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            VStack(spacing: 8) {
-                suggestionRow(selected ? "Summarize this selection" : "Summarize this page", icon: "doc.text") {
-                    assistant.submitSuggestion(selected ? "Summarize this selected passage in a few sentences." : "Summarize this page in a few sentences.")
-                }
-                suggestionRow(selected ? "Explain this selection" : "Explain a selection", icon: "text.alignleft") {
-                    if selected {
-                        assistant.submitSuggestion("Explain this selected passage in clear, simple terms.")
-                    } else {
-                        browser.announce("Select a passage on the page, then right-click and choose Ask AI")
-                        typing = true
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func suggestionRow(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon).font(.system(size: 13)).foregroundStyle(Palette.muted).frame(width: 16)
-                Text(title).font(.system(size: 12.5)).lineLimit(2)
-                Spacer(minLength: 4)
-                Image(systemName: "arrow.right").font(.system(size: 11)).foregroundStyle(Palette.muted)
-            }
-            .foregroundStyle(Palette.ink)
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Palette.wash.opacity(0.28), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .disabled(assistant.busy || assistant.notice != nil || assistant.context == nil)
+        .frame(height: 48)
+        .padding(.leading, 20)
+        .padding(.trailing, 12)
+        .animation(motion, value: empty)
     }
 
     private var conversation: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 20) {
             if let trouble = assistant.trouble, assistant.notice == nil {
-                Text(verbatim: trouble).font(.system(size: 12.5)).foregroundStyle(Palette.muted)
+                Text(verbatim: trouble).font(.system(size: 13)).foregroundStyle(Palette.muted)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if assistant.reading {
-                AssistantThinking(drawn: drawn, title: "Reading the page")
             } else if empty {
                 emptyState.transition(.opacity)
             }
@@ -696,14 +827,17 @@ struct AssistantPanel: View {
             ForEach(assistant.turns) { turn in
                 TurnView(turn: turn, drawn: drawn).id(turn.id).transition(arrival)
             }
-            if let question = assistant.pendingQuestion { questionBubble(question).id("pending-question") }
-            if let notice = assistant.notice { noticeCard(notice).transition(arrival) }
+            if let question = assistant.pendingQuestion {
+                Self.bubble(question).id("pending-question").transition(popIn)
+            }
+            if let notice = assistant.notice { noticeCard(notice).transition(popIn) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // Stable IDs trigger one entrance per turn, never an animation per token.
         .animation(motion, value: assistant.turns.map(\.id))
-        .animation(motion, value: assistant.notice != nil)
-        .animation(motion, value: assistant.reading)
+        .animation(popping, value: assistant.pendingQuestion)
+        .animation(popping, value: assistant.notice != nil)
+        .animation(motion, value: assistant.trouble)
     }
 
     private var scrolling: some View {
@@ -714,9 +848,10 @@ struct AssistantPanel: View {
                         conversation
                         Color.clear.frame(height: 1).id("answer-bottom")
                     }
-                        .frame(minHeight: max(0, area.size.height - 28), alignment: empty ? .center : .topLeading)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 14)
+                    .frame(minHeight: max(0, area.size.height - 8 - (empty ? 64 : 12)), alignment: empty ? .leading : .topLeading)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+                    .padding(.bottom, empty ? 64 : 12)
                 }
                 .onChange(of: assistant.turns.last?.answer) { _, _ in
                     // Follow streamed growth directly; overlapping scroll animations
@@ -732,20 +867,129 @@ struct AssistantPanel: View {
         }
     }
 
+    /// The spark, the question, and three questions ready to ask: plain
+    /// lines, each arriving a step after the one above.
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SparkMark(drawn: drawn).padding(.bottom, 18)
+            Text("What would you like to know?")
+                .font(.system(size: 21, weight: .semibold))
+                .tracking(-0.3)
+                .foregroundStyle(Palette.ink)
+                .fixedSize(horizontal: false, vertical: true)
+                .arriving(1, on: !drawn, moves: moves)
+            Text(invitation)
+                .font(.system(size: 13))
+                .foregroundStyle(Palette.muted)
+                .lineSpacing(2)
+                .padding(.top, 8)
+                .fixedSize(horizontal: false, vertical: true)
+                .arriving(2, on: !drawn, moves: moves)
+            if conversational {
+                VStack(alignment: .leading, spacing: 2) {
+                    AskSuggestion(selected ? "Summarize this selection" : "Summarize this page", on: suggestable) {
+                        assistant.submitSuggestion(selected ? "Summarize this selected passage in a few sentences." : "Summarize this page in a few sentences.")
+                    }
+                    .arriving(3, on: !drawn, moves: moves)
+                    AskSuggestion(selected ? "Explain this selection" : "Explain a selection", on: suggestable) {
+                        if selected {
+                            assistant.submitSuggestion("Explain this selected passage in clear, simple terms.")
+                        } else {
+                            browser.announce("Select a passage on the page, then right-click and choose Ask AI")
+                            typing = true
+                        }
+                    }
+                    .arriving(4, on: !drawn, moves: moves)
+                    AskSuggestion("List the key takeaways", on: suggestable) {
+                        assistant.submitSuggestion(selected ? "List the key points of this selected passage as a short list." : "List the key points of this page as a short list.")
+                    }
+                    .arriving(5, on: !drawn, moves: moves)
+                }
+                .padding(.top, 22)
+                .padding(.leading, -10)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// One muted line above the composer: what the question goes with, its
+    /// title and site, or the sweep while the page is still being read. A
+    /// click unfolds the whole of it.
+    @ViewBuilder
+    private var contextLine: some View {
+        if conversational, assistant.reading || assistant.context != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    withAnimation(motion) { expandedContext.toggle() }
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: selected ? "text.quote" : "doc.text").font(.system(size: 10, weight: .medium))
+                        if assistant.reading {
+                            Text("Reading the page")
+                            ReadingSweep(drawn: drawn)
+                        } else if let context = assistant.context {
+                            Text(verbatim: contextTitle(context))
+                                .foregroundStyle(AssistantStyle.soft)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            if let host = context.url?.host() {
+                                Text(verbatim: "· \(host)").lineLimit(1).fixedSize()
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Palette.muted)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(assistant.context == nil)
+                .help(expandedContext ? "Collapse context" : "Show the full context sent with your question")
+                .accessibilityLabel(expandedContext ? "Collapse context" : "Expand context")
+                if expandedContext, let context = assistant.context {
+                    ScrollView {
+                        Text(verbatim: context.text)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(Palette.ink)
+                            .lineSpacing(2)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 160)
+                    .transition(arrival)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 8)
+            .animation(motion, value: assistant.reading)
+            .arriving(5, on: !drawn, moves: moves)
+        }
+    }
+
+    private func contextTitle(_ context: AIPage.Read) -> String {
+        if selected {
+            let line = context.text.split(whereSeparator: \.isNewline).first.map(String.init) ?? context.text
+            return "“\(line.trimmingCharacters(in: .whitespaces))”"
+        }
+        return context.title.isEmpty ? (context.url?.host() ?? "This page") : context.title
+    }
+
+    /// The one raised surface. Typing in it lifts it a point, deepens its
+    /// shadow and lights the ring.
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 10) {
             if drawn {
                 Text(verbatim: assistant.draft.isEmpty ? placeholder : assistant.draft)
                     .foregroundStyle(assistant.draft.isEmpty ? Palette.muted : Palette.ink)
-                    .font(.system(size: 12.5))
-                    .frame(maxWidth: .infinity, minHeight: 38, alignment: .topLeading)
+                    .font(.system(size: 13))
+                    .frame(maxWidth: .infinity, minHeight: 22, alignment: .topLeading)
             } else {
                 TextField("", text: $assistant.draft, prompt: Text(placeholder).foregroundStyle(Palette.muted), axis: .vertical)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12.5))
+                    .font(.system(size: 13))
                     .focused($typing)
                     .lineLimit(1...5)
-                    .frame(maxWidth: .infinity, minHeight: 38, alignment: .topLeading)
+                    .frame(maxWidth: .infinity, minHeight: 22, alignment: .topLeading)
                     .submitLabel(.send)
                     .onSubmit { assistant.submit() }
                     .onKeyPress(.return, phases: .down) { press in
@@ -755,99 +999,172 @@ struct AssistantPanel: View {
                     }
                     .disabled(assistant.notice != nil)
             }
-            let stopping = assistant.busy && !assistant.reading
             Button {
                 if stopping { assistant.cancelAnswer() } else { assistant.submit() }
-            } label: { sendIcon(stopping: stopping) }
-                .buttonStyle(.plain)
+            } label: { sendIcon }
+                .buttonStyle(SendStyle())
                 .disabled(!stopping && !canSend)
                 .help(stopping ? "Stop answer" : "Send question")
                 .accessibilityLabel(stopping ? "Stop answer" : "Send question")
+                .onHover { overSend = $0 }
         }
-        .padding(12)
-        .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Palette.ground)
-            RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AssistantStyle.gradient(typing ? 0.12 : 0.05))
-        }
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(AssistantStyle.gradient(typing ? 0.7 : 0.24), lineWidth: 1))
+        .padding(.leading, 16)
+        .padding(.trailing, 9)
+        .padding(.vertical, 9)
+        .background(AssistantStyle.raised, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay { FocusRing(on: typing && !drawn, drawn: drawn) }
+        .shadow(color: .black.opacity(typing ? 0.18 : 0), radius: 14, y: 8)
+        .offset(y: typing ? -1 : 0)
+        .opacity(assistant.notice == nil ? 1 : 0.55)
         .animation(motion, value: typing)
-        .padding(.horizontal, 14)
-        .padding(.top, 6)
+        .animation(motion, value: assistant.notice == nil)
+        .padding(.horizontal, 16)
+        .arriving(6, on: !drawn, moves: moves)
     }
 
-    private func sendIcon(stopping: Bool) -> some View {
-        Image(systemName: stopping ? "stop.fill" : "arrow.up")
-            .font(.system(size: stopping ? 11 : 13, weight: .semibold))
-            .foregroundStyle(Color.white)
-            .frame(width: 29, height: 29)
-            .background(AssistantStyle.gradient(stopping || canSend ? 1 : 0.35), in: Circle())
-            .contentTransition(.opacity)
-            .animation(motion, value: canSend)
-            .animation(motion, value: stopping)
+    private var sendIcon: some View {
+        ZStack {
+            if stopping {
+                Circle().fill(Palette.wash)
+                StopArc(drawn: drawn)
+                Image(systemName: "stop.fill").font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.ink)
+            } else {
+                Circle().fill(AssistantStyle.gradient())
+                Image(systemName: "arrow.up").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.white)
+            }
+        }
+        .frame(width: 30, height: 30)
+        .opacity(stopping || canSend ? 1 : 0.3)
+        .scaleEffect(overSend && (stopping || canSend) ? 1.06 : 1)
+        .animation(motion, value: canSend)
+        .animation(motion, value: stopping)
+        .animation(popping, value: overSend)
     }
 
-    private var privacyNote: some View {
-        let note = assistant.provider.isLocal ? "Stays on this Mac" : "Only sent when you ask"
-        let provider = chosenModel?.providerName ?? assistant.provider.name
-        return Text("\(note) · \(provider)")
-            .font(.system(size: 10.5))
-            .foregroundStyle(Palette.muted)
-            .lineLimit(1)
-            .minimumScaleFactor(0.85)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 14)
-            .padding(.top, 9)
-            .padding(.bottom, 11)
-            .help("AI may be wrong. Destination: \(assistant.destinationHost)")
+    /// The model, with the others behind it, and where a question goes.
+    private var footer: some View {
+        HStack(spacing: 8) {
+            modelControl
+            Spacer(minLength: 8)
+            Text(assistant.provider.isLocal ? "Stays on this Mac" : "Only sent when you ask")
+                .font(.system(size: 11.5))
+                .foregroundStyle(Palette.muted)
+                .lineLimit(1)
+                .help("AI may be wrong. Destination: \(assistant.destinationHost)")
+        }
+        .frame(height: 40)
+        .padding(.leading, 12)
+        .padding(.trailing, 20)
+        .padding(.bottom, 4)
+        .arriving(7, on: !drawn, moves: moves)
+    }
+
+    @ViewBuilder
+    private var modelControl: some View {
+        if assistant.provider == .openCode && !drawn {
+            Menu {
+                ForEach(Array(Set(catalogue.map(\.providerName))).sorted(), id: \.self) { provider in
+                    Section(provider) {
+                        ForEach(catalogue.filter { $0.providerName == provider }) { model in
+                            Button { browser.chooseAssistantModel(model.id) } label: {
+                                if model.id == assistant.model {
+                                    Label(model.name, systemImage: "checkmark")
+                                } else {
+                                    Text(model.name)
+                                }
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button("AI settings…") { openSettings() }
+            } label: { modelLabelView }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize(horizontal: false, vertical: true)
+            .disabled(assistant.busy || assistant.notice != nil)
+            .accessibilityLabel("AI model")
+        } else {
+            Button { openSettings() } label: { modelLabelView }
+                .buttonStyle(.plain)
+                .help("Settings › AI")
+                .accessibilityLabel("AI model")
+        }
+    }
+
+    private func openSettings() {
+        _ = browser.show(InternalPage(.settings, SettingsPanel.Page.ai.rawValue))
+    }
+
+    private var modelLabelView: some View {
+        HStack(spacing: 5) {
+            Text(verbatim: modelName)
+                .font(.system(size: 11.5, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+        }
+        .foregroundStyle(overModel ? Palette.ink : AssistantStyle.soft)
+        .padding(.horizontal, 8)
+        .frame(height: 26)
+        .background(overModel ? AssistantStyle.raised : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onHover { overModel = $0 }
+        .animation(Motion.quick, value: overModel)
     }
 
     private func caution(_ text: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: "exclamationmark.triangle").font(.system(size: 10, weight: .medium))
-            Text(verbatim: text).font(.system(size: 11.5)).fixedSize(horizontal: false, vertical: true)
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Image(systemName: "exclamationmark.triangle").font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.unsafe)
+            Text(verbatim: text).font(.system(size: 11.5)).foregroundStyle(Palette.muted).lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .foregroundStyle(Palette.muted)
-        .padding(9)
-        .background(Palette.wash, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
+    /// What a provider off this Mac is sent, before anything goes.
     private func noticeCard(_ notice: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 0) {
+            SparkMark(drawn: drawn).padding(.bottom, 18)
             Text("Answers from \(assistant.provider.name)")
-                .font(.system(size: 12.5, weight: .medium))
+                .font(.system(size: 19, weight: .semibold))
+                .tracking(-0.3)
                 .foregroundStyle(Palette.ink)
-            Text(verbatim: notice)
-                .font(.system(size: 12))
-                .foregroundStyle(Palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
-                Pill("Continue", filled: true) { assistant.agree() }
-                Pill("Cancel") { browser.closeAssistant() }
+                .arriving(1, on: !drawn, moves: moves)
+            Text(verbatim: notice)
+                .font(.system(size: 13))
+                .foregroundStyle(Palette.muted)
+                .lineSpacing(3)
+                .padding(.top, 10)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .arriving(2, on: !drawn, moves: moves)
+            HStack(spacing: 6) {
+                AssistantPill("Continue", filled: true) { assistant.agree() }
+                AssistantPill("Not now") { browser.closeAssistant() }
             }
+            .padding(.top, 22)
+            .arriving(3, on: !drawn, moves: moves)
         }
-        .padding(12)
-        .background(Palette.wash.opacity(0.6), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private static func bubble(_ question: String) -> some View {
         HStack(alignment: .top, spacing: 0) {
-            Spacer(minLength: 28)
+            Spacer(minLength: 40)
             Text(verbatim: question)
-                .font(.system(size: 12.5))
+                .font(.system(size: 13))
                 .foregroundStyle(Palette.ink)
-                .lineSpacing(2)
+                .lineSpacing(2.5)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 9)
-                .background(AssistantStyle.gradient(0.16), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(AssistantStyle.gradient(0.2), lineWidth: 1))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Palette.wash, in: UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18,
+                                                                      bottomTrailingRadius: 6, topTrailingRadius: 18, style: .continuous))
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
     }
-
-    private func questionBubble(_ question: String) -> some View { Self.bubble(question) }
 
     private struct TurnView: View {
         let turn: Assistant.Turn
@@ -855,70 +1172,57 @@ struct AssistantPanel: View {
         @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @State private var copied = false
 
+        private var moves: Bool { !reduceMotion && !drawn }
+
         var body: some View {
-            VStack(alignment: .leading, spacing: 15) {
+            VStack(alignment: .leading, spacing: 16) {
                 if let question = turn.question { AssistantPanel.bubble(question) }
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(AssistantStyle.gradient())
-                        .frame(width: 14)
-                        .padding(.top, 2)
-                    VStack(alignment: .leading, spacing: 9) {
-                        if turn.answer.isEmpty, !turn.done {
-                            AssistantThinking(drawn: drawn)
-                                .transition(.opacity)
-                        }
-                        // Plain text cannot fetch images or turn model output
-                        // into links that the original page never contained.
-                        if !turn.answer.isEmpty {
-                            Text(verbatim: turn.answer)
-                                .font(.system(size: 12.5))
-                                .foregroundStyle(Palette.ink)
-                                .lineSpacing(3)
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        if let failed = turn.failed {
-                            Text(verbatim: failed).font(.system(size: 12)).foregroundStyle(Palette.muted)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        if !turn.strays.isEmpty {
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Image(systemName: "exclamationmark.triangle").font(.system(size: 10, weight: .medium))
-                                Text(verbatim: "Not on the page: " + turn.strays.joined(separator: ", "))
-                                    .font(.system(size: 11.5)).fixedSize(horizontal: false, vertical: true)
-                            }
-                            .foregroundStyle(Palette.muted)
-                            .padding(8)
-                            .background(Palette.wash, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        }
-                        if !turn.answer.isEmpty {
-                            Button {
-                                AssistantPanel.copyAnswer(turn.answer)
-                                copied = true
-                            } label: {
-                                Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(Palette.muted)
-                                    .frame(width: 26, height: 25)
-                                    .background(Palette.wash.opacity(0.45), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
-                            }
-                            .buttonStyle(.plain)
-                            .help(copied ? "Copied" : "Copy answer")
-                            .accessibilityLabel("Copy answer")
+                VStack(alignment: .leading, spacing: 10) {
+                    if turn.answer.isEmpty, !turn.done {
+                        AssistantThinking(drawn: drawn)
+                            .transition(.opacity)
+                    }
+                    // Plain text cannot fetch images or turn model output
+                    // into links that the original page never contained.
+                    if !turn.answer.isEmpty {
+                        Text(verbatim: turn.answer)
+                            .font(.system(size: 13.5))
+                            .foregroundStyle(Palette.ink)
+                            .lineSpacing(3.5)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let failed = turn.failed {
+                        Text(verbatim: failed).font(.system(size: 12.5)).foregroundStyle(Palette.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if !turn.strays.isEmpty {
+                        HStack(alignment: .firstTextBaseline, spacing: 7) {
+                            Image(systemName: "exclamationmark.triangle").font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.unsafe)
+                            Text(verbatim: "Not on the page: " + turn.strays.joined(separator: ", "))
+                                .font(.system(size: 11.5)).foregroundStyle(Palette.muted).fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // Fade the first text in once, then leave every streamed
-                    // update immediate so animations cannot accumulate.
-                    .animation(reduceMotion || drawn ? nil : .easeOut(duration: 0.18), value: turn.answer.isEmpty)
+                    if turn.done, !turn.answer.isEmpty {
+                        HStack(spacing: 2) {
+                            AskQuiet(icon: copied ? "checkmark" : "doc.on.doc", help: copied ? "Copied" : "Copy answer",
+                                  label: "Copy answer", tint: copied ? AssistantStyle.accent : nil) {
+                                AssistantPanel.copyAnswer(turn.answer)
+                                copied = true
+                            }
+                        }
+                        .padding(.leading, -6)
+                        .transition(moves ? .opacity.combined(with: .offset(y: 6)) : .opacity)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // Fade the first text in once, then leave every streamed
+                // update immediate so animations cannot accumulate.
+                .animation(moves ? .easeOut(duration: 0.18) : nil, value: turn.answer.isEmpty)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .onChange(of: turn.answer) { _, _ in copied = false }
-            .animation(reduceMotion || drawn ? nil : AssistantStyle.arrival, value: turn.done)
+            .animation(moves ? AssistantStyle.arrival : nil, value: turn.done)
             // Streamed text must update without interpolating its geometry.
             .animation(nil, value: turn.answer)
         }
