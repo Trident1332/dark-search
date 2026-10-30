@@ -565,15 +565,6 @@ struct ContentView: View {
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
-                .overlay(alignment: .topTrailing) {
-                    if let assistant = browser.assisting, assistant.tab == tab.id {
-                        AssistantPanel(browser: browser, assistant: assistant)
-                            .padding(.top, browser.finding ? 64 : 14)
-                            .padding(.trailing, 14)
-                            .transition(.move(edge: .trailing).combined(with: .opacity))
-                    }
-                }
-                .animation(Motion.settle, value: browser.assisting?.id)
                 .overlay(alignment: .topLeading) {
                     if let asked = browser.suggesting, asked.tab == tab.id {
                         AccountList(browser: browser, asked: asked)

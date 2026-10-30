@@ -3278,6 +3278,7 @@ final class Browser: NSObject, ObservableObject {
     func closeAll() {
         cancelChosenLogin()
         invalidateAccountField()
+        closeAssistant()
         dropDialer()
         cancelDisplay()
         cancelCapture()
@@ -3887,6 +3888,7 @@ final class Browser: NSObject, ObservableObject {
     /// behind; closing that blank tab closes the window.
     func close(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+        if assisting?.tab == tab.id { closeAssistant() }
         cancelChosenLogin(in: tab.id)
         invalidateAccountField(in: tab.id)
         let pair = split(for: tab)
@@ -4448,6 +4450,7 @@ final class Browser: NSObject, ObservableObject {
     /// Out of this row, not closed: it is on its way to another window.
     private func detach(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+        if assisting?.tab == tab.id { closeAssistant() }
         if let web = tab.built { cancelDisplay(for: web) }
         let partner = split(for: tab).flatMap { pair in tabs.first { $0.id == pair.partner(of: tab.id) } }
         detachSplit(tab)
@@ -4970,6 +4973,7 @@ final class Browser: NSObject, ObservableObject {
     /// an extension sending a website's tab to one of its own pages.
     func replace(_ tab: Tab, going url: URL) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
+        if assisting?.tab == tab.id { closeAssistant() }
         // A private tab stays private, and keeps its own sign-ins when it
         // had them; an extension's page it showed was in that extension's
         // store, so going back to the web takes a new private one.
@@ -5705,6 +5709,7 @@ final class Browser: NSObject, ObservableObject {
         tab.onPickEnd = { [weak self] _ in self?.veiling = false }
         tab.onImageMenu = { [weak self] tab, url in self?.showImageMenu(for: tab, at: url) }
         tab.onCall = { [weak self] _, number in self?.call(number) }
+        tab.onAskAI = { [weak self] tab, selection in self?.askAboutPage(from: tab, selection: selection) }
         tab.searchName = { [weak self] in self.map { $0.prefs.engine.name(custom: $0.prefs.customEngine) } }
         tab.onSearch = { [weak self] tab, text in
             guard let self, let url = self.searchURL(for: text) else { return }

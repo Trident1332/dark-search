@@ -1140,6 +1140,7 @@ extension Browser {
             announce(reason)
             return false
         }
+        if sidePanel == .assistant { closeAssistant() }
         if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
         if sidePanel != .dialer { SidePanelPages.shared.drop(in: self) }
         if dialerPage == nil { dialerPage = DialerPage(browser: self) }

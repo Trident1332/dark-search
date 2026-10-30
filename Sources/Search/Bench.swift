@@ -2057,12 +2057,26 @@ final class Bench {
             case "agree":
                 browser.assisting?.agree()
                 answer(["open": browser.assisting != nil])
+            case "submit":
+                guard let assistant = browser.assisting, let text = request["text"] as? String else {
+                    answer(["error": "Open the AI panel, then submit a question"]); return
+                }
+                assistant.draft = text
+                assistant.submit()
+                answer(["open": true])
+            case "model":
+                if let model = request["model"] as? String { browser.chooseAssistantModel(model) }
+                answer(["model": browser.assisting?.model ?? ""])
+            case "stop":
+                browser.assisting?.cancelAnswer()
+                answer(["open": browser.assisting != nil])
             case "state":
                 guard let assistant = browser.assisting else { answer(["open": false]); return }
                 answer([
                     "open": true, "reading": assistant.reading, "notice": assistant.notice ?? "", "trouble": assistant.trouble ?? "",
                     "addressed": assistant.addressed,
                     "place": assistant.place,
+                    "model": assistant.model, "context": assistant.context?.text ?? "", "selection": assistant.selection ?? "",
                     "turns": assistant.turns.map { ["question": $0.question ?? "", "answer": $0.answer, "done": $0.done,
                                                      "failed": $0.failed ?? "", "strays": $0.strays] as [String: Any] },
                 ])
@@ -2070,16 +2084,24 @@ final class Bench {
                 // The panel as it stands, and Settings › AI, drawn off screen
                 // to PNGs — no window.
                 guard let path = request["path"] as? String else { answer(["error": "ai picture PATH"]); return }
+                let priorAppearance = NSApp.appearance
+                if let appearance = request["appearance"] as? String, ["light", "dark"].contains(appearance) {
+                    NSApp.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)
+                }
+                defer { NSApp.appearance = priorAppearance }
                 var made: [String] = []
                 func draw<V: View>(_ view: V, _ file: String) {
-                    let renderer = ImageRenderer(content: view.padding(20).background(Palette.wash))
+                    let scheme: ColorScheme = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
+                    let renderer = ImageRenderer(content: view.padding(20).background(Palette.wash).environment(\.colorScheme, scheme))
                     renderer.scale = 2
                     guard let image = renderer.nsImage, let tiff = image.tiffRepresentation,
                           let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
                     let url = URL(fileURLWithPath: path).appendingPathComponent(file)
                     if (try? png.write(to: url)) != nil { made.append(url.path) }
                 }
-                if let assistant = browser.assisting { draw(AssistantPanel(browser: browser, assistant: assistant, drawn: true), "ai-panel.png") }
+                let width = min(640, max(300, request["width"] as? Double ?? 380))
+                let height = min(900, max(360, request["height"] as? Double ?? 640))
+                if let assistant = browser.assisting { draw(AssistantPanel(browser: browser, assistant: assistant, drawn: true).frame(width: width, height: height), "ai-panel.png") }
                 draw(AISettings(browser: browser, prefs: browser.prefs, drawn: true).frame(width: 440), "ai-settings.png")
                 answer(["made": made])
             case "read":
@@ -3568,6 +3590,9 @@ final class Bench {
             let web = browser.sidePanel == .dialer ? browser.dialerPage?.web : SidePanelPages.shared.web(in: browser)
             var content: [String: Any] = ["kind": "none"]
             switch browser.sidePanel {
+            case .assistant:
+                content = ["kind": "assistant", "model": browser.assisting?.model ?? "",
+                           "context": browser.assisting?.context?.text ?? ""]
             case .dialer: content = ["kind": "dialer", "status": browser.dialerPage?.status.text ?? "",
                                      "statusKind": browser.dialerPage?.status.kind ?? "", "state": browser.dialerPage?.status.state ?? "",
                                      "ready": browser.dialerPage?.ready ?? false]

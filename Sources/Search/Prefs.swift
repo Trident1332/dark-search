@@ -615,6 +615,11 @@ final class Preferences: ObservableObject {
     /// into the wrong field (which would go out in a request).
     func setAIModel(_ model: String, for provider: AIProvider) {
         let name = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if provider == .openCode {
+            guard name.isEmpty || (try? OpenCodeAI.catalogue().contains(where: { $0.id == name })) == true else { return }
+            aiModels[provider.rawValue] = name
+            return
+        }
         let looksLikeKey = ["sk-", "AIza", "AQ.", "gsk_", "hf_"].contains { name.hasPrefix($0) } || name.count > 100
         guard name.isEmpty || (!looksLikeKey && name.range(of: #"^[A-Za-z0-9._:/@\-]+$"#, options: .regularExpression) != nil)
         else { return }
