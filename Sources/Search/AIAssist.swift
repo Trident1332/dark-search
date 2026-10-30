@@ -2,8 +2,8 @@ import SwiftUI
 
 // The AI add-on as you meet it: Summarize Page and Ask About This Page…, and
 // the panel the answer comes in. One page at a time, from your click; the
-// questions after the first stay in the panel, and close it and they are
-// gone — nothing is kept anywhere. The answer is plain text, never a link to
+// questions after the first stay with that tab in memory; closing its panel
+// clears them, and nothing is written to disk. The answer is plain text, never a link to
 // follow or a picture to fetch, marked for what it is: a model's reading,
 // which may be wrong, and where it ran. What the page says goes to the model
 // as the page's words to read, never as orders (see AIPage), and anything
@@ -305,21 +305,67 @@ extension Browser {
         }
         // Asked again on the page the panel is already about: the same
         // conversation goes on.
-        if source == nil, !summary, let open = assisting, open.tab == tab.id, open.sourceURL == tab.pageAddress,
+        if source == nil, !summary, let open = assistantSessions[tab.id], open.sourceURL == tab.pageAddress,
            open.provider == provider, open.selection == selection {
+            if sidePanel != .assistant { closeSidePanel() }
+            assisting = open
             sidePanel = .assistant
             sidePanelShown = true
             return
         }
         if sidePanel != .assistant { closeSidePanel() }
-        assisting?.stop()
-        assisting = Assistant(tab: tab, provider: provider, model: model, summary: summary, selection: selection)
+        closeAssistant(for: tab.id)
+        let assistant = Assistant(tab: tab, provider: provider, model: model, summary: summary, selection: selection)
+        assistantSessions[tab.id] = assistant
+        assisting = assistant
         sidePanel = .assistant
         sidePanelShown = true
     }
 
     func closeAssistant() {
+        if let assistant = assisting { closeAssistant(for: assistant.tab) }
+        else { hideAssistant() }
+    }
+
+    /// Leaving a tab only puts its panel away. Its request and draft belong
+    /// to the same conversation when the tab comes back into view.
+    func assistantFollowsActiveTab() {
+        if let assistant = assisting, assistant.tab != activeID { hideAssistant() }
+        guard let tab = active else { return }
+        // Put away the old assistant before a bound extension panel returns.
+        sidePanelFollows(tab)
+        guard let assistant = assistantSessions[tab.id] else { return }
+        let privatePage = tab.shy || tab.usesTor || !tab.store.isPersistent
+        guard tab.isWeb, assistant.sourceURL == tab.pageAddress,
+              !privatePage || assistant.provider.isLocal else {
+            closeAssistant(for: tab.id)
+            return
+        }
+        // An explicitly opened dialer or other panel keeps its place.
+        guard sidePanel == nil || sidePanel == .assistant else { return }
+        assisting = assistant
+        sidePanel = .assistant
+        sidePanelShown = true
+    }
+
+    /// Explicitly closed, navigated, or removed: this tab's context is gone,
+    /// including a conversation currently answering in the background.
+    func closeAssistant(for tab: Tab.ID) {
+        let stored = assistantSessions.removeValue(forKey: tab)
+        stored?.stop()
+        guard let shown = assisting, shown.tab == tab else { return }
+        if shown !== stored { shown.stop() }
+        hideAssistant()
+    }
+
+    func closeAllAssistants() {
+        assistantSessions.values.forEach { $0.stop() }
+        assistantSessions.removeAll()
         assisting?.stop()
+        hideAssistant()
+    }
+
+    private func hideAssistant() {
         assisting = nil
         if sidePanel == .assistant {
             sidePanelShown = false

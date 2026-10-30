@@ -67,6 +67,7 @@ final class Browser: NSObject, ObservableObject {
                 DispatchQueue.main.async { held.forEach { $0.present() } }
             }
             guard oldValue != activeID else { return }
+            assistantFollowsActiveTab()
             cancelChosenLogin()
             invalidateAccountField()
             // Going to another tab ends a page's run of links (see placeForLink).
@@ -398,6 +399,8 @@ final class Browser: NSObject, ObservableObject {
     @Published var finding = false
     /// The AI panel's conversation about the page, while it is open.
     @Published var assisting: Assistant?
+    /// Conversations stay in memory with their tabs while another tab is up.
+    var assistantSessions: [Tab.ID: Assistant] = [:]
     /// The side panel, beside the page (see SidePanel.swift): up or
     /// not, and what is in it.
     @Published var sidePanelShown = false
@@ -3278,7 +3281,7 @@ final class Browser: NSObject, ObservableObject {
     func closeAll() {
         cancelChosenLogin()
         invalidateAccountField()
-        closeAssistant()
+        closeAllAssistants()
         dropDialer()
         cancelDisplay()
         cancelCapture()
@@ -3781,10 +3784,6 @@ final class Browser: NSObject, ObservableObject {
         // may offer accounts again; the old page's lookup is retired now.
         invalidateAccountField()
         guard tab.id != activeID else { return }
-        // The AI panel is about the page it was opened on.
-        if assisting != nil { closeAssistant() }
-        // An extension's panel opened for one tab goes and comes with it.
-        sidePanelFollows(tab)
         // Coming back to the tab whose video is out brings it home first, so
         // it is never lifted and landed in the same breath.
         if floating == tab.id { land() }
@@ -3888,7 +3887,7 @@ final class Browser: NSObject, ObservableObject {
     /// behind; closing that blank tab closes the window.
     func close(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-        if assisting?.tab == tab.id { closeAssistant() }
+        closeAssistant(for: tab.id)
         cancelChosenLogin(in: tab.id)
         invalidateAccountField(in: tab.id)
         let pair = split(for: tab)
@@ -4450,7 +4449,7 @@ final class Browser: NSObject, ObservableObject {
     /// Out of this row, not closed: it is on its way to another window.
     private func detach(_ tab: Tab) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-        if assisting?.tab == tab.id { closeAssistant() }
+        closeAssistant(for: tab.id)
         if let web = tab.built { cancelDisplay(for: web) }
         let partner = split(for: tab).flatMap { pair in tabs.first { $0.id == pair.partner(of: tab.id) } }
         detachSplit(tab)
@@ -4973,7 +4972,7 @@ final class Browser: NSObject, ObservableObject {
     /// an extension sending a website's tab to one of its own pages.
     func replace(_ tab: Tab, going url: URL) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-        if assisting?.tab == tab.id { closeAssistant() }
+        closeAssistant(for: tab.id)
         // A private tab stays private, and keeps its own sign-ins when it
         // had them; an extension's page it showed was in that extension's
         // store, so going back to the web takes a new private one.
@@ -5733,7 +5732,10 @@ final class Browser: NSObject, ObservableObject {
             self?.hang(from: tab, spot, passwords: passwords, name: name, wide: wide)
         }
         tab.onSignIn = { [weak self] tab in self?.continueChosenLogin(in: tab) }
-        tab.onExplicitNavigation = { [weak self] tab in self?.cancelChosenLogin(in: tab.id) }
+        tab.onExplicitNavigation = { [weak self] tab in
+            self?.cancelChosenLogin(in: tab.id)
+            self?.closeAssistant(for: tab.id)
+        }
         tab.onSignInName = { [weak self] tab, user in
             guard let self, let choice = chosenLogin ?? loginFill, choice.tab == tab.id else { return }
             if user != choice.login.user { cancelChosenLogin(in: tab.id) }
@@ -5784,6 +5786,9 @@ final class Browser: NSObject, ObservableObject {
                 guard let self else { return }
                 if let tab {
                     invalidateAccountField(in: tab.id)
+                    if let assistant = assistantSessions[tab.id], assistant.sourceURL != address {
+                        closeAssistant(for: tab.id)
+                    }
                     if let choice = chosenLogin ?? loginFill, choice.tab == tab.id, LoginOrigin(address) != choice.origin {
                         cancelChosenLogin(in: tab.id)
                     }
@@ -7238,7 +7243,10 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         Dialogs.invalidateTrust(for: webView)
-        if let tab = anyTab(for: webView) { invalidateAccountField(in: tab.id) }
+        if let tab = anyTab(for: webView) {
+            invalidateAccountField(in: tab.id)
+            closeAssistant(for: tab.id)
+        }
         if websitePopup { cancelCapture() }
         popupTab(for: webView)?.popupGesture.clear()
         guard let tab = tab(for: webView) else {
