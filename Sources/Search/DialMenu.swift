@@ -141,11 +141,12 @@ extension Dialer {
     nonisolated static func number(in text: String, near offset: Int? = nil) -> String? {
         guard !text.isEmpty, text.count <= 1200 else { return nil }
         // ICU's own escapes: a raw string hands them over as written.
-        let pattern = #"(?:\+\s?|\(\+|\()?\d[\d\s().\-\x{00a0}\x{2009}\x{2011}/]{4,28}\d"#
+        let pattern = #"(?:\+\s?|\(\+|\()?\d[\d\s().\p{Pd}\x{2212}\x{00a0}\x{2009}/]{4,28}\d"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let nsText = text as NSString
-        let utf16Offset = offset.map { text.index(text.startIndex, offsetBy: min(max($0, 0), text.count), limitedBy: text.endIndex) ?? text.endIndex }
-            .map { text.utf16.distance(from: text.utf16.startIndex, to: $0) }
+        // The page supplies selectionStart/Range offsets: JavaScript and
+        // NSRegularExpression both count UTF-16, including before emoji.
+        let utf16Offset = offset.map { min(max($0, 0), nsText.length) }
         var matches: [(NSRange, String)] = []
         regex.enumerateMatches(in: text, range: NSRange(location: 0, length: nsText.length)) { match, _, _ in
             guard let match else { return }
@@ -162,7 +163,7 @@ extension Dialer {
     /// enough digits and not too many, and not a date in disguise.
     nonisolated private static func clean(_ raw: String) -> String? {
         var text = raw.replacingOccurrences(of: "\u{00a0}", with: " ").replacingOccurrences(of: "\u{2009}", with: " ")
-            .replacingOccurrences(of: "\u{2011}", with: "-")
+            .replacingOccurrences(of: #"[\p{Pd}\x{2212}]"#, with: "-", options: .regularExpression)
         text = text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
         text = text.trimmingCharacters(in: CharacterSet(charactersIn: " .-/"))
         // A bracket left on its own at either end goes; a pair stays.
@@ -178,7 +179,13 @@ extension Dialer {
         // number is written with — an order number, a serial — unless it
         // starts the way a phone number does.
         let separators = text.filter { !$0.isNumber && $0 != " " }
-        let looksDialled = text.hasPrefix("+") || text.hasPrefix("0") || text.hasPrefix("(")
+        // NANP's country code is also written without a plus: the common
+        // 1-855-336-2909 is eleven digits, just as +1-855-336-2909 is.
+        // Keep this exception to its 1 + area/exchange/line groups, rather
+        // than accepting arbitrary long hyphenated order numbers.
+        let countryOne = text.range(of: #"^1[-.](?:[2-9]\d{2}|\([2-9]\d{2}\))[-.][2-9]\d{2}[-.]\d{4}$"#,
+                                    options: .regularExpression) != nil
+        let looksDialled = text.hasPrefix("+") || text.hasPrefix("0") || text.hasPrefix("(") || countryOne
         if !looksDialled, !separators.isEmpty, !text.contains(" "), digits > 10 { return nil }
         return text
     }

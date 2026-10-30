@@ -22,6 +22,9 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
               let kind = body["kind"] as? String
         else { return }
         MainActor.assumeIsolated {
+            // A view replaced during navigation can still have a queued
+            // script message. It no longer describes this tab's document.
+            guard let web = message.webView, tab?.built === web else { return }
             switch kind {
             case "form":
                 tab?.foundSignIn()
@@ -143,14 +146,29 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
     (function () {
       if (window.__officeForms) return;
 
+      // A SPA can hide or detach its focused field without firing blur.
+      // Rectangles alone also count visibility:hidden and transparent
+      // ancestor containers as visible, so test the field's whole branch.
+      function available(el) {
+        if (!el || !el.isConnected || el.disabled || el.readOnly ||
+            (el.matches && el.matches(':disabled')) || (el.closest && el.closest('[inert]'))) return false;
+        var r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        for (var node = el; node && node.nodeType === 1; node = node.parentElement) {
+          var style = getComputedStyle(node);
+          if (node.hidden || style.display === 'none' || style.visibility === 'hidden' ||
+              style.visibility === 'collapse' || Number(style.opacity) === 0) return false;
+        }
+        return true;
+      }
+
       // The password box, and the last box before it that could hold a name.
       function pair() {
         var boxes = document.querySelectorAll('input[type="password"]');
         var pass = null;
         for (var p = 0; p < boxes.length; p++) {
           var b = boxes[p];
-          var r = b.getBoundingClientRect();
-          if (r.width > 0 && r.height > 0) { pass = b; break; }
+          if (available(b)) { pass = b; break; }
         }
         if (!pass) return null;
         var scope = pass.form || (pass.closest && pass.closest('form')) || document;
@@ -180,11 +198,10 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       // come; otherwise only accounts kept for this very host do (wide:
       // false).
       function texty(el) {
-        if (!el || (el.tagName || '').toLowerCase() !== 'input' || el.disabled || el.readOnly) return false;
+        if (!el || (el.tagName || '').toLowerCase() !== 'input' || !available(el)) return false;
         var kind = (el.type || 'text').toLowerCase();
         if (['text', 'email', 'tel', 'number'].indexOf(kind) < 0) return false;
-        var r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
+        return true;
       }
       function tokens(el) {
         return (el.getAttribute('autocomplete') || '').toLowerCase().split(/\\s+/).filter(Boolean);
@@ -273,7 +290,7 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       function newPassword(el) { return tokens(el).indexOf('new-password') >= 0; }
       // What a box the caret is in is offered: null for nothing.
       function judge(el) {
-        if (!el || (el.tagName || '').toLowerCase() !== 'input') return null;
+        if (!el || (el.tagName || '').toLowerCase() !== 'input' || !available(el)) return null;
         var both = pair();
         if (both) {
           if (el === both.pass) return newPassword(el) ? null : { name: false, wide: true };
@@ -319,6 +336,10 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       document.addEventListener('input', function (e) {
         if (!e.isTrusted) return;
         var el = e.target;
+        // Tell native code before a SPA's Next handler hides this step.
+        // A later user edit must invalidate a previously picked account;
+        // put() dispatches untrusted events and does not count as an edit.
+        if (el && nameBox(el)) window.webkit.messageHandlers.officeForms.postMessage({ kind: 'name', user: el.value.trim() });
         if (!el || typed.indexOf(el) >= 0) return;
         typed.push(el);
         if (typed.length > 40) typed.shift();
@@ -341,6 +362,58 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
         return false;
       }
 
+      // Native code carries a chosen account between the two sign-in
+      // steps. These identities bind its later fill to this document and
+      // this exact field, without putting an identity or a secret in HTML.
+      function opaqueID() {
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+        return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) + '-' + Math.random().toString(36).slice(2);
+      }
+      var documentID = opaqueID(), passwordIDs = new WeakMap();
+      function passwordID(box) {
+        if (!passwordIDs.has(box)) passwordIDs.set(box, opaqueID());
+        return passwordIDs.get(box);
+      }
+      function nextPassword(user) {
+        if (typeof user !== 'string') return { status: 'blocked' };
+        if (inactive) return { status: 'waiting' };
+        var inputs = document.querySelectorAll('input'), passwords = [];
+        for (var i = 0; i < inputs.length; i++) {
+          var box = inputs[i], marked = tokens(box);
+          // A retained username can be hidden after the first step. A
+          // different nonempty account is never overwritten or signed in.
+          if (marked.indexOf('username') >= 0 && box.value.trim() && box.value.trim() !== user.trim()) return { status: 'blocked' };
+          if (!available(box)) continue;
+          if (marked.indexOf('one-time-code') >= 0) return { status: 'blocked' };
+          if ((box.type || '').toLowerCase() === 'password') passwords.push(box);
+        }
+        if (!passwords.length) return { status: 'waiting' };
+        if (passwords.length !== 1) return { status: 'blocked' };
+        var pass = passwords[0], marked = tokens(pass);
+        if (pass.value !== '' || newPassword(pass) || elsewhere(pass)) return { status: 'blocked' };
+        var scope = pass.form || (pass.closest && pass.closest('form')) || document;
+        // Some password-only pages call their password an "access code".
+        // current-password is explicit; an unmarked code or OTP is not.
+        if (marked.indexOf('current-password') < 0 &&
+            (aside(pass) || otherForm.test(about(scope)) || otherPage.test(location.pathname.toLowerCase()) || !looksLikeSignIn(pass, scope))) {
+          return { status: 'blocked' };
+        }
+        var near = scope.querySelectorAll('input'), names = [], explicitNames = [];
+        for (var n = 0; n < near.length; n++) {
+          var name = near[n];
+          if (name === pass || !texty(name) || aside(name) || elsewhere(name)) continue;
+          var explicit = claimsName(name);
+          var beforePass = !!(name.compareDocumentPosition(pass) & Node.DOCUMENT_POSITION_FOLLOWING);
+          if (!explicit && !(pass.form && name.form === pass.form && beforePass)) continue;
+          if (name.value.trim() && name.value.trim() !== user.trim()) return { status: 'blocked' };
+          names.push(name);
+          if (explicit) explicitNames.push(name);
+        }
+        var usernames = explicitNames.length ? explicitNames : names;
+        if (usernames.length > 1) return { status: 'blocked' };
+        return { status: 'ready', box: pass, user: usernames.length ? usernames[0] : null };
+      }
+
       window.__officeForms = {
         unsaved: unsaved,
         fill: function (user, password) {
@@ -356,6 +429,25 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
           var box = named();
           if (!box) return false;
           put(box, user);
+          return true;
+        },
+        passwordStep: function (user) {
+          var next = nextPassword(user);
+          return { status: next.status, document: documentID, field: next.box ? passwordID(next.box) : '' };
+        },
+        fillPasswordStep: function (user, password, document, field) {
+          if (document !== documentID || typeof field !== 'string' || !field ||
+              typeof password !== 'string' || !password) return false;
+          var next = nextPassword(user);
+          if (next.status !== 'ready' || passwordIDs.get(next.box) !== field) return false;
+          if (next.user && next.user.value === '') {
+            put(next.user, user);
+            // Framework input handlers may replace or hide the password
+            // element. Its old identity must not authorize the replacement.
+            next = nextPassword(user);
+            if (next.status !== 'ready' || passwordIDs.get(next.box) !== field) return false;
+          }
+          put(next.box, password);
           return true;
         },
         // Whether there is still a sign-in on the page. Asked after a
@@ -406,12 +498,15 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
         }
       }, true);
 
-      var told = false;
-      function tell() {
-        if (told || !pair()) return;
+      var told = false, toldField = null;
+      function tellPair(both) {
+        var field = passwordID(both.pass);
+        if (told && toldField === field) return;
         told = true;
+        toldField = field;
         window.webkit.messageHandlers.officeForms.postMessage({ kind: 'form' });
       }
+      function tell() { var both = pair(); if (both) tellPair(both); }
       if (document.readyState === 'complete') { tell(); }
       else { window.addEventListener('load', tell); }
       // A form the page builds for itself, a moment after it loads — or the
@@ -429,9 +524,14 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       var settling = null, looking = null;
       function look() {
         looking = null;
-        if (!told) { tell(); return; }
-        if (pair()) return;
+        // Keep the existing quarter-second debounce. A stream of page
+        // mutations must not scan all sign-in fields on every change.
+        caret();
+        var both = pair();
+        if (both) { tellPair(both); return; }
+        if (!told) return;
         told = false;
+        toldField = null;
         clearTimeout(settling);
         settling = setTimeout(function () {
           if (pair()) return;
@@ -440,7 +540,10 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       }
       new MutationObserver(function () {
         if (!looking) looking = setTimeout(look, 250);
-      }).observe(document.documentElement, { childList: true, subtree: true });
+      }).observe(document.documentElement, {
+        childList: true, subtree: true, attributes: true,
+        attributeFilter: ['style', 'class', 'hidden', 'inert', 'disabled', 'readonly', 'type', 'autocomplete']
+      });
 
       // Whether the caret is somewhere on the page that takes typing.
       //
@@ -450,6 +553,8 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       function editable(el) {
         if (!el) return false;
         var tag = (el.tagName || '').toLowerCase();
+        if ((tag === 'textarea' || tag === 'input' || el.isContentEditable === true ||
+             (el.getAttribute && el.getAttribute('role') === 'textbox')) && !available(el)) return false;
         if (tag === 'textarea') return true;
         if (el.isContentEditable === true) return true;
         if (el.getAttribute && el.getAttribute('role') === 'textbox') return true;
@@ -468,6 +573,7 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       // What was last said, so a scroll can keep quiet when nothing moved
       // that anyone is listening for.
       var said = null;
+      var inactive = false;
       // A box the page says takes a passkey: autocomplete="username webauthn".
       function forPasskeys(el) {
         return !!(el && (el.tagName || '').toLowerCase() === 'input' &&
@@ -477,7 +583,7 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       // caret moves, not on every frame of a scroll, which only moves it.
       var judged = { el: null, verdict: null };
       function caret(scrolled) {
-        var el = document.activeElement;
+        var el = inactive ? null : document.activeElement;
         // The boxes are only looked for with the caret in one: this runs on
         // every frame of every scroll, and looking goes through the whole page.
         if (scrolled !== true || judged.el !== el) judged = { el: el, verdict: judge(el) };
@@ -488,7 +594,7 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
         var passwords = !!verdict;
         var name = !!(verdict && verdict.name);
         var wide = !verdict || verdict.wide;
-        if (passwords || forPasskeys(el)) {
+        if ((passwords || forPasskeys(el)) && available(el)) {
           var r = el.getBoundingClientRect();
           if (r.width > 0 && r.height > 0) rect = { x: r.left, y: r.top, w: r.width, h: r.height };
         }
@@ -518,6 +624,11 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       }
       window.addEventListener('scroll', moved, true);
       window.addEventListener('resize', moved);
+      window.addEventListener('pagehide', function () { inactive = true; caret(); });
+      window.addEventListener('pageshow', function () { inactive = false; caret(); });
+      window.addEventListener('popstate', function () { caret(); });
+      window.addEventListener('hashchange', function () { caret(); });
+      document.addEventListener('visibilitychange', function () { inactive = document.hidden; caret(); });
 
       // A page's full screen, in and out. WebKit's own state says it first
       // (Tab.immersed follows web.fullscreenState): in once WebKit has the

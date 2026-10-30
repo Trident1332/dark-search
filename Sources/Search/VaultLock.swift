@@ -3,8 +3,7 @@ import Foundation
 
 // The lock on the Passwords page.
 //
-// The page opens locked. One Touch ID — or the Mac's password, the system's
-// own sheet offers both and the watch besides — opens it, and it stays open
+// The page opens locked. Touch ID opens it, and it stays open
 // for a while (Settings › Passwords › Lock after), the clock starting again
 // with every use. It locks on its own when that runs out, when the Mac goes
 // to sleep, when the screen locks, and, if Settings says so, the moment
@@ -13,10 +12,9 @@ import Foundation
 // each password is on: then the list is open but every secret is its own
 // question, as every one was before there was a lock.
 //
-// What is kept doesn't move for any of this: the keychain holds it, as it
-// always has. The lock is the page's, not the keychain's — a sign-in box
-// still offers the site's accounts, and a pick there still fills, locked
-// or not, since the keychain itself is what guards those.
+// Website passwords live in the browser's encrypted file. The page's
+// biometric context lasts only for this open spell. A website insertion
+// always asks for a fresh Touch ID proof, independently of this page.
 
 /// How long the page stays open once opened.
 enum VaultLockAfter: Int, CaseIterable, Identifiable {
@@ -85,6 +83,8 @@ final class VaultLock: ObservableObject {
     /// The Mac's sheet is up. Its coming takes the window from Search, which
     /// must not read as Search being hidden.
     private var proving = false
+    private var proofTask: Task<Void, Never>?
+    private var proofGeneration = UUID()
     private var observers: [Any] = []
 
     nonisolated static let lockAfterKey = "vault.lockAfter"
@@ -138,9 +138,12 @@ final class VaultLock: ObservableObject {
             return
         }
         proving = true
-        Vault.prove("open your passwords") { [weak self] ok in
+        let generation = proofGeneration
+        proofTask = Vault.prove("open your passwords") { [weak self] ok in
             guard let self else { return }
             self.proving = false
+            self.proofTask = nil
+            guard generation == self.proofGeneration else { done(false); return }
             if ok { self.opened() }
             done(ok)
         }
@@ -172,6 +175,7 @@ final class VaultLock: ObservableObject {
     private func schedule() {
         timer?.cancel()
         guard let session else { return }
+        Vault.extendAccess(until: session.until)
         until = session.until
         let work = DispatchWorkItem { [weak self] in
             guard let self, let session = self.session else { return }
@@ -184,6 +188,9 @@ final class VaultLock: ObservableObject {
     }
 
     func lock() {
+        proofGeneration = UUID()
+        proofTask?.cancel()
+        Vault.revokeAccess()
         timer?.cancel()
         timer = nil
         session = nil
@@ -200,9 +207,17 @@ final class VaultLock: ObservableObject {
             done(true)
             return
         }
-        Vault.prove(reason) { [weak self] ok in
-            if ok { self?.touch() }
+        guard !proving else { done(false); return }
+        proving = true
+        let generation = proofGeneration
+        proofTask = Vault.prove(reason) { [weak self] ok in
+            guard let self else { done(false); return }
+            self.proving = false
+            self.proofTask = nil
+            guard generation == self.proofGeneration else { done(false); return }
+            if ok { self.touch() }
             done(ok)
+            if !self.open { Vault.revokeAccess() }
         }
     }
 }

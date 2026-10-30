@@ -1,5 +1,71 @@
 import AppKit
+import Security
 import WebKit
+
+/// Trust can fetch intermediate certificates and contact trustd. Neither the
+/// call nor its callback runs on the thread that draws and switches tabs.
+enum CertificateTrustEvaluation {
+    typealias Evaluator = (SecTrust, @escaping (Bool) -> Void) -> Void
+    private static let queue = DispatchQueue(label: "Search.certificate-trust", qos: .userInitiated)
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var testingEvaluator: Evaluator?
+
+    static func useForTesting(_ evaluator: Evaluator?) {
+        guard Store.testing else { return }
+        lock.lock()
+        testingEvaluator = evaluator
+        lock.unlock()
+    }
+
+    static func evaluate(_ trust: SecTrust, then finish: @escaping (Bool) -> Void) {
+        lock.lock()
+        let evaluator = Store.testing ? testingEvaluator : nil
+        lock.unlock()
+        queue.async {
+            if let evaluator { evaluator(trust, finish); return }
+            // Security requires this call to originate on its callback queue.
+            // A cached result may call back before the function returns;
+            // failure to start, conversely, never calls back.
+            let status = SecTrustEvaluateAsyncWithError(trust, queue) { _, trusted, _ in finish(trusted) }
+            if status != errSecSuccess { finish(false) }
+        }
+    }
+}
+
+@MainActor
+fileprivate final class TrustReply {
+    private var reply: ((URLSession.AuthChallengeDisposition, URLCredential?) -> Void)?
+    private let finished: () -> Void
+
+    init(_ reply: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void,
+         finished: @escaping () -> Void) {
+        self.reply = reply
+        self.finished = finished
+    }
+
+    var open: Bool { reply != nil }
+
+    func answer(_ disposition: URLSession.AuthChallengeDisposition, _ credential: URLCredential? = nil) {
+        guard let reply else { return }
+        self.reply = nil
+        finished()
+        reply(disposition, credential)
+    }
+}
+
+@MainActor
+fileprivate final class TrustPage {
+    weak var webView: WKWebView?
+    var pending: [UUID: TrustReply] = [:]
+
+    init(_ webView: WKWebView) { self.webView = webView }
+
+    func cancel() {
+        let replies = Array(pending.values)
+        pending.removeAll()
+        for reply in replies { reply.answer(.cancelAuthenticationChallenge) }
+    }
+}
 
 // The questions a page is allowed to ask, and the answers it gets.
 //
@@ -264,41 +330,73 @@ extension Browser {
             completionHandler(.performDefaultHandling, nil)
             return
         }
-        if SecTrustEvaluateWithError(trust, nil) {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-        let host = challenge.protectionSpace.host.lowercased()
+        let space = challenge.protectionSpace
         let store = webView.configuration.websiteDataStore
-        if Dialogs.isLoopback(host) || Dialogs.excused.contains(trust, for: challenge.protectionSpace, in: store) {
-            completionHandler(.useCredential, URLCredential(trust: trust))
-            return
-        }
-        // A picture, a script, a font from a site with a bad certificate is
-        // simply not loaded. Only the page you asked for is worth a question.
-        guard let tab = tab(for: webView),
-              (tab.address?.host() ?? tab.pending?.host())?.lowercased() == host
-        else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-        // Over its own tab only, as a page's own questions are (see ask).
-        ask(from: webView, show: {
-            let alert = NSAlert()
-            alert.messageText = "\(host) can't prove who it is"
-            alert.informativeText = "Its certificate isn't trusted by this Mac. Someone could be reading what you send. Continue only if you know why it looks like this."
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "Go Back")
-            alert.addButton(withTitle: "Continue Anyway")
-            Dialogs.show(alert, over: webView) { answer in
-                guard answer == .alertSecondButtonReturn else {
-                    completionHandler(.cancelAuthenticationChallenge, nil)
+        let originalTab = popupTab(for: webView)
+        let wasManaged = originalTab != nil
+        let page = Dialogs.trustPage(for: webView)
+        let id = UUID()
+        let reply = TrustReply(completionHandler) { [weak page] in page?.pending.removeValue(forKey: id) }
+        page.pending[id] = reply
+        // Starting another navigation (including reloading the same URL),
+        // committing a cached document, or discarding the view cancels this
+        // reply. A late result cannot answer a later page's challenge.
+        CertificateTrustEvaluation.evaluate(trust) { [weak self, weak webView, weak store, weak originalTab] trusted in
+            DispatchQueue.main.async {
+                guard reply.open else { return }
+                guard let self, let webView, let store,
+                      webView.navigationDelegate === self,
+                      webView.configuration.websiteDataStore === store,
+                      (!wasManaged || originalTab != nil),
+                      self.popupTab(for: webView) === originalTab else {
+                    reply.answer(.cancelAuthenticationChallenge)
                     return
                 }
-                Dialogs.excused.accept(trust, for: challenge.protectionSpace, in: store)
-                completionHandler(.useCredential, URLCredential(trust: trust))
+                if trusted { reply.answer(.performDefaultHandling); return }
+                let host = space.host.lowercased()
+                if Dialogs.isLoopback(host) || Dialogs.excused.contains(trust, for: space, in: store) {
+                    reply.answer(.useCredential, URLCredential(trust: trust))
+                    return
+                }
+                // A broken subresource is not a reason to ask about the
+                // page. Match its entire origin, not another port or scheme.
+                guard let tab = self.tab(for: webView), Dialogs.matchesPage(tab, space) else {
+                    reply.answer(.performDefaultHandling)
+                    return
+                }
+                self.ask(from: webView, show: { [weak self, weak webView, weak store, weak tab] in
+                    guard reply.open else { return }
+                    guard let self, let webView, let store, let tab,
+                          webView.navigationDelegate === self,
+                          self.tab(for: webView) === tab,
+                          webView.configuration.websiteDataStore === store,
+                          Dialogs.matchesPage(tab, space) else {
+                        reply.answer(.cancelAuthenticationChallenge)
+                        return
+                    }
+                    let alert = NSAlert()
+                    alert.messageText = "\(host) can't prove who it is"
+                    alert.informativeText = "Its certificate isn't trusted by this Mac. Someone could be reading what you send. Continue only if you know why it looks like this."
+                    alert.alertStyle = .warning
+                    alert.addButton(withTitle: "Go Back")
+                    alert.addButton(withTitle: "Continue Anyway")
+                    Dialogs.show(alert, over: webView) { [weak self, weak webView, weak store, weak tab] answer in
+                        guard reply.open else { return }
+                        guard answer == .alertSecondButtonReturn,
+                              let self, let webView, let store, let tab,
+                              webView.navigationDelegate === self,
+                              self.tab(for: webView) === tab,
+                              webView.configuration.websiteDataStore === store,
+                              Dialogs.matchesPage(tab, space) else {
+                            reply.answer(.cancelAuthenticationChallenge)
+                            return
+                        }
+                        Dialogs.excused.accept(trust, for: space, in: store)
+                        reply.answer(.useCredential, URLCredential(trust: trust))
+                    }
+                }, drop: { reply.answer(.cancelAuthenticationChallenge) })
             }
-        }, drop: { completionHandler(.cancelAuthenticationChallenge, nil) })
+        }
     }
 
     /// A site behind a name and a password — a staging server, a router. One
@@ -365,6 +463,7 @@ extension Browser {
     /// tab shows white until somebody thinks to reload. Saying so, with the
     /// one thing worth offering, is what the failure view is for.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        Dialogs.invalidateTrust(for: webView)
         cancelDisplay(for: webView)
         guard let tab = tab(for: webView) else { return }
         dropQuestions(for: tab.id)
@@ -382,6 +481,47 @@ extension Browser {
 enum Dialogs {
     /// Certificate exceptions scoped to the origin and its website data store.
     @MainActor static let excused = CertificateExceptions()
+
+    @MainActor private static var trustPages: [ObjectIdentifier: TrustPage] = [:]
+
+    @MainActor fileprivate static func trustPage(for webView: WKWebView) -> TrustPage {
+        for (id, page) in trustPages where page.webView == nil {
+            page.cancel()
+            trustPages.removeValue(forKey: id)
+        }
+        let id = ObjectIdentifier(webView)
+        if let page = trustPages[id], page.webView === webView { return page }
+        let page = TrustPage(webView)
+        trustPages[id] = page
+        return page
+    }
+
+    /// Called before navigation or view teardown, even if its URL is equal.
+    @MainActor static func invalidateTrust(for webView: WKWebView) {
+        let id = ObjectIdentifier(webView)
+        guard let page = trustPages[id], page.webView === webView else { return }
+        trustPages.removeValue(forKey: id)
+        page.cancel()
+    }
+
+    /// Deleting a profile or space can precede releasing its web views.
+    @MainActor static func invalidateTrust(in store: WKWebsiteDataStore) {
+        let matching = trustPages.filter { $0.value.webView?.configuration.websiteDataStore === store }
+        for (id, page) in matching {
+            trustPages.removeValue(forKey: id)
+            page.cancel()
+        }
+    }
+
+    @MainActor fileprivate static func matchesPage(_ tab: Tab, _ space: URLProtectionSpace) -> Bool {
+        guard let url = tab.pending ?? tab.address,
+              let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased(),
+              scheme == space.protocol?.lowercased(), host == space.host.lowercased(), !space.isProxy()
+        else { return false }
+        let port = url.port ?? (scheme == "https" ? 443 : 80)
+        let challengedPort = space.port == 0 ? (scheme == "https" ? 443 : 80) : space.port
+        return port == challengedPort
+    }
 
     static func alert(from frame: WKFrameInfo, saying message: String) -> NSAlert {
         let alert = NSAlert()

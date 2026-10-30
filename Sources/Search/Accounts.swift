@@ -23,6 +23,7 @@ struct AccountList: View {
             ForEach(asked.logins) { login in
                 Row(mark: .letter(login.user.first.map { String($0).uppercased() } ?? "•"),
                     name: login.user.isEmpty ? "No name" : login.user, detail: login.host) { browser.choose(login) }
+                    .help("Fill from Dark Search Passwords with Touch ID")
             }
             // The Mac's Passwords app, when turned on (ApplePasswords.swift):
             // after Search's own, marked as Apple's.
@@ -39,10 +40,16 @@ struct AccountList: View {
             }
             if !offerOnly {
             HStack(spacing: 6) {
-                Image(systemName: "key")
+                Image(systemName: asked.logins.isEmpty ? "key" : "touchid")
                     .font(.system(size: 9, weight: .medium))
-                Text(footer)
-                    .font(.system(size: 10.5))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(footer)
+                        .font(.system(size: 10.5))
+                    if !asked.logins.isEmpty {
+                        Text("Touch ID before filling")
+                            .font(.system(size: 10))
+                    }
+                }
                 Spacer(minLength: 0)
             }
             .foregroundStyle(Palette.faint)
@@ -73,8 +80,8 @@ struct AccountList: View {
 
     private var footer: String {
         if asked.logins.isEmpty && asked.apple.isEmpty && !asked.appleConnect { return "Passkeys on this Mac" }
-        if asked.logins.isEmpty { return "From Apple Passwords" }
-        return asked.apple.isEmpty ? "From your keychain" : "From your keychain and Apple Passwords"
+        if asked.logins.isEmpty { return "Apple Passwords" }
+        return asked.apple.isEmpty ? "Dark Search Passwords" : "Dark Search Passwords + Apple Passwords"
     }
 
     private enum Mark { case letter(String), symbol(String) }

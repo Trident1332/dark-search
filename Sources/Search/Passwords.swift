@@ -76,7 +76,7 @@ struct PasswordsPanel: View {
     }
 
     var body: some View {
-        Plate("Passwords", width: 980, close: { browser.managing = false }, aside: AnyView(status)) {
+        Plate("Dark Search Passwords", width: 980, close: { browser.managing = false }, aside: AnyView(status)) {
             if lock.open { opened } else { locked }
         } foot: {
             foot
@@ -85,6 +85,7 @@ struct PasswordsPanel: View {
         .animation(Motion.settle, value: open)
         .animation(Motion.settle, value: lock.open)
         .onAppear {
+            page.legacyCount = Vault.legacyCount
             guard !lock.open, !asked else { return }
             asked = true
             lock.unlock()
@@ -132,10 +133,10 @@ struct PasswordsPanel: View {
                 .font(.system(size: 34, weight: .light))
                 .foregroundStyle(Palette.ink)
                 .padding(.bottom, 4)
-            Text("Passwords are locked")
+            Text("Dark Search Passwords is locked")
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(Palette.ink)
-            Text("Unlock with Touch ID, or your Mac's password. They lock again after \(VaultLock.lockAfter.spoken), when the Mac sleeps and when you lock the screen.")
+            Text("Unlock with Touch ID. Passwords lock again after \(VaultLock.lockAfter.spoken), when the Mac sleeps and when you lock the screen. Filling a website always asks for Touch ID.")
                 .font(.system(size: 13))
                 .foregroundStyle(Palette.muted)
                 .multilineTextAlignment(.center)
@@ -156,7 +157,7 @@ struct PasswordsPanel: View {
     private var tally: String {
         let passwords = browser.saved.count == 1 ? "1 password" : "\(browser.saved.count) passwords"
         let notes = browser.notes.count == 1 ? "1 note" : "\(browser.notes.count) notes"
-        return "\(passwords) · \(notes) · in your keychain"
+        return "\(passwords) in Dark Search Passwords" + (browser.notes.isEmpty ? "" : " · \(notes) in Keychain")
     }
 
     // MARK: - open
@@ -312,7 +313,7 @@ struct PasswordsPanel: View {
             case .login(let kept):
                 LoginDetail(browser: browser, kept: kept, changing: $page.changing) {
                     Ask.sure("Remove the password for \(kept.host)?",
-                             detail: "It's taken out of your keychain. This can't be undone.",
+                             detail: "It's removed from Dark Search Passwords. This can't be undone.",
                              confirm: "Remove", returnCancels: true) {
                         browser.forget(kept)
                         picked = nil
@@ -363,10 +364,61 @@ struct PasswordsPanel: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.muted)
             }
-            Text("macOS asks once for that browser's keychain key. Nothing is changed there; everything lands in your own keychain.")
+            if page.legacyCount > 0 || page.importingLegacy || page.legacyImportResult != nil {
+                legacyImport
+            }
+            Text("Imported logins stay encrypted in Dark Search Passwords on this Mac. Touch ID approves filling them on a website.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(Palette.muted)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Only metadata is counted on appearance. Reading the old passwords
+    /// and copying them into this vault starts with this explicit action.
+    private var legacyImport: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Existing Keychain logins")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Palette.ink)
+                Text(page.legacyImportResult ?? "\(page.legacyCount) saved \(page.legacyCount == 1 ? "login" : "logins") can be imported. The originals stay in Keychain.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Palette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !lock.open {
+                    Text("Unlock Passwords to import.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Palette.muted)
+                }
+            }
+            Spacer(minLength: 0)
+            if page.legacyCount > 0 || page.importingLegacy {
+                Pill(page.importingLegacy ? "Importing" : "Import from Keychain", action: importLegacy)
+                    .disabled(!lock.open || page.importingLegacy)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func importLegacy() {
+        guard lock.open, !page.importingLegacy else { return }
+        page.importingLegacy = true
+        page.legacyImportResult = nil
+        Task {
+            let result = await Vault.importLegacyLogins()
+            page.importingLegacy = false
+            page.legacyCount = Vault.legacyCount
+            browser.relist()
+            let message: String
+            if let failure = Vault.lastFailure {
+                message = failure
+            } else {
+                message = "Imported \(result.kept) \(result.kept == 1 ? "login" : "logins")" +
+                    (result.skipped > 0 ? "; \(result.skipped) left unchanged" : "")
+            }
+            page.legacyImportResult = message
+            browser.announce(message)
         }
     }
 
@@ -660,12 +712,15 @@ struct PasswordsPanel: View {
         @State private var hide: DispatchWorkItem?
         @State private var editing = false
         @State private var draft = ""
+        @State private var displayID = UUID()
 
         var body: some View {
             if changing {
                 Generator(browser: browser, kept: kept, cancel: { changing = false }) { made in
                     browser.change(kept, to: made)
-                    secret = Secret(password: made, notes: secret?.notes ?? "")
+                    // Re-read the saved record when its detail returns;
+                    // clearing this view must not lose its encrypted notes.
+                    secret = nil
                     changing = false
                 }
             } else {
@@ -738,14 +793,12 @@ struct PasswordsPanel: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                 }
-                .onAppear(perform: load)
+                .onAppear { displayID = UUID(); load() }
                 .onChange(of: lock.open) { _, now in
                     guard !now else { return }
-                    conceal()
-                    secret = nil
-                    editing = false
+                    clear()
                 }
-                .onDisappear { conceal() }
+                .onDisappear(perform: clear)
                 .animation(Motion.quick, value: shown)
                 .animation(Motion.settle, value: secret == nil)
             }
@@ -780,10 +833,11 @@ struct PasswordsPanel: View {
                     Label("Notes")
                     Spacer(minLength: 8)
                     if editing {
-                        Quick("Cancel") { editing = false }
+                        Quick("Cancel") { draft = ""; editing = false }
                         Quick("Save") {
                             browser.change(kept, to: secret.password, notes: draft)
                             self.secret?.notes = draft
+                            draft = ""
                             editing = false
                         }
                     } else {
@@ -830,11 +884,12 @@ struct PasswordsPanel: View {
         }
 
         private func reveal() {
+            let requested = displayID
             lock.allow("show the password for \(kept.host)") { ok in
-                guard ok else { return }
+                guard ok, lock.open, displayID == requested else { return }
                 if secret == nil { secret = Vault.details(of: kept) }
                 guard secret != nil else {
-                    browser.announce("The keychain refused it")
+                    browser.announce(Vault.lastFailure ?? "The password couldn't be opened")
                     return
                 }
                 shown = true
@@ -848,7 +903,16 @@ struct PasswordsPanel: View {
 
         private func conceal() {
             hide?.cancel()
+            hide = nil
             shown = false
+        }
+
+        private func clear() {
+            displayID = UUID()
+            conceal()
+            secret = nil
+            draft = ""
+            editing = false
         }
     }
 
@@ -913,6 +977,7 @@ struct PasswordsPanel: View {
                 .padding(14)
             }
             .onAppear(perform: make)
+            .onDisappear { made = "" }
             .onChange(of: recipe) { _, _ in make() }
             .onChange(of: length) { _, now in recipe.length = Int(now) }
         }
@@ -934,6 +999,8 @@ struct PasswordsPanel: View {
         @State private var editing = false
         @State private var title = ""
         @State private var draft = ""
+        @State private var readFailure: String?
+        @State private var displayID = UUID()
         @FocusState private var focus: Int?
 
         var body: some View {
@@ -980,13 +1047,16 @@ struct PasswordsPanel: View {
                             .padding(14)
                     }
                 } else {
-                    Nothing("Locked.")
+                    VStack(spacing: 8) {
+                        Nothing(readFailure ?? "Locked.")
+                        if readFailure != nil, lock.open { Pill("Try again", action: load) }
+                    }
                 }
                 Spacer(minLength: 0)
                 Rule(inset: 0)
                 HStack(spacing: 8) {
                     if editing {
-                        Pill("Cancel") { editing = false }
+                        Pill("Cancel") { draft = ""; editing = false }
                         Pill("Save", filled: true, action: save)
                     } else {
                         Pill("Edit") {
@@ -1008,24 +1078,43 @@ struct PasswordsPanel: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
             }
-            .onAppear(perform: load)
+            .onAppear { displayID = UUID(); load() }
             .onChange(of: lock.open) { _, now in
                 guard !now else { return }
-                text = nil
-                editing = false
+                clear()
             }
+            .onDisappear(perform: clear)
         }
 
         private func load() {
+            let requested = displayID
             lock.allow("open the note \(note.title)") { ok in
-                guard ok else { return }
-                text = Vault.note(note.id) ?? ""
+                guard lock.open, displayID == requested else { return }
+                guard ok else { readFailure = "Touch ID wasn't approved"; return }
+                guard let loaded = Vault.note(note.id) else {
+                    readFailure = "The note couldn't be read from Keychain"
+                    browser.announce("The note couldn't be read from Keychain")
+                    return
+                }
+                readFailure = nil
+                text = loaded
             }
+        }
+
+        private func clear() {
+            displayID = UUID()
+            text = nil
+            draft = ""
+            title = ""
+            editing = false
+            focus = nil
+            readFailure = nil
         }
 
         private func save() {
             guard browser.keepNote(note.id, title: title, text: draft) != nil else { return }
             text = draft
+            draft = ""
             editing = false
             browser.announce("Saved")
         }
@@ -1091,8 +1180,8 @@ struct PasswordsPanel: View {
                 guard ok, !checking else { return }
                 checking = true
                 let kept = browser.saved
-                // A few hundred keychain reads take a moment: off the main
-                // thread, as imports are.
+                // Checking every saved password can take a moment: off
+                // the main thread, as imports are.
                 DispatchQueue.global(qos: .userInitiated).async {
                     let result = Vault.checkup(kept)
                     DispatchQueue.main.async {
@@ -1309,6 +1398,9 @@ final class PasswordsPage: ObservableObject {
     @Published var adding: PasswordsPanel.Adding?
     @Published var checkup: Vault.Checkup?
     @Published var checking = false
+    @Published var legacyCount = 0
+    @Published var importingLegacy = false
+    @Published var legacyImportResult: String?
 }
 
 /// When something happened, as a person says it: "2 hours ago", "yesterday".

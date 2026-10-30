@@ -225,6 +225,7 @@ enum Spaces {
     @MainActor static func eraseStore(_ store: WKWebsiteDataStore?, id: UUID) {
         if let store {
             guard store !== Store.websites else { return }
+            Dialogs.invalidateTrust(in: store)
             Browsers.all.first?.forgetDownloads(of: store)
             let everything = WKWebsiteDataStore.allWebsiteDataTypes()
             store.removeData(ofTypes: everything, modifiedSince: .distantPast) {}
