@@ -1117,8 +1117,6 @@ private struct SideRow: View {
                     PopupSign(browser: browser, tab: tab, colour: colour)
                     // The page is translated (Translate.swift).
                     TranslateSign(tab: tab, colour: colour)
-                    // Pages take Settings › Proxy's route (ProxySettings.swift).
-                    ConnectionSign(browser: browser, tab: tab, colour: colour)
                     TitleAtRest(label: tab.label, rest: rest, shown: atRest, hovering: hovering,
                                 size: prefs.sideTitle, colour: colour, roomy: true, connectionHandled: tab.usesTor)
                 }
@@ -1206,7 +1204,6 @@ private struct SideRow: View {
         .animation(Motion.quick, value: speaker)
         .animation(Motion.quick, value: tab.blockedPopups.isEmpty)
         .animation(Motion.quick, value: tab.translation == nil)
-        .animation(Motion.quick, value: Proxy.shared.revision)
         .animation(Motion.quick, value: peeking)
         .background { ground.animation(Motion.quick, value: live) }
         .overlay {

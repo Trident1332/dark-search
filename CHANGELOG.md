@@ -35,7 +35,10 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Fixed
 
+- Site logos load when the document is ready, without waiting for slow adverts and frames. Failed icons retry after the proxy reconnects or the page changes its icon, and icons behind sign-in use the tab's own session without sending its cookies to other sites.
 - The browser menu uses one native outline around its rounded corners and arrow. About no longer shows the feedback row.
+- Typing on an unfocused blank tab returns to its search field without losing the first character. Clicking the toolbar address restores the field and keeps the tab's draft; other text fields and keyboard shortcuts keep their input.
+- Tabs show their site marks without proxy flags beside their titles. The address bar keeps the connection's location flag and controls.
 - Every new private tab starts with its own cookies, sign-ins and website storage, including duplicates, links, split panes and popups. Navigating within a tab keeps its session; private popups open independently of their source page.
 - Settings beside the side panel: in a tab narrower than 600 points, the rail folds to its icons, each named on hover, with the glass alone above them for Find a setting (⌘F, or a press on it, unfolds the rail with the field ready), so the rows keep their width rather than wrapping their titles and cutting their controls short, as they did with the dialer open in a middling window.
 - The dialer's Recents are a section under the keypad now, as a Settings page stacks its groups: a small heading with the count and Clear, the calls in a card, the page scrolling to the rest. Otto's sheet, sliding up over the keys, had nowhere good to rest in a panel this shape: a middling window had it showing a day's heading with nothing under it. The keys are sized to what is left above the first call, and a dialer not set up yet makes room for its note.

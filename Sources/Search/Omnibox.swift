@@ -492,6 +492,7 @@ struct AddressField: NSViewRepresentable {
 
         /// The keys to the field, now if it is in a window, or the moment it is.
         @MainActor func focus(_ field: Field) {
+            guard browser.fieldShowing, browser.editingTab == nil else { return }
             guard let window = field.window else {
                 field.arrived = { [weak self, weak field] in
                     DispatchQueue.main.async {

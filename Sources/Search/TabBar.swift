@@ -804,8 +804,6 @@ private struct TabPill: View {
                 PopupSign(browser: browser, tab: tab, colour: colour)
                 // The page is translated (Translate.swift).
                 TranslateSign(tab: tab, colour: colour)
-                // Pages take Settings › Proxy's route (ProxySettings.swift).
-                ConnectionSign(browser: browser, tab: tab, colour: colour)
                 TitleAtRest(label: tab.label, rest: rest, shown: atRest, hovering: hovering,
                             size: 12.5, colour: colour, roomy: false, connectionHandled: tab.usesTor)
             }
@@ -867,7 +865,6 @@ private struct TabPill: View {
         .animation(Motion.quick, value: speaker)
         .animation(Motion.quick, value: tab.blockedPopups.isEmpty)
         .animation(Motion.quick, value: tab.translation == nil)
-        .animation(Motion.quick, value: Proxy.shared.revision)
     }
 
     @ViewBuilder

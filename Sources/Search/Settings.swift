@@ -1294,6 +1294,8 @@ struct SettingsPanel: View {
     private var versionDetail: String {
         switch updater.stage {
         case .none:
+            if updater.waitingForConnection { return "Waiting for your proxy connection" }
+            if updater.checking { return "Checking for updates" }
             if let why = updater.lastCheckFailure { return "Couldn't check for updates. \(why)" }
             return updater.lastChecked.map { "Checked \($0.formatted(.relative(presentation: .named))), every hour on its own" }
                 ?? "Checked every hour on its own"

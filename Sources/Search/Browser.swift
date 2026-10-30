@@ -5653,7 +5653,7 @@ final class Browser: NSObject, ObservableObject {
             .sink { [weak self, weak tab] title in
                 // A translated title is the page's in your words, not its own:
                 // history keeps the page's (Translate.swift).
-                guard let tab, !tab.shy, tab.translator == nil, let url = tab.address else { return }
+                guard let tab, !tab.shy, !tab.usesTor, tab.translator == nil, let url = tab.address else { return }
                 self?.history.retitle(url, title)
             }
             .store(in: &bag)
@@ -5968,8 +5968,17 @@ final class Browser: NSObject, ObservableObject {
     /// ⌘L. The current address comes up selected, so typing over it replaces it
     /// and Escape puts it back.
     func edit() {
+        // Moving to the main field ends an inline address/name edit just
+        // as clicking away does, before its replacement asks for the keys.
+        finishTabEdit()
         summoning = false
         launching = false
+        // The toolbar is another way back to the blank tab's draft, not
+        // a request to replace it with its nonexistent current address.
+        if active?.isBlank == true {
+            focusRequest += 1
+            return
+        }
         // Never a name and password written into the address: they would be
         // on screen, and in whatever you copy from here.
         typed = active?.shownURL.map { url -> String in
@@ -6740,9 +6749,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // Find privacy before publishing the entry. A private transfer is
         // still tracked internally so its delegate and Finder progress clean
         // up correctly, but it never enters the shared Downloads panel.
-        let isPrivate = entry == nil && webView.map {
-            !$0.configuration.websiteDataStore.isPersistent || anyTab(for: $0)?.shy == true
-        } == true
+        let isPrivate = entry == nil && webView.map { !keepsDownloadHistory(for: $0) } == true
         download.delegate = self
         if !downloading.contains(where: { $0 === download }) { downloading.append(download) }
         if isPrivate { unlisted.insert(ObjectIdentifier(download)) }
@@ -7296,7 +7303,11 @@ extension Browser: WKDownloadDelegate {
         guard let data, let file = whereToSave(suggestedFilename ?? "") else { return }
         do {
             try data.write(to: file)
-            saved(file, from: originatingURL)
+            if keepsDownloadHistory(for: webView) {
+                saved(file, from: originatingURL)
+            } else {
+                announce("Saved \(file.lastPathComponent)")
+            }
         } catch {
             announce("Download failed")
         }
@@ -7357,6 +7368,13 @@ extension Browser: WKDownloadDelegate {
     private func saved(_ file: URL, from source: URL?) {
         loot.add(Keep(name: file.lastPathComponent, from: source?.host() ?? "", path: file.path, date: Date()))
         announce("Saved \(file.lastPathComponent)", file: file)
+    }
+
+    /// Native PDF saves and WKDownloads follow the same privacy rule, even
+    /// when WebKit calls back after a tab has left the visible row.
+    private func keepsDownloadHistory(for webView: WKWebView) -> Bool {
+        let tab = anyTab(for: webView)
+        return webView.configuration.websiteDataStore.isPersistent && tab?.shy != true && tab?.usesTor != true
     }
 
     func download(

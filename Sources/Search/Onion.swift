@@ -158,9 +158,16 @@ final class Onion: ObservableObject {
     }
 
     func connect() async throws -> UInt16 {
+        try Task.checkCancellation()
         guard enabled else { throw TorRuntime.Failure(message: "Turn on Open onion websites in Settings › Proxy") }
         if let port { return port }
-        if let connection { return try await connection.value }
+        if let connection {
+            let id = generation
+            let result = try await connection.value
+            try Task.checkCancellation()
+            guard generation == id else { throw CancellationError() }
+            return result
+        }
         let id = generation
         let operation = Task<UInt16, Error> { [weak self] in
             guard let self else { throw CancellationError() }
@@ -187,11 +194,9 @@ final class Onion: ObservableObject {
             return port
         }
         connection = operation
+        let result: UInt16
         do {
-            let result = try await operation.value
-            if generation == id { connection = nil }
-            try Task.checkCancellation()
-            return result
+            result = try await operation.value
         } catch {
             if generation == id {
                 connection = nil
@@ -201,6 +206,12 @@ final class Onion: ObservableObject {
             }
             throw error
         }
+        if generation == id { connection = nil }
+        // A tab owns its wait, not the shared connection. Its cancellation
+        // must not withdraw a route another tab has just finished starting.
+        try Task.checkCancellation()
+        guard generation == id else { throw CancellationError() }
+        return result
     }
 
     private func configuredUpstream() throws -> TorUpstream? {

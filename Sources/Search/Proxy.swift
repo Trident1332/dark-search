@@ -226,6 +226,7 @@ final class Proxy: ObservableObject {
     /// Long-lived clients must cancel connections using the previous route.
     nonisolated static let routeChanged = Notification.Name("SearchProxyRouteChanged")
     nonisolated static let contentChanged = Notification.Name("SearchProxyContentChanged")
+    nonisolated static let connectionRestored = Notification.Name("SearchProxyConnectionRestored")
 
     // MARK: - the settings
 
@@ -937,6 +938,7 @@ final class Proxy: ObservableObject {
         credentialIssue = nil
         stopProbe()
         cameBack()
+        NotificationCenter.default.post(name: Proxy.connectionRestored, object: nil)
     }
 
     /// The errors a dead or refusing proxy gives a page, as opposed to a
