@@ -28,8 +28,11 @@ final class Assistant: ObservableObject, Identifiable {
 
     let id = UUID()
     let tab: Tab.ID
+    let sourceURL: URL?
     let provider: AIProvider
-    let model: String
+    @Published private(set) var model: String
+    /// The exact quote captured by the context menu, or nil for the page.
+    let selection: String?
     /// Asked for a summary, rather than opened for a question.
     let summary: Bool
 
@@ -41,24 +44,40 @@ final class Assistant: ObservableObject, Identifiable {
     @Published private(set) var trouble: String?
     /// The page has words addressed to an AI (see AIPage.addressesAI).
     @Published private(set) var addressed = false
+    @Published private(set) var context: AIPage.Read?
+    @Published private(set) var destinationHost: String
 
-    private var read: AIPage.Read?
     private let fence = AIPage.newFence()
     private var messages: [AIMessage] = []
     private var waiting: AIPage.Ask?
     private var task: Task<Void, Never>?
+    private var connection: OpenCodeAI.Connection?
+    private var consentKey: String?
 
-    init(tab: Tab, provider: AIProvider, model: String, summary: Bool) {
+    init(tab: Tab, provider: AIProvider, model: String, summary: Bool, selection: String? = nil) {
         self.tab = tab.id
+        self.sourceURL = tab.pageAddress
         self.provider = provider
         self.model = model
         self.summary = summary
-        Task { @MainActor [weak self, weak tab] in
+        let quote = selection?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.selection = quote.isEmpty ? nil : String(quote.prefix(AIPage.limit))
+        self.destinationHost = provider == .openCode
+            ? ((try? OpenCodeAI.catalogue())?.first { $0.id == model }?.host ?? "your OpenCode provider") : provider.host
+        let address = tab.pageAddress
+        task = Task { @MainActor [weak self, weak tab] in
             guard let self, let tab else { return }
-            self.read = await AIPage.read(tab)
-            self.addressed = self.read?.addressed ?? false
+            let read = await AIPage.read(tab, selection: self.selection)
+            guard !Task.isCancelled else { return }
+            guard tab.pageAddress == address else {
+                self.reading = false
+                self.trouble = "The page changed. Choose Ask AI again for its current text."
+                return
+            }
+            self.context = read
+            self.addressed = read?.addressed ?? false
             self.reading = false
-            guard self.read != nil else {
+            guard self.context != nil else {
                 self.trouble = "There's nothing on this page to read."
                 return
             }
@@ -68,23 +87,53 @@ final class Assistant: ObservableObject, Identifiable {
 
     var busy: Bool { reading || turns.last.map { !$0.done } ?? false }
 
+    var pendingQuestion: String? {
+        guard case .question(let question) = waiting else { return nil }
+        return question
+    }
+
     /// Where it ran, for the foot of every answer.
     var place: String {
         provider == .thisMac ? "on this Mac · \(model)"
-            : provider.isLocal ? "on this Mac · \(provider.name) · \(model)" : "sent to \(provider.name) · \(model)"
+            : provider.isLocal ? "on this Mac · \(provider.name) · \(model)" : "\(destinationHost) · \(model)"
     }
 
     func submit() {
         let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty, !busy, notice == nil, read != nil else { return }
+        guard !question.isEmpty, !busy, notice == nil, context != nil else { return }
         draft = ""
         ask(.question(String(question.prefix(2000))))
     }
 
+    func submitSuggestion(_ question: String) {
+        guard !busy, notice == nil, context != nil else { return }
+        draft = question
+        submit()
+    }
+
     private func ask(_ ask: AIPage.Ask) {
-        if !provider.isLocal, !Store.settings.bool(forKey: "ai.told.\(provider.rawValue)") {
+        var key = "ai.told.\(provider.rawValue)"
+        var destination = destinationHost
+        if provider == .openCode {
+            do {
+                let chosen = try OpenCodeAI.connection(for: model)
+                connection = chosen
+                destinationHost = chosen.base.host() ?? "your OpenCode provider"
+                destination = chosen.origin
+                // The destination agreed to and the request use this same
+                // immutable snapshot, even if OpenCode's file changes later.
+                var origin = URLComponents(url: chosen.base, resolvingAgainstBaseURL: false)
+                origin?.path = ""
+                key += "." + (origin?.string ?? chosen.base.absoluteString)
+            } catch {
+                trouble = error.localizedDescription
+                return
+            }
+        }
+        consentKey = key
+        if !provider.isLocal, !Store.settings.bool(forKey: key) {
             waiting = ask
-            notice = AIAssist.notice(for: provider)
+            notice = AIAssist.notice(for: provider, host: destination)
             return
         }
         send(ask)
@@ -92,14 +141,16 @@ final class Assistant: ObservableObject, Identifiable {
 
     /// The notice read and agreed to: what was asked goes.
     func agree() {
-        Store.settings.set(true, forKey: "ai.told.\(provider.rawValue)")
+        guard let consentKey, let waiting else { return }
+        Store.settings.set(true, forKey: consentKey)
         notice = nil
-        if let waiting { send(waiting) }
-        waiting = nil
+        self.waiting = nil
+        send(waiting)
     }
 
     private func send(_ ask: AIPage.Ask) {
-        guard let read else { return }
+        guard let read = context else { return }
+        trouble = nil
         switch ask {
         case .summary:
             messages = [AIMessage(role: .user, text: AIPage.opening(read, .summary, fence: fence))]
@@ -109,30 +160,33 @@ final class Assistant: ObservableObject, Identifiable {
             turns.append(Turn(question: question))
         }
         // The key, read now and let go with the request.
-        let key = provider.isLocal ? nil : AIKeys.key(for: provider)
+        let key = provider.isLocal || provider == .openCode ? nil : AIKeys.key(for: provider)
         let stream = provider == .thisMac
             ? AIEngine.shared.stream(system: AIPage.system(fence: fence), messages: messages)
-            : AIClient.shared.stream(provider, model: model, system: AIPage.system(fence: fence), messages: messages, key: key)
+            : AIClient.shared.stream(provider, model: model, system: AIPage.system(fence: fence), messages: messages, key: key,
+                                     connection: connection)
+        connection = nil
+        let turnID = turns[turns.count - 1].id
         task = Task { @MainActor [weak self] in
             do {
                 for try await piece in stream {
-                    guard let self, !self.turns.isEmpty else { return }
+                    guard !Task.isCancelled, let self, self.turns.last?.id == turnID, self.turns.last?.done == false else { return }
                     self.turns[self.turns.count - 1].answer += piece
                     // Longer than any answer about a page needs: a model
                     // talked into writing on and on is stopped.
                     if self.turns[self.turns.count - 1].answer.count > Assistant.longest { break }
                 }
-                self?.finish(nil)
+                self?.finish(nil, turn: turnID)
             } catch {
-                self?.finish(error.localizedDescription)
+                self?.finish(error.localizedDescription, turn: turnID)
             }
         }
     }
 
     static let longest = 16_000
 
-    private func finish(_ failed: String?) {
-        guard !turns.isEmpty, let read else { return }
+    private func finish(_ failed: String?, turn expected: UUID? = nil) {
+        guard let last = turns.last, !last.done, expected == nil || last.id == expected, let read = context else { return }
         var turn = turns[turns.count - 1]
         turn.done = true
         turn.failed = failed
@@ -158,14 +212,31 @@ final class Assistant: ObservableObject, Identifiable {
     func stop() {
         task?.cancel()
         task = nil
+        connection = nil
+        waiting = nil
+    }
+
+    func chooseModel(_ model: String) {
+        guard provider == .openCode, !busy, notice == nil,
+              let chosen = (try? OpenCodeAI.catalogue())?.first(where: { $0.id == model }) else { return }
+        self.model = chosen.id
+        destinationHost = chosen.host
+        trouble = nil
+    }
+
+    func cancelAnswer() {
+        guard !reading, turns.last?.done == false else { return }
+        task?.cancel()
+        task = nil
+        finish(nil)
     }
 }
 
 enum AIAssist {
     /// What a provider off this Mac is sent, said once, the first time it is
     /// used — and a word on what it does with it where that matters.
-    static func notice(for provider: AIProvider) -> String {
-        var text = "When you ask, Dark Search sends this page's text, its address and your question to \(provider.host)"
+    static func notice(for provider: AIProvider, host: String? = nil) -> String {
+        var text = "Dark Search sends the quoted context shown here, the page's address and your question to \(host ?? provider.host)"
         text += provider == .openRouter ? ", which passes them to the model's provider." : "."
         text += " Their terms and privacy policy apply. Nothing is sent until you ask, never from a private tab, and Dark Search keeps no copy."
         switch provider {
@@ -183,9 +254,18 @@ enum AIAssist {
 extension Browser {
     func summarizePage() { startAssistant(summary: true) }
     func askAboutPage() { startAssistant(summary: false) }
+    func askAboutPage(from tab: Tab, selection: String? = nil) { startAssistant(summary: false, from: tab, selection: selection) }
 
-    private func startAssistant(summary: Bool) {
-        guard AI.shipped || Store.testing, let tab = active, tab.isWeb else { return }
+    private func startAssistant(summary: Bool, from source: Tab? = nil, selection: String? = nil) {
+        guard AI.shipped || Store.testing, let tab = source ?? active, tab.isWeb, !isPopup else { return }
+        if source != nil {
+            guard tabs.contains(where: { $0 === tab }) else { return }
+            select(tab)
+        }
+        // Choosing Ask AI is the user's opt-in. Import model names from the
+        // configuration they already use; no request is made on opening it.
+        if !prefs.ai { prefs.ai = true }
+        if prefs.aiProvider == nil, (try? OpenCodeAI.catalogue().isEmpty) == false { prefs.aiProvider = .openCode }
         guard prefs.ai, let provider = prefs.aiProvider else {
             settingsPage = .ai
             tuning = true
@@ -198,7 +278,7 @@ extension Browser {
             return
         }
         // A private tab leaves nothing behind anywhere, a provider included.
-        let shy = tab.shy || tab.built.map { !$0.configuration.websiteDataStore.isPersistent } == true
+        let shy = tab.shy || tab.usesTor || !tab.store.isPersistent
         guard !shy || provider.isLocal else {
             announce("In a private tab, only an AI on this Mac")
             return
@@ -216,7 +296,8 @@ extension Browser {
             announce("Choose a model for \(provider.name)")
             return
         }
-        guard provider.isLocal || AIKeys.hint(for: provider) != nil else {
+        let ready = provider == .openCode ? OpenCodeAI.hint(for: model) != nil : AIKeys.hint(for: provider) != nil
+        guard provider.isLocal || ready else {
             settingsPage = .ai
             tuning = true
             announce("No key for \(provider.name) yet")
@@ -224,14 +305,32 @@ extension Browser {
         }
         // Asked again on the page the panel is already about: the same
         // conversation goes on.
-        if !summary, let open = assisting, open.tab == tab.id, open.provider == provider { return }
+        if source == nil, !summary, let open = assisting, open.tab == tab.id, open.sourceURL == tab.pageAddress,
+           open.provider == provider, open.selection == selection {
+            sidePanel = .assistant
+            sidePanelShown = true
+            return
+        }
+        if sidePanel != .assistant { closeSidePanel() }
         assisting?.stop()
-        assisting = Assistant(tab: tab, provider: provider, model: model, summary: summary)
+        assisting = Assistant(tab: tab, provider: provider, model: model, summary: summary, selection: selection)
+        sidePanel = .assistant
+        sidePanelShown = true
     }
 
     func closeAssistant() {
         assisting?.stop()
         assisting = nil
+        if sidePanel == .assistant {
+            sidePanelShown = false
+            sidePanel = nil
+        }
+    }
+
+    func chooseAssistantModel(_ model: String) {
+        guard let assistant = assisting, assistant.provider == .openCode, !assistant.busy, assistant.notice == nil else { return }
+        assistant.chooseModel(model)
+        prefs.setAIModel(assistant.model, for: .openCode)
     }
 }
 
@@ -240,71 +339,251 @@ extension Browser {
 struct AssistantPanel: View {
     @ObservedObject var browser: Browser
     @ObservedObject var assistant: Assistant
-    /// Drawn off screen, for a picture (bench ai picture): what an image
-    /// renderer can't draw — a scroll view, a field — stood in for.
+    /// A deterministic rendering of these same controls, without native
+    /// text fields or scroll views, for the isolated picture command.
     var drawn = false
     @FocusState private var typing: Bool
+    @State private var models: [OpenCodeAI.Model] = []
+    @State private var expandedContext = false
+
+    private var catalogue: [OpenCodeAI.Model] {
+        if !models.isEmpty { return models }
+        return drawn ? (try? OpenCodeAI.catalogue()) ?? [] : []
+    }
+
+    private var chosenModel: OpenCodeAI.Model? { catalogue.first { $0.id == assistant.model } }
+    private var modelName: String { Self.modelLabel(for: assistant.model, provider: assistant.provider, models: catalogue) }
+    private var selected: Bool { assistant.selection != nil }
+    private var empty: Bool {
+        assistant.turns.isEmpty && assistant.notice == nil && assistant.trouble == nil && !assistant.reading
+    }
+    private var canSend: Bool {
+        !assistant.busy && assistant.notice == nil && assistant.context != nil &&
+            !assistant.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    private var placeholder: String {
+        !assistant.turns.isEmpty ? "Ask a follow-up…" : selected ? "Ask about this selection…" : "Ask about this page…"
+    }
+
+    static func modelLabel(for id: String, provider: AIProvider, models: [OpenCodeAI.Model]) -> String {
+        if let model = models.first(where: { $0.id == id }) { return model.name }
+        return provider == .openCode ? "Choose model" : provider.name
+    }
+
+    static func copyAnswer(_ answer: String, to pasteboard: NSPasteboard = .general) {
+        pasteboard.clearContents()
+        pasteboard.setString(answer, forType: .string)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Palette.muted)
-                Text(assistant.summary ? "Summary" : "About this page")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
-                Spacer(minLength: 0)
-                Door(icon: "xmark", help: "Close   esc") { browser.closeAssistant() }
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
-
+            header
+            modelControl
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
+            Rectangle().fill(Palette.hairline).frame(height: 1).padding(.horizontal, 14)
+            if let context = assistant.context { contextCard(context) }
             if drawn {
-                conversation.padding(.horizontal, 16).padding(.bottom, 12)
+                conversation
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: empty ? .center : .topLeading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
             } else {
                 scrolling
             }
+            composer
+            privacyNote
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Palette.ground)
+        .onAppear {
+            models = (try? OpenCodeAI.catalogue()) ?? []
+            if !assistant.summary, !drawn { typing = true }
+        }
+    }
 
-            Rectangle().fill(Palette.hairline).frame(height: 1)
-            HStack(spacing: 8) {
-                if drawn {
-                    Text("Ask about this page").font(.system(size: 12.5)).foregroundStyle(Palette.faint)
-                } else {
-                    TextField("", text: $assistant.draft, prompt: Text("Ask about this page").foregroundStyle(Palette.faint))
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Palette.ink)
-                        .focused($typing)
-                        .onSubmit { assistant.submit() }
-                        .disabled(assistant.notice != nil)
+    private var header: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "sparkles").font(.system(size: 13, weight: .medium))
+            Text("Ask AI").font(.system(size: 13, weight: .semibold))
+            Spacer(minLength: 0)
+            Door(icon: "gearshape", help: "Settings › AI") { _ = browser.show(InternalPage(.settings, SettingsPanel.Page.ai.rawValue)) }
+            Door(icon: "xmark", help: "Close") { browser.closeAssistant() }
+        }
+        .foregroundStyle(Palette.ink)
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
+    }
+
+    @ViewBuilder
+    private var modelControl: some View {
+        HStack(spacing: 0) {
+            if assistant.provider == .openCode && !drawn {
+                Menu {
+                    ForEach(Array(Set(catalogue.map(\.providerName))).sorted(), id: \.self) { provider in
+                        Section(provider) {
+                            ForEach(catalogue.filter { $0.providerName == provider }) { model in
+                                Button { browser.chooseAssistantModel(model.id) } label: {
+                                    if model.id == assistant.model {
+                                        Label(model.name, systemImage: "checkmark")
+                                    } else {
+                                        Text(model.name)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } label: { modelChip }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize(horizontal: false, vertical: true)
+                .disabled(assistant.busy || assistant.notice != nil)
+                .accessibilityLabel("AI model")
+            } else {
+                modelChip
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var modelChip: some View {
+        HStack(spacing: 14) {
+            Text(verbatim: modelName)
+                .font(.system(size: 12))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Image(systemName: "chevron.down").font(.system(size: 9, weight: .medium)).foregroundStyle(Palette.muted)
+        }
+        .foregroundStyle(Palette.ink)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Palette.wash.opacity(0.65), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+    }
+
+    private func contextCard(_ context: AIPage.Read) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Button {
+                withAnimation(Motion.quick) { expandedContext.toggle() }
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: selected ? "text.quote" : "doc.text")
+                    Text(selected ? "Selected text" : "Page context")
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .medium))
+                        .rotationEffect(.degrees(expandedContext ? 180 : 0))
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(Palette.muted)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(expandedContext ? "Collapse context" : "Show the full context sent with your question")
+            .accessibilityLabel(expandedContext ? "Collapse context" : "Expand context")
+            if (!selected || expandedContext), !context.title.isEmpty {
+                Text(verbatim: context.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(2)
+            }
+            if expandedContext {
+                ScrollView {
+                    contextText(context.text)
+                }
+                .frame(maxHeight: 180)
+            } else if selected {
+                Text(verbatim: String(context.text.prefix(900)))
+                    .font(.system(size: 12.5))
+                    .lineSpacing(2)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+            if let host = context.url?.host() {
+                Text(verbatim: host)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Palette.muted)
+                    .lineLimit(1)
+            }
+        }
+        .foregroundStyle(Palette.ink)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.wash.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+    }
+
+    private func contextText(_ text: String) -> some View {
+        Text(verbatim: text)
+            .font(.system(size: 12.5))
+            .lineSpacing(2)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 17) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("What would you like to know?")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(selected ? "Ask about the selected passage." : "Ask about this page or a selected passage.")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Palette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(spacing: 8) {
+                suggestionRow(selected ? "Summarize this selection" : "Summarize this page", icon: "doc.text") {
+                    assistant.submitSuggestion(selected ? "Summarize this selected passage in a few sentences." : "Summarize this page in a few sentences.")
+                }
+                suggestionRow(selected ? "Explain this selection" : "Explain a selection", icon: "text.alignleft") {
+                    if selected {
+                        assistant.submitSuggestion("Explain this selected passage in clear, simple terms.")
+                    } else {
+                        browser.announce("Select a passage on the page, then right-click and choose Ask AI")
+                        typing = true
+                    }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            Text("AI — may be wrong · \(assistant.place)")
-                .font(.system(size: 10.5))
-                .foregroundStyle(Palette.faint)
-                .lineLimit(1)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 10)
         }
-        .frame(width: 380, alignment: .leading)
-        .background(Palette.ground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
-        .shadow(color: .black.opacity(0.14), radius: 24, y: 8)
-        .onAppear { if !assistant.summary, !drawn { typing = true } }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func suggestionRow(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon).font(.system(size: 13)).foregroundStyle(Palette.muted).frame(width: 16)
+                Text(title).font(.system(size: 12.5)).lineLimit(2)
+                Spacer(minLength: 4)
+                Image(systemName: "arrow.right").font(.system(size: 11)).foregroundStyle(Palette.muted)
+            }
+            .foregroundStyle(Palette.ink)
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Palette.wash.opacity(0.28), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(assistant.busy || assistant.notice != nil || assistant.context == nil)
     }
 
     private var conversation: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if let notice = assistant.notice {
-                noticeCard(notice)
-            } else if let trouble = assistant.trouble {
-                Text(trouble).font(.system(size: 12.5)).foregroundStyle(Palette.muted)
+        VStack(alignment: .leading, spacing: 18) {
+            if let trouble = assistant.trouble, assistant.notice == nil {
+                Text(verbatim: trouble).font(.system(size: 12.5)).foregroundStyle(Palette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if assistant.reading {
-                Text("Reading the page").font(.system(size: 12.5)).foregroundStyle(Palette.muted)
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles").font(.system(size: 12))
+                    Text("Reading the page…").font(.system(size: 12.5))
+                }
+                .foregroundStyle(Palette.muted)
+            } else if empty {
+                emptyState
             }
             if assistant.addressed, assistant.notice == nil {
                 caution("This page has text written for an AI to follow. The answer may have been steered by it.")
@@ -312,8 +591,95 @@ struct AssistantPanel: View {
             ForEach(assistant.turns) { turn in
                 TurnView(turn: turn).id(turn.id)
             }
+            if let question = assistant.pendingQuestion { questionBubble(question).id("pending-question") }
+            if let notice = assistant.notice { noticeCard(notice) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var scrolling: some View {
+        GeometryReader { area in
+            ScrollViewReader { scroller in
+                ScrollView(showsIndicators: false) {
+                    conversation
+                        .frame(minHeight: max(0, area.size.height - 28), alignment: empty ? .center : .topLeading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                }
+                .onChange(of: assistant.turns.last?.answer) { _, _ in
+                    if let last = assistant.turns.last { scroller.scrollTo(last.id, anchor: .bottom) }
+                }
+                .onChange(of: assistant.pendingQuestion) { _, question in
+                    if question != nil { scroller.scrollTo("pending-question", anchor: .top) }
+                }
+            }
+        }
+    }
+
+    private var composer: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            if drawn {
+                Text(verbatim: assistant.draft.isEmpty ? placeholder : assistant.draft)
+                    .foregroundStyle(assistant.draft.isEmpty ? Palette.muted : Palette.ink)
+                    .font(.system(size: 12.5))
+                    .frame(maxWidth: .infinity, minHeight: 38, alignment: .topLeading)
+            } else {
+                TextField("", text: $assistant.draft, prompt: Text(placeholder).foregroundStyle(Palette.muted), axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12.5))
+                    .focused($typing)
+                    .lineLimit(1...5)
+                    .frame(maxWidth: .infinity, minHeight: 38, alignment: .topLeading)
+                    .submitLabel(.send)
+                    .onSubmit { assistant.submit() }
+                    .onKeyPress(.return, phases: .down) { press in
+                        guard !press.modifiers.contains(.shift) else { return .ignored }
+                        assistant.submit()
+                        return .handled
+                    }
+                    .disabled(assistant.notice != nil)
+            }
+            if assistant.busy && !assistant.reading {
+                Button { assistant.cancelAnswer() } label: { sendIcon(stopping: true) }
+                    .buttonStyle(.plain)
+                    .help("Stop answer")
+                    .accessibilityLabel("Stop answer")
+            } else {
+                Button { assistant.submit() } label: { sendIcon(stopping: false) }
+                    .buttonStyle(.plain)
+                    .disabled(!canSend)
+                    .help("Send question")
+                    .accessibilityLabel("Send question")
+            }
+        }
+        .padding(12)
+        .background(Palette.wash.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+    }
+
+    private func sendIcon(stopping: Bool) -> some View {
+        Image(systemName: stopping ? "stop.fill" : "arrow.up")
+            .font(.system(size: stopping ? 11 : 13, weight: .semibold))
+            .foregroundStyle(Palette.ground)
+            .frame(width: 29, height: 29)
+            .background(Palette.ink.opacity(stopping || canSend ? 0.95 : 0.66), in: Circle())
+    }
+
+    private var privacyNote: some View {
+        let note = assistant.provider.isLocal ? "Stays on this Mac" : "Only sent when you ask"
+        let provider = chosenModel?.providerName ?? assistant.provider.name
+        return Text("\(note) · \(provider)")
+            .font(.system(size: 10.5))
+            .foregroundStyle(Palette.muted)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 14)
+            .padding(.top, 9)
+            .padding(.bottom, 11)
+            .help("AI may be wrong. Destination: \(assistant.destinationHost)")
     }
 
     private func caution(_ text: String) -> some View {
@@ -322,22 +688,8 @@ struct AssistantPanel: View {
             Text(verbatim: text).font(.system(size: 11.5)).fixedSize(horizontal: false, vertical: true)
         }
         .foregroundStyle(Palette.muted)
-        .padding(8)
-        .background(Palette.wash, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    private var scrolling: some View {
-            ScrollViewReader { scroller in
-                ScrollView(showsIndicators: false) {
-                    conversation
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 12)
-                }
-                .onChange(of: assistant.turns.last?.answer) { _, _ in
-                    if let last = assistant.turns.last { scroller.scrollTo(last.id, anchor: .bottom) }
-                }
-            }
-            .frame(maxHeight: 420)
+        .padding(9)
+        .background(Palette.wash, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private func noticeCard(_ notice: String) -> some View {
@@ -355,48 +707,91 @@ struct AssistantPanel: View {
             }
         }
         .padding(12)
-        .background(Palette.wash.opacity(0.6), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Palette.wash.opacity(0.6), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
     }
+
+    private static func bubble(_ question: String) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            Spacer(minLength: 28)
+            Text(verbatim: question)
+                .font(.system(size: 12.5))
+                .foregroundStyle(Palette.ink)
+                .lineSpacing(2)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 9)
+                .background(Palette.wash.opacity(0.8), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private func questionBubble(_ question: String) -> some View { Self.bubble(question) }
 
     private struct TurnView: View {
         let turn: Assistant.Turn
+        @State private var copied = false
 
         var body: some View {
-            VStack(alignment: .leading, spacing: 6) {
-                if let question = turn.question {
-                    Text(verbatim: question)
+            VStack(alignment: .leading, spacing: 15) {
+                if let question = turn.question { AssistantPanel.bubble(question) }
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "sparkles")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Palette.muted)
-                }
-                if turn.answer.isEmpty, !turn.done {
-                    Text("Thinking").font(.system(size: 13)).foregroundStyle(Palette.faint)
-                }
-                // As written, and never as markdown: no link to follow, no
-                // picture to fetch.
-                if !turn.answer.isEmpty {
-                    Text(verbatim: turn.answer)
-                        .font(.system(size: 13))
-                        .foregroundStyle(Palette.ink)
-                        .lineSpacing(2.5)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let failed = turn.failed {
-                    Text(verbatim: failed).font(.system(size: 12)).foregroundStyle(Palette.muted)
-                }
-                if !turn.strays.isEmpty {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.system(size: 10, weight: .medium))
-                        Text(verbatim: "Not on the page: " + turn.strays.joined(separator: ", "))
-                            .font(.system(size: 11.5))
-                            .fixedSize(horizontal: false, vertical: true)
+                        .frame(width: 14)
+                        .padding(.top, 2)
+                    VStack(alignment: .leading, spacing: 9) {
+                        if turn.answer.isEmpty, !turn.done {
+                            Text("Thinking…").font(.system(size: 12.5)).foregroundStyle(Palette.faint)
+                        }
+                        // Plain text cannot fetch images or turn model output
+                        // into links that the original page never contained.
+                        if !turn.answer.isEmpty {
+                            Text(verbatim: turn.answer)
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(Palette.ink)
+                                .lineSpacing(3)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if let failed = turn.failed {
+                            Text(verbatim: failed).font(.system(size: 12)).foregroundStyle(Palette.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if !turn.strays.isEmpty {
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle").font(.system(size: 10, weight: .medium))
+                                Text(verbatim: "Not on the page: " + turn.strays.joined(separator: ", "))
+                                    .font(.system(size: 11.5)).fixedSize(horizontal: false, vertical: true)
+                            }
+                            .foregroundStyle(Palette.muted)
+                            .padding(8)
+                            .background(Palette.wash, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        }
+                        if !turn.answer.isEmpty {
+                            Button {
+                                AssistantPanel.copyAnswer(turn.answer)
+                                copied = true
+                            } label: {
+                                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Palette.muted)
+                                    .frame(width: 26, height: 25)
+                                    .background(Palette.wash.opacity(0.45), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            .help(copied ? "Copied" : "Copy answer")
+                            .accessibilityLabel("Copy answer")
+                        }
                     }
-                    .foregroundStyle(Palette.muted)
-                    .padding(8)
-                    .background(Palette.wash, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onChange(of: turn.answer) { _, _ in copied = false }
         }
     }
 }
@@ -412,12 +807,14 @@ struct AISettings: View {
     @State private var hint: String?
     @State private var models: [String] = []
     @State private var looking = false
+    @State private var openCodeModels: [OpenCodeAI.Model] = []
+    @State private var openCodeProblem: String?
     @ObservedObject private var engine = AIEngine.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Card {
-                Line("Use AI on pages", "Summarize a page, or ask about it, from the View menu. Nothing is sent until you ask") {
+                Line("Use AI on pages", "Right-click a page or selected text and choose Ask AI. Nothing is sent until you ask") {
                     Switch(on: $prefs.ai)
                 }
             }
@@ -441,7 +838,10 @@ struct AISettings: View {
                     }
                     if let provider = prefs.aiProvider {
                         Rule()
-                        if provider == .thisMac { onThisMac } else if provider.isLocal { localModel(provider) } else { key(provider); Rule(); cloudModel(provider) }
+                        if provider == .openCode { openCode }
+                        else if provider == .thisMac { onThisMac }
+                        else if provider.isLocal { localModel(provider) }
+                        else { key(provider); Rule(); cloudModel(provider) }
                     }
                 }
                 .onChange(of: prefs.aiProvider) { _, _ in
@@ -451,7 +851,7 @@ struct AISettings: View {
                 }
                 .onAppear(perform: refresh)
                 Card {
-                    Line("Forget every key", "Deletes them from this Mac's keychain. A key made by signing in with OpenRouter still works until you delete it on openrouter.ai") {
+                    Line("Forget Search's keys", "Deletes keys saved by Search from this Mac's keychain. OpenCode manages its own credentials") {
                         Pill("Forget") {
                             AIKeys.forgetAll()
                             refresh()
@@ -495,9 +895,30 @@ struct AISettings: View {
 
     private var place: String {
         guard let provider = prefs.aiProvider else { return "A provider you have a key with, or an app on this Mac" }
+        if provider == .openCode { return "Models and credentials from your OpenCode configuration. Choose a model in the Ask AI panel" }
         return provider.isLocal
             ? "Nothing leaves this Mac. Also in private tabs"
             : "Your key, kept in this Mac's keychain, sent only to \(provider.host). Never from a private tab"
+    }
+
+    @ViewBuilder
+    private var openCode: some View {
+        Line("OpenCode", openCodeProblem ?? "Credentials are read when you send a question and kept out of Search's settings") {
+            Pill("Reload") { refresh() }
+        }
+        Rule()
+        Line("Default model", openCodeModels.isEmpty ? "No supported configured models found" : "\(openCodeModels.count) configured models; you can also choose in the panel") {
+            if drawn {
+                Stand(prefs.aiModel(for: .openCode), menu: true, width: 200)
+            } else {
+                Picker("Model", selection: Binding(get: { prefs.aiModel(for: .openCode) }, set: { prefs.setAIModel($0, for: .openCode) })) {
+                    ForEach(openCodeModels) { model in Text("\(model.providerName) · \(model.name)").tag(model.id) }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: 210)
+            }
+        }
     }
 
     @ViewBuilder
@@ -604,6 +1025,17 @@ struct AISettings: View {
     /// now, never in the background.
     private func refresh() {
         guard let provider = prefs.aiProvider else { return }
+        if provider == .openCode {
+            do {
+                openCodeModels = try OpenCodeAI.catalogue()
+                openCodeProblem = nil
+            } catch {
+                openCodeModels = []
+                openCodeProblem = error.localizedDescription
+            }
+            hint = OpenCodeAI.hint(for: prefs.aiModel(for: .openCode))
+            return
+        }
         hint = provider.isLocal ? nil : AIKeys.hint(for: provider)
         models = []
         guard provider.isLocal else { return }

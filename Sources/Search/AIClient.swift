@@ -129,11 +129,12 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     /// The answer to `messages`, a piece at a time. `system` says what the
     /// model is for and how to treat the page (see AIPage.system).
     func stream(_ provider: AIProvider, model: String, system: String, messages: [AIMessage],
-                key: String?) -> AsyncThrowingStream<String, Error> {
+                key: String?, connection: OpenCodeAI.Connection? = nil) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let request = try Self.request(provider, model: model, system: system, messages: messages, key: key)
+                    let target = try Self.destination(provider, model: model, key: key, connection: connection)
+                    let request = try Self.request(provider, target: target, system: system, messages: messages)
                     let (bytes, response) = try await session.proxyBytes(for: request, delegate: self)
                     guard let http = response as? HTTPURLResponse else { throw AIError.unreadable }
                     guard (200..<300).contains(http.statusCode) else {
@@ -142,7 +143,7 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
                             body.append(byte)
                             if body.count > 4096 { break }
                         }
-                        throw AIError.http(http.statusCode, Self.said(body, hiding: key))
+                        throw AIError.http(http.statusCode, Self.said(body, hiding: target.key))
                     }
                     var event = ""
                     for try await line in bytes.lines {
@@ -154,11 +155,13 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
                         let data = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
                         if data == "[DONE]" { break }
                         guard let json = try? JSONSerialization.jsonObject(with: Data(data.utf8)) as? [String: Any] else { continue }
-                        if let failure = Self.failure(json, event: event, hiding: key) { throw failure }
-                        if let piece = Self.piece(provider.wire, json), !piece.isEmpty { continuation.yield(piece) }
+                        if let failure = Self.failure(json, event: event, hiding: target.key) { throw failure }
+                        if let piece = Self.piece(target.wire, json), !piece.isEmpty { continuation.yield(piece) }
                     }
                     continuation.finish()
                 } catch let error as AIError {
+                    continuation.finish(throwing: error)
+                } catch let error as OpenCodeAI.ReadError {
                     continuation.finish(throwing: error)
                 } catch is CancellationError {
                     continuation.finish()
@@ -179,14 +182,38 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     /// in the address, which ends up in errors and logs — and only once the
     /// address is known to be the provider's own.
     static func request(_ provider: AIProvider, model: String, system: String, messages: [AIMessage],
-                        key: String?) throws -> URLRequest {
+                        key: String?, connection: OpenCodeAI.Connection? = nil) throws -> URLRequest {
+        try request(provider, target: destination(provider, model: model, key: key, connection: connection), system: system, messages: messages)
+    }
+
+    private struct Destination {
+        let base: URL
+        let wire: AIProvider.Wire
+        let model: String
+        let key: String?
+        let local: Bool
+        let imported: Bool
+    }
+
+    private static func destination(_ provider: AIProvider, model: String, key: String?, connection: OpenCodeAI.Connection?) throws -> Destination {
+        if provider == .openCode {
+            let selected = try connection ?? OpenCodeAI.connection(for: model)
+            guard model.isEmpty || selected.id == model else { throw OpenCodeAI.ReadError.unknownModel }
+            _ = try OpenCodeAI.endpoint(selected.base.absoluteString)
+            return Destination(base: selected.base, wire: selected.wire, model: selected.model, key: selected.key,
+                               local: selected.key == nil, imported: true)
+        }
+        return Destination(base: provider.base, wire: provider.wire, model: model, key: key, local: provider.isLocal, imported: false)
+    }
+
+    private static func request(_ provider: AIProvider, target: Destination, system: String, messages: [AIMessage]) throws -> URLRequest {
         let url: URL
         var body: [String: Any]
-        switch provider.wire {
+        switch target.wire {
         case .openAI:
-            url = provider.base.appendingPathComponent("chat/completions")
+            url = target.base.appendingPathComponent("chat/completions")
             body = [
-                "model": model, "stream": true,
+                "model": target.model, "stream": true,
                 "messages": [["role": "system", "content": system]] + messages.map { ["role": $0.role.rawValue, "content": $0.text] },
             ]
             // Only providers that keep nothing of the request.
@@ -194,16 +221,24 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
             // A limit on the answer, for every one: OpenAI's own models take
             // it under its newer name.
             body[provider == .openAI ? "max_completion_tokens" : "max_tokens"] = 2048
-        case .anthropic:
-            url = provider.base.appendingPathComponent("messages")
+        case .responses:
+            url = target.base.appendingPathComponent("responses")
             body = [
-                "model": model, "stream": true, "max_tokens": 2048, "system": system,
+                "model": target.model, "stream": true, "store": false,
+                "instructions": system,
+                "input": messages.map { ["role": $0.role.rawValue, "content": $0.text] },
+                "max_output_tokens": 2048,
+            ]
+        case .anthropic:
+            url = target.base.appendingPathComponent("messages")
+            body = [
+                "model": target.model, "stream": true, "max_tokens": 2048, "system": system,
                 "messages": messages.map { ["role": $0.role.rawValue, "content": $0.text] },
             ]
         case .gemini:
             // The model's name is part of the path; nothing of the key is.
-            let name = model.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._"))) ?? ""
-            var parts = URLComponents(url: provider.base.appendingPathComponent("models/\(name):streamGenerateContent"), resolvingAgainstBaseURL: false)
+            let name = target.model.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._"))) ?? ""
+            var parts = URLComponents(url: target.base.appendingPathComponent("models/\(name):streamGenerateContent"), resolvingAgainstBaseURL: false)
             parts?.queryItems = [URLQueryItem(name: "alt", value: "sse")]
             guard let made = parts?.url else { throw AIError.refusedHost }
             url = made
@@ -213,20 +248,30 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
                 "generationConfig": ["maxOutputTokens": 2048],
             ]
         }
-        guard allowed(url, for: provider) else { throw AIError.refusedHost }
+        // Every imported request uses its captured origin, including port.
+        // No later file read can broaden where this credential may go.
+        if target.imported {
+            guard let actual = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  let expected = URLComponents(url: target.base, resolvingAgainstBaseURL: false),
+                  actual.scheme?.lowercased() == expected.scheme?.lowercased(),
+                  actual.host?.lowercased() == expected.host?.lowercased(), actual.port == expected.port,
+                  actual.user == nil, actual.password == nil, actual.fragment == nil else { throw AIError.refusedHost }
+        } else {
+            guard allowed(url, for: provider) else { throw AIError.refusedHost }
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        if !provider.isLocal {
-            guard let key, !key.isEmpty else { throw AIError.noKey }
-            switch provider.wire {
+        if !target.local || target.key != nil {
+            guard let key = target.key, !key.isEmpty else { throw AIError.noKey }
+            switch target.wire {
             case .anthropic:
                 request.setValue(key, forHTTPHeaderField: "x-api-key")
                 request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
             case .gemini:
                 request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
-            case .openAI:
+            case .openAI, .responses:
                 request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             }
         }
@@ -291,6 +336,9 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
         case .openAI:
             let choice = (json["choices"] as? [[String: Any]])?.first
             return (choice?["delta"] as? [String: Any])?["content"] as? String
+        case .responses:
+            guard ["response.output_text.delta", "response.refusal.delta"].contains(json["type"] as? String ?? "") else { return nil }
+            return json["delta"] as? String
         case .anthropic:
             guard json["type"] as? String == "content_block_delta",
                   let delta = json["delta"] as? [String: Any], delta["type"] as? String == "text_delta"
@@ -306,6 +354,12 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
 
     /// An error sent inside the stream, as Anthropic and OpenRouter do.
     static func failure(_ json: [String: Any], event: String, hiding key: String?) -> AIError? {
+        if ["response.failed", "response.incomplete"].contains(json["type"] as? String ?? event) {
+            let response = json["response"] as? [String: Any]
+            let error = response?["error"] as? [String: Any]
+            let message = error?["message"] as? String ?? "The provider stopped before finishing its answer."
+            return .http(500, scrub(String(message.prefix(300)), hiding: key))
+        }
         guard event == "error" || json["type"] as? String == "error" || json["error"] != nil else { return nil }
         let error = json["error"] as? [String: Any]
         let said = (error?["message"] as? String) ?? (json["error"] as? String) ?? ""
@@ -329,11 +383,13 @@ final class AIClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     /// Any key out of a text: the one sent, and anything shaped like one.
     static func scrub(_ text: String, hiding key: String?) -> String {
         var text = text
-        if let key, key.count >= 8 {
+        if let key, !key.isEmpty {
             text = text.replacingOccurrences(of: key, with: "••••")
             // A quoted part of it, as "sk-abc…wxyz" is.
-            text = text.replacingOccurrences(of: String(key.prefix(8)), with: "••••")
-            text = text.replacingOccurrences(of: String(key.suffix(4)), with: "••••")
+            if key.count >= 8 {
+                text = text.replacingOccurrences(of: String(key.prefix(8)), with: "••••")
+                text = text.replacingOccurrences(of: String(key.suffix(4)), with: "••••")
+            }
         }
         let shapes = [#"sk-[A-Za-z0-9_\-*.]{6,}"#, #"AIza[A-Za-z0-9_\-]{10,}"#, #"AQ\.[A-Za-z0-9_\-]{10,}"#, #"gsk_[A-Za-z0-9]{10,}"#]
         for shape in shapes {

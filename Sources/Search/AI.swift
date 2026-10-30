@@ -10,13 +10,10 @@ import Security
 // This file: where it runs, and the keys. The requests are AIClient's, the
 // page's text AIPage's.
 
-/// Whether the AI add-on is in this build at all. Held back from 1.0.5
-/// (8 Oct 2026): with it off, none of it shows or runs — no Settings page, no
-/// menu items or shortcuts, no line on the welcome or What's New cards — and
-/// a setting left on by a test build reads as off. The code stays; this is
-/// the one line that brings it back.
+/// Available in this build; still off until it is chosen in Settings or
+/// opened deliberately from a page's Ask AI action.
 enum AI {
-    static let shipped = false
+    static let shipped = true
 }
 
 /// Where the answers come from.
@@ -24,6 +21,8 @@ enum AIProvider: String, CaseIterable, Identifiable {
     /// The model downloaded to this Mac, run by Search's own engine (AIEngine).
     case thisMac
     case anthropic, openAI, gemini, openRouter
+    /// Providers and model choices already configured in OpenCode.
+    case openCode
     /// Ollama, on this Mac.
     case ollama
     /// LM Studio, on this Mac.
@@ -38,6 +37,7 @@ enum AIProvider: String, CaseIterable, Identifiable {
         case .openAI: return "OpenAI"
         case .gemini: return "Google Gemini"
         case .openRouter: return "OpenRouter"
+        case .openCode: return "OpenCode"
         case .ollama: return "Ollama"
         case .lmStudio: return "LM Studio"
         }
@@ -57,6 +57,9 @@ enum AIProvider: String, CaseIterable, Identifiable {
         case .openAI: return URL(string: "https://api.openai.com/v1/")!
         case .gemini: return URL(string: "https://generativelanguage.googleapis.com/v1beta/")!
         case .openRouter: return URL(string: "https://openrouter.ai/api/v1/")!
+        // Only a generic label. Requests resolve the selected model once,
+        // through OpenCodeAI.Connection, and never use this fallback.
+        case .openCode: return OpenCodeAI.defaultEndpoint ?? URL(string: "https://opencode.invalid/")!
         case .ollama: return URL(string: "http://127.0.0.1:11434/v1/")!
         case .lmStudio: return URL(string: "http://127.0.0.1:1234/v1/")!
         }
@@ -78,12 +81,13 @@ enum AIProvider: String, CaseIterable, Identifiable {
         case .openAI: return "gpt-5.4-mini"
         case .gemini: return "gemini-3.8-flash"
         case .openRouter: return "google/gemini-3.8-flash"
+        case .openCode: return OpenCodeAI.defaultModel
         case .ollama, .lmStudio: return ""
         }
     }
 
     /// How requests are written.
-    enum Wire { case openAI, anthropic, gemini }
+    enum Wire: Equatable { case openAI, responses, anthropic, gemini }
 
     var wire: Wire {
         switch self {
@@ -94,7 +98,8 @@ enum AIProvider: String, CaseIterable, Identifiable {
     }
 }
 
-/// The keys, in the keychain and nowhere else.
+/// Search's own provider keys, kept in the keychain. OpenCode's credentials
+/// remain in OpenCode and are read separately by OpenCodeAI.
 ///
 /// The data protection keychain, under Search's own access group: only apps
 /// signed as Search, with its provisioning profile, can read or write them.
@@ -133,7 +138,7 @@ enum AIKeys {
 
     static func save(_ key: String, for provider: AIProvider) -> Saved {
         let key = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty, !provider.isLocal else { return .failed }
+        guard !key.isEmpty, !provider.isLocal, provider != .openCode else { return .failed }
         if Store.testing {
             rehearsal[account(provider)] = key
             return .kept
@@ -155,6 +160,9 @@ enum AIKeys {
 
     /// The key, for the request about to go out. Nil when there is none.
     static func key(for provider: AIProvider) -> String? {
+        // The selected OpenCode connection reads its own credential at send
+        // time; it is never installed in Search's keychain.
+        if provider == .openCode { return nil }
         if Store.testing { return rehearsal[account(provider)] }
         var asked = query(provider)
         asked[kSecReturnData as String] = true
@@ -166,6 +174,7 @@ enum AIKeys {
 
     /// "••••1a2b" for one that is kept, without reading the key itself.
     static func hint(for provider: AIProvider) -> String? {
+        if provider == .openCode { return OpenCodeAI.hint(for: OpenCodeAI.defaultModel) }
         if Store.testing { return rehearsal[account(provider)].map { "••••" + $0.suffix(4) } }
         var asked = query(provider)
         asked[kSecReturnAttributes as String] = true
@@ -177,6 +186,7 @@ enum AIKeys {
     }
 
     static func forget(_ provider: AIProvider) {
+        guard provider != .openCode else { return }
         if Store.testing { rehearsal[account(provider)] = nil; return }
         KeychainAccess.delete(query(provider) as CFDictionary)
     }

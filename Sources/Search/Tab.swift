@@ -637,6 +637,8 @@ final class Tab: ObservableObject, Identifiable {
     var imageFrame: WKFrameInfo? { images.frame }
     /// Call <number> was chosen in the page's menu (see DialMenu.swift).
     var onCall: ((Tab, String) -> Void)?
+    /// Ask AI was chosen for this page, with its selected words when any.
+    var onAskAI: ((Tab, String?) -> Void)?
     var searchName: (() -> String?)?
     var onSearch: ((Tab, String) -> Void)?
     /// "Add to Search" was pressed on the Chrome Web Store page this tab shows.
@@ -927,6 +929,14 @@ final class Tab: ObservableObject, Identifiable {
         web.onCall = { [weak self] number in
             guard let self else { return }
             self.onCall?(self, number)
+        }
+        web.onAskAI = { [weak self] selection in
+            guard let self else { return }
+            self.onAskAI?(self, selection)
+        }
+        web.canAskAI = { [weak self] in
+            guard let self, let browser = self.delegate as? Browser else { return false }
+            return !browser.isPopup && browser.tabs.contains { $0 === self }
         }
         web.translating = { [weak self] in self.map { $0.translator != nil && $0.translation?.failed != true } ?? false }
         web.onTranslate = { [weak self] in self?.toggleTranslation() }
@@ -2176,6 +2186,8 @@ final class Tab: ObservableObject, Identifiable {
         web.searchName = nil
         web.dialNumber = nil
         web.onCall = nil
+        web.onAskAI = nil
+        web.canAskAI = nil
         web.translating = nil
         web.onTranslate = nil
         web.onSearch = nil
@@ -2357,6 +2369,8 @@ final class MiddleRelay: NSObject, WKScriptMessageHandler {
 /// A web view that reads the two-finger swipe for itself.
 final class PageView: WKWebView {
     var onMenuClosed: (() -> Void)?
+    var onAskAI: ((String?) -> Void)?
+    var canAskAI: (() -> Bool)?
 
     override func didCloseMenu(_ menu: NSMenu, with event: NSEvent?) {
         super.didCloseMenu(menu, with: event)
@@ -2370,6 +2384,7 @@ final class PageView: WKWebView {
         // Call <number>, first, when the right-click landed on one and the
         // dialer is on (see DialMenu.swift).
         addCallItem(to: menu)
+        addAskAIItem(to: menu)
         // WebKit names it for a window, but a new window's page arrives here
         // as a new tab (Browser's createWebViewWith), so it says so. The tab
         // stays behind this one, as in Safari and Chrome, and as a ⌘-click's
