@@ -93,12 +93,14 @@ final class Updater: ObservableObject {
         case upToDate
         case available(Release)
         case failed(String)
+        case deferred(String)
 
         var message: String? {
             switch self {
             case .upToDate: return "\(Brand.name) is up to date"
             case .available: return nil
             case .failed(let why): return "Couldn't check for updates. \(why)"
+            case .deferred(let why): return why
             }
         }
     }
@@ -135,6 +137,9 @@ final class Updater: ObservableObject {
     @Published private(set) var stage: Stage = .none
     /// True while the file is being fetched.
     @Published private(set) var checking = false
+    /// The configured proxy has not opened its route yet. No feed request
+    /// is made in this state; recovery starts a fresh check automatically.
+    @Published private(set) var waitingForConnection = false
     /// When the file was last read, for the line in Settings.
     @Published private(set) var lastChecked: Date?
     @Published private(set) var lastCheckFailure: String?
@@ -156,6 +161,12 @@ final class Updater: ObservableObject {
     /// Where a line goes when there is one to say, handed over at launch.
     private var say: ((String) -> Void)?
     private let fetchFeed: () async throws -> Release
+    private var checkTask: Task<Void, Never>?
+    private var checkID: UUID?
+    private var checkRevision: Int?
+    private var checkCompletion: ((CheckResult) -> Void)?
+    private var routeObservers: [NSObjectProtocol] = []
+    private var retryScheduled = false
 
     private convenience init() {
         self.init(fetchFeed: { try await Updater.fetch() })
@@ -171,6 +182,16 @@ final class Updater: ObservableObject {
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { _ in Swap.sweep() }
+        for name in [Proxy.routeChanged, Proxy.connectionRestored] {
+            routeObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.connectionChanged() }
+            })
+        }
+    }
+
+    deinit {
+        checkTask?.cancel()
+        for observer in routeObservers { NotificationCenter.default.removeObserver(observer) }
     }
 
     /// At launch, then every hour, quietly. A test run, pointed at its own feed,
@@ -223,22 +244,37 @@ final class Updater: ObservableObject {
     /// feed can establish that this is the latest compatible build.
     func check(then done: @escaping (CheckResult) -> Void) {
         guard !checking else { return }
+        if let reason = proxyWaitReason {
+            deferCheck(reason, then: done)
+            return
+        }
+        waitingForConnection = false
+        lastCheckFailure = nil
         checking = true
-        Task { [weak self] in
+        let id = UUID()
+        checkID = id
+        checkRevision = Proxy.routesRevision
+        checkCompletion = done
+        checkTask = Task { [weak self] in
             guard let self else { return }
+            guard checkID == id else { return }
+            if let reason = proxyWaitReason {
+                if let completed = finishCheck(id) { deferCheck(reason, then: completed) }
+                return
+            }
             let found: Release
             do {
                 found = try await fetchFeed()
             } catch {
-                checking = false
+                guard let completed = finishCheck(id) else { return }
                 let why = error.localizedDescription
                 lastCheckFailure = why
                 // Preserve a known available/ready update and the timestamp
                 // of the last successful check when this attempt failed.
-                done(.failed(why))
+                completed(.failed(why))
                 return
             }
-            checking = false
+            guard let completed = finishCheck(id) else { return }
             lastCheckFailure = nil
             lastChecked = Date()
             Store.settings.set(Date(), forKey: lastKey)
@@ -246,10 +282,10 @@ final class Updater: ObservableObject {
                 // A build already swapped in stays ready whatever the feed
                 // says now.
                 if case .ready = stage {} else { stage = .none }
-                done(.upToDate)
+                completed(.upToDate)
                 return
             }
-            done(.available(found))
+            completed(.available(found))
             guard !installsOnItsOwn else { take(found); return }
             switch stage {
             case .fetching, .ready: break
@@ -258,6 +294,56 @@ final class Updater: ObservableObject {
                 stage = .waiting(found)
                 say?("\(Brand.name) \(found.version) is out — choose Install Update in the \(Brand.name) menu")
             }
+        }
+    }
+
+    private var proxyWaitReason: String? {
+        let proxy = Proxy.shared
+        guard proxy.setup.routes else { return nil }
+        let waiting = "Waiting for your proxy connection"
+        guard proxy.setup.complete else { return "\(waiting). Enter its address in Settings › Proxy" }
+        if let issue = proxy.credentialIssue { return "\(waiting). \(issue)" }
+        guard proxy.waiting else { return nil }
+        if case .failed(let reason) = proxy.check { return "\(waiting). \(reason)" }
+        return waiting
+    }
+
+    private func finishCheck(_ id: UUID) -> ((CheckResult) -> Void)? {
+        guard checkID == id else { return nil }
+        let completed = checkCompletion
+        checkID = nil
+        checkRevision = nil
+        checkCompletion = nil
+        checkTask = nil
+        checking = false
+        return completed
+    }
+
+    private func deferCheck(_ reason: String, then done: (CheckResult) -> Void) {
+        waitingForConnection = true
+        lastCheckFailure = nil
+        done(.deferred(reason))
+        connectionChanged()
+    }
+
+    private func connectionChanged() {
+        // Rebuilding the proxy cancels old URLSessions. Retire the attempt
+        // now so its eventual result cannot overwrite a newer route's check.
+        if let id = checkID, checkRevision != Proxy.routesRevision {
+            checkTask?.cancel()
+            if let completed = finishCheck(id) {
+                waitingForConnection = true
+                lastCheckFailure = nil
+                completed(.deferred(proxyWaitReason ?? "The proxy connection changed. Checking again"))
+            }
+        }
+        guard waitingForConnection, !checking, proxyWaitReason == nil, !retryScheduled else { return }
+        retryScheduled = true
+        Task { [weak self] in
+            guard let self else { return }
+            retryScheduled = false
+            guard waitingForConnection, !checking, proxyWaitReason == nil else { return }
+            check { _ in }
         }
     }
 

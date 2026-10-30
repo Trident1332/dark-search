@@ -85,6 +85,60 @@ final class ProxyPersistenceTests: XCTestCase {
         guard case .reached = proxy.check else { return XCTFail("The verified route should be healthy") }
     }
 
+    func testUpdaterDefersUntilRealProxyHealthCheckOpensRouteAndAutomaticallyRetries() async throws {
+        let server = try PersistentProxyFixture(held: true)
+        let port = try await server.start()
+        defer { server.stop() }
+        let proxy = Proxy.shared
+        proxy.automaticTarget = target
+        proxy.take(route(port))
+        XCTAssertTrue(proxy.waiting, "The real startup path must close the route before an updater can fetch")
+
+        let previousInstallPolicy = Store.settings.object(forKey: Updater.installKey)
+        Store.settings.set(false, forKey: Updater.installKey)
+        defer {
+            if let previousInstallPolicy { Store.settings.set(previousInstallPolicy, forKey: Updater.installKey) }
+            else { Store.settings.removeObject(forKey: Updater.installKey) }
+        }
+        let current = Updater.Release(version: "proxy-readiness-fixture", build: Updater.build,
+            archive: URL(string: "https://release-fixture.invalid/Search.zip")!,
+            dmg: URL(string: "https://release-fixture.invalid/Search.dmg")!, sha256: nil, notes: nil,
+            minimumSystemVersion: nil)
+        var loads = 0
+        let updater = Updater(fetchFeed: {
+            loads += 1
+            XCTAssertFalse(proxy.waiting, "No feed request may use the startup placeholder route")
+            XCTAssertFalse(proxy.changingContent, "Recovery must complete before the deferred check resumes")
+            return current
+        })
+        var initialResult: Updater.CheckResult?
+        updater.check { initialResult = $0 }
+        try await until(timeout: 1) { initialResult != nil }
+        guard case .deferred(let reason)? = initialResult else {
+            return XCTFail("A proxy startup wait must return a deferred result, not a DNS failure or a hung check")
+        }
+        XCTAssertTrue(reason.hasPrefix("Waiting for your proxy connection"))
+        XCTAssertTrue(updater.waitingForConnection)
+        XCTAssertFalse(updater.checking)
+        XCTAssertNil(updater.lastCheckFailure)
+        XCTAssertNil(updater.lastChecked)
+        XCTAssertEqual(loads, 0)
+
+        // A held real local health response proves that opening the TCP
+        // listener alone cannot make the updater cross the privacy gate.
+        try await until { server.requests > 0 }
+        XCTAssertTrue(proxy.waiting)
+        XCTAssertEqual(loads, 0)
+        server.release()
+        try await until { !proxy.waiting && updater.lastChecked != nil }
+        XCTAssertEqual(loads, 1, "Real proxy recovery must retry the deferred check exactly once")
+        XCTAssertFalse(updater.waitingForConnection)
+        XCTAssertFalse(updater.checking)
+        XCTAssertNil(updater.lastCheckFailure)
+        XCTAssertEqual(updater.stage, .none)
+        guard case .reached = proxy.check else { return XCTFail("The local health response must establish the route") }
+    }
+
     func testMissingTimeZoneKeepsPersistentRouteClosed() async throws {
         let server = try PersistentProxyFixture(timeZone: nil)
         let port = try await server.start()

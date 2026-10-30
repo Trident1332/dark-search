@@ -171,8 +171,8 @@ final class ExtensionProtectionTests: XCTestCase {
         """)
         XCTAssertNil(js.exception?.toString())
         XCTAssertEqual(js.evaluateScript("errors.length")?.toInt32(), 16)
-        XCTAssertEqual(js.evaluateScript("errors.every(e => typeof e === 'string' && e.includes(\"isn't available in Search\"))")?.toBool(), true)
-        XCTAssertEqual(js.evaluateScript("rejection")?.toString(), "contentSettings.cookies.set isn't available in Search")
+        XCTAssertEqual(js.evaluateScript("errors.every(e => typeof e === 'string' && e.includes(\"isn't available in \(Brand.name)\"))")?.toBool(), true)
+        XCTAssertEqual(js.evaluateScript("rejection")?.toString(), "contentSettings.cookies.set isn't available in \(Brand.name)")
         XCTAssertEqual(js.evaluateScript("runtime.lastError === undefined")?.toBool(), true)
     }
 }

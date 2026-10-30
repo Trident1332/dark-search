@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 @testable import Search
 
-/// Every child is a temporary synthetic Python fixture. No Tor client,
+/// Every child is a temporary synthetic process fixture. No Tor client,
 /// relay, real proxy account or saved browser profile is contacted.
 @MainActor
 final class TorRuntimeTests: XCTestCase {
@@ -155,15 +155,19 @@ final class TorRuntimeTests: XCTestCase {
 
     func testBootstrapTimeoutStopsChildAndReportsBoundedError() async throws {
         let fixture = try FakeTor()
-        // Include interpreter startup on a busy Mac; the fixture still
-        // never emits bootstrap completion and must be killed at the limit.
+        // The timeout measures a child that has actually started, rather
+        // than Python's import time while other WebKit tests are running.
+        try fixture.stallBeforeBootstrap()
         let runtime = fixture.runtime(timeout: 1.5)
         defer { runtime.stop(); fixture.remove() }
-        do { _ = try await runtime.start(); XCTFail("A listening client cannot substitute for bootstrap") }
+        let connection = Task { try await runtime.start() }
+        try await until { runtime.phase == .starting(progress: 37) }
+        let pid = try fixture.processID()
+        XCTAssertEqual(kill(pid, 0), 0, "The synthetic listener must be alive before bootstrap times out")
+        do { _ = try await connection.value; XCTFail("A listening client cannot substitute for bootstrap") }
         catch let error as TorRuntime.Failure { XCTAssertTrue(error.message.contains("finish connecting")) }
         XCTAssertFalse(runtime.isReady)
         XCTAssertNil(runtime.port)
-        let pid = try fixture.processID()
         try await until { kill(pid, 0) != 0 }
     }
 
@@ -260,6 +264,20 @@ private final class FakeTor {
 
     func runtime(timeout: TimeInterval = 4) -> TorRuntime {
         TorRuntime(executableURL: script, dataFolder: data, bootstrapTimeout: timeout)
+    }
+
+    /// Only shell builtins run before exec, so even a loaded test machine
+    /// records the same PID and announces startup without Python imports.
+    func stallBeforeBootstrap() throws {
+        let quotedPID = "'" + pid.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let program = """
+        #!/bin/sh
+        printf '%s' "$$" > \(quotedPID)
+        printf '%s\\n' 'Oct 29 12:00:00.000 [notice] Socks listener listening on port \(Self.port).' 'Oct 29 12:00:00.001 [notice] Bootstrapped 37% (loading_descriptors): Loading relay descriptors'
+        exec /bin/sleep 60
+        """
+        try program.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
     }
 
     func release() throws { try Data().write(to: releaseFile) }

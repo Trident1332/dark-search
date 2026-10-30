@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import WebKit
 
 // A window, a row of titles, and a field. Typing an address gets you a page;
 // there is nothing else to learn and nothing else to press.
@@ -1203,7 +1204,7 @@ struct ContentView: View {
             }
             // A key typed while the field is on its way is the field's (holdKey),
             // Escape in a full-screen window included.
-            if browser.holdKey(event) { return nil }
+            if refocusNewTab(event) || browser.holdKey(event) { return nil }
             // Escape in this window while it is itself in macOS full screen
             // (the green button, ⌃⌘F). Nothing in Search wanting it, it went
             // on through the page to AppKit, which takes the window out of
@@ -1224,7 +1225,43 @@ struct ContentView: View {
             }
             return take(event) ? nil : event
         }
-        ContentView.keyHooks[id] = { event in take(event) ? nil : event }
+        ContentView.keyHooks[id] = { event in
+            refocusNewTab(event) || browser.holdKey(event) || take(event) ? nil : event
+        }
+    }
+
+    /// Clicking the empty page lets go of its field. The next typed key
+    /// brings the caret back and is held for the native editor, so even
+    /// the first letter goes through the normal text-input path.
+    private func refocusNewTab(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown, let window, event.window === window,
+              browser.active?.isBlank == true, browser.fieldShowing,
+              !browser.welcoming, !browser.newsShowing, !browser.reviewing,
+              !browser.bookmarksOpen, !browser.makingSpace, !browser.menuShown,
+              !browser.tabSwitcher.active, browser.peekTab == nil,
+              browser.editingTab == nil, browser.editingPin == nil,
+              browser.asking == nil, browser.offering == nil, browser.suggesting == nil,
+              window.attachedSheet == nil, NSApp.modalWindow == nil,
+              !ShortcutStore.shared.recording,
+              event.modifierFlags.intersection([.command, .control, .function]).isEmpty
+        else { return false }
+        // An Option dead key has no characters until the next key composes
+        // it. Give the original event to the editor in that case too.
+        let characters = event.characters ?? ""
+        let text = characters.isEmpty && event.modifierFlags.contains(.option)
+            ? event.charactersIgnoringModifiers ?? "" : characters
+        guard !text.isEmpty, text.unicodeScalars.allSatisfy({
+            !CharacterSet.controlCharacters.contains($0) && !(0xf700...0xf747).contains($0.value)
+        }) else { return false }
+        // Another native field, a page or a side-panel editor keeps its
+        // own keyboard, even when the selected browser tab is empty.
+        var responder = window.firstResponder as? NSView
+        while let view = responder {
+            if view is NSTextView || view is NSTextField || view is WKWebView { return false }
+            responder = view.superview
+        }
+        browser.askFocus()
+        return browser.holdKey(event)
     }
 
     /// Each browser's key monitor. Kept here rather than in the view, so

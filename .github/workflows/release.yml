@@ -88,6 +88,8 @@ jobs:
           codesign --verify \
             -R="identifier \"com.officecommun.search.appcast\" and certificate leaf = H\"$SIGNER\"" "$CHECK/appcast.json"
           cmp build/appcast.json "$CHECK/appcast.json"
+          python3 -m unittest discover -s Tests -p test_release_assets.py
+          python3 scripts/check-release-assets.py build/appcast.json
           cat build/appcast.json
 
       - name: Publish
@@ -106,3 +108,6 @@ jobs:
             --notes-file "$RUNNER_TEMP/notes.md" \
             --target "$GITHUB_SHA" \
             --latest
+
+      - name: Check published downloads
+        run: python3 scripts/check-release-assets.py build/appcast.json --live

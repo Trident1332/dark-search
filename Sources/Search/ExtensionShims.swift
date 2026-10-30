@@ -1,4 +1,5 @@
 import AppKit
+import CoreFoundation
 import WebKit
 import Combine
 import NaturalLanguage
@@ -3901,7 +3902,25 @@ enum ExtensionShims {
         "power": "power",
         "tts": "tts",
         "tabGroups": "tabGroups",
+        "fontSettings": "fontSettings",
+        "system.cpu": "system.cpu",
+        "system.memory": "system.memory",
+        "system.storage": "system.storage",
+        "system.display": "system.display",
     ]
+
+    /// JavaScript arguments reach this dispatcher without a schema. Check
+    /// integer types and Chrome's signed 32-bit range before using one as a
+    /// collection count or a one-based identifier: Swift's preconditions
+    /// and arithmetic traps cannot become an extension API error afterward.
+    private static func integer(_ value: Any?, named name: String, minimum: Int = 0, default fallback: Int? = nil) throws -> Int {
+        if value == nil, let fallback { return fallback }
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              let result = value as? Int, result >= minimum, result <= Int(Int32.max) else {
+            throw Unsupported(what: "\(name) must be an integer between \(minimum) and \(Int32.max)")
+        }
+        return result
+    }
 
     /// What this extension asked for: the names in its manifest and any
     /// optional ones granted since. The checks inside the shim are a
@@ -3986,7 +4005,10 @@ enum ExtensionShims {
         if api == "tabs.describe", !context.hasPermission(.tabs) {
             throw Unsupported(what: "The extension never asked for \u{201C}tabs\u{201D}")
         }
-        if let needed = gates[String(api.prefix(while: { $0 != "." }))], !allowed(id, context: context).contains(needed) {
+        // System APIs have separate permissions for each namespace; a CPU
+        // grant must not authorize display or memory enumeration.
+        if let needed = gates.first(where: { api.hasPrefix($0.key + ".") })?.value,
+           !allowed(id, context: context).contains(needed) {
             throw Unsupported(what: "The extension never asked for \u{201C}\(needed)\u{201D}")
         }
 
@@ -4010,7 +4032,7 @@ enum ExtensionShims {
                 find(key, in: browser.bookmarks.roots).map { node($0.node, parent: $0.parent, index: $0.index, deep: false) }
             }
         case "bookmarks.getRecent":
-            let count = (first as? Int) ?? 10
+            let count = try integer(first, named: "numberOfItems", minimum: 1, default: 10)
             return flat(browser.bookmarks.roots).filter { !$0.node.isFolder }.suffix(count).reversed()
                 .map { node($0.node, parent: $0.parent, index: $0.index, deep: false) }
         case "bookmarks.search":
@@ -4062,7 +4084,7 @@ enum ExtensionShims {
             let start = (spec["startTime"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
                 ?? Date().addingTimeInterval(-24 * 3600)
             let end = (spec["endTime"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) } ?? .distantFuture
-            let limit = spec["maxResults"] as? Int ?? 100
+            let limit = try integer(spec["maxResults"], named: "maxResults", default: 100)
             return browser.history.everything(matching: text)
                 .filter { !OnionAddress.isOnion($0.url) && $0.last >= start && $0.last <= end }
                 .sorted { $0.last > $1.last }
@@ -4123,7 +4145,8 @@ enum ExtensionShims {
                  "startTime": ISO8601DateFormatter().string(from: keep.date), "mime": ""] as [String: Any]
             }
         case "downloads.open", "downloads.show":
-            guard let index = first as? Int, browser.loot.kept.indices.contains(index - 1) else { return nil }
+            let index = try integer(first, named: "downloadId", minimum: 1)
+            guard index <= browser.loot.kept.count else { throw Unsupported(what: "No download with id: \(index)") }
             let keep = browser.loot.kept[index - 1]
             if api == "downloads.open" {
                 // As in Chrome, opening asks for its own permission; and only

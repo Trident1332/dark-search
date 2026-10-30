@@ -12,7 +12,7 @@ import WebKit
 // arrives, which is a second or so.
 
 @MainActor
-final class Favicons {
+final class Favicons: NSObject {
     static let shared = Favicons()
 
     /// Called with a site whenever one of its pages gets an icon, so every
@@ -47,6 +47,8 @@ final class Favicons {
 
     private var memory: [String: NSImage] = [:]
     private var busy: Set<String> = []
+    private let requested = NSHashTable<Tab>.weakObjects()
+    private var routeGeneration = 0
     private var missing: Set<String> = []
     /// Icon addresses that came back with nothing usable this session.
     private var failed: Set<URL> = []
@@ -67,6 +69,24 @@ final class Favicons {
     private static var folder: URL { Store.folder.appendingPathComponent("icons", isDirectory: true) }
     private static var index: URL { folder.appendingPathComponent("pages.json") }
     private static let disk = DispatchQueue(label: "Favicons.disk", qos: .utility)
+
+    override init() {
+        super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(routeChanged), name: Proxy.contentChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(routeChanged), name: Proxy.connectionRestored, object: nil)
+    }
+
+    @objc private func routeChanged() {
+        routeGeneration += 1
+        busy.removeAll()
+        missing.removeAll()
+        failed.removeAll()
+        unreachable.removeAll()
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return }
+        for tab in requested.allObjects where tab.built != nil && !tab.asleep {
+            fetch(for: tab)
+        }
+    }
 
     /// Clear History: every icon kept on disk goes. The tabs open now keep
     /// theirs until they are closed.
@@ -341,6 +361,8 @@ final class Favicons {
         guard !tab.usesTor, let url = tab.address, !OnionAddress.isOnion(url), let site = Favicons.site(url),
               url.scheme?.hasPrefix("http") == true
         else { return }
+        requested.add(tab)
+        guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return }
         load()
 
         let page = Favicons.page(url)
@@ -354,19 +376,34 @@ final class Favicons {
         let busyKey = site + page
         guard !busy.contains(busyKey), changed || !missing.contains(busyKey) else { return }
         busy.insert(busyKey)
+        let generation = routeGeneration
 
         let web = tab.web
         web.evaluateJavaScript(Favicons.probe) { [weak self, weak tab, weak web] answer, _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                guard self.routeGeneration == generation else { return }
                 guard let tab, let web, tab.built === web, tab.address == url, !tab.usesTor else {
                     self.busy.remove(busyKey)
                     return
                 }
                 let declared = (answer as? [[String: String]]) ?? []
                 let candidates = Favicons.rank(declared, page: url, dark: dark)
+                if changed {
+                    for candidate in candidates {
+                        self.failed.remove(candidate)
+                        self.unreachable[candidate] = nil
+                    }
+                }
                 let shy = tab.shy
-                Task { await self.download(candidates, site: site, page: page, dark: dark, shy: shy) }
+                let store = web.configuration.websiteDataStore
+                Task {
+                    let cookies: [HTTPCookie] = await withCheckedContinuation { done in
+                        store.httpCookieStore.getAllCookies { done.resume(returning: $0) }
+                    }
+                    await self.download(candidates, site: site, page: page, dark: dark, shy: shy,
+                                        origin: url, cookies: cookies, generation: generation, refresh: changed)
+                }
             }
         }
     }
@@ -383,32 +420,49 @@ final class Favicons {
         return .any
     }
 
-    private func download(_ candidates: [URL], site: String, page: String, dark: Bool, shy: Bool, again: Bool = true) async {
+    private func download(_ candidates: [URL], site: String, page: String, dark: Bool, shy: Bool,
+                          origin: URL, cookies: [HTTPCookie], generation: Int, refresh: Bool, again: Bool = true) async {
+        guard generation == routeGeneration else { return }
         let busyKey = site + page
-        defer { busy.remove(busyKey) }
+        defer { if generation == routeGeneration { busy.remove(busyKey) } }
+        let requests = FaviconRequests(origin: origin, cookies: cookies)
         let session = Proxy.makeSession(configuration: {
             // Through Settings › Proxy's route when pages take it: an icon
             // fetched directly would name the site to the network.
             let config = Proxy.session(URLSessionConfiguration.ephemeral)
             config.timeoutIntervalForRequest = 8
+            config.timeoutIntervalForResource = 15
+            config.httpCookieStorage = nil
+            config.httpShouldSetCookies = false
+            config.urlCredentialStorage = nil
             return config
-        }())
+        }(), delegate: requests)
+        defer { session.invalidateAndCancel() }
         var unanswered: [URL] = []
         var asked = false
         for candidate in candidates where !failed.contains(candidate) && !OnionAddress.isOnion(candidate) {
             if let until = unreachable[candidate], until > Date() { continue }
             let ident = Favicons.ident(candidate)
             // Another page of the site wears the same file, and it is fresh.
-            if !shy, Favicons.fresh(ident), let image = known(ident) {
+            if !refresh, !shy, Favicons.fresh(ident), let image = known(ident) {
                 wear(ident, image, site: site, page: page, dark: dark, shy: shy)
                 return
             }
             asked = true
             // No answer at all is the network, not the site.
-            guard let (data, response) = try? await session.proxyData(from: candidate) else {
-                unanswered.append(candidate)
+            let data: Data, response: URLResponse
+            do {
+                (data, response) = try await requests.data(for: candidate, in: session)
+            } catch {
+                guard generation == routeGeneration else { return }
+                if (error as? URLError)?.code == .dataLengthExceedsMaximum {
+                    failed.insert(candidate)
+                } else {
+                    unanswered.append(candidate)
+                }
                 continue
             }
+            guard generation == routeGeneration else { return }
             guard (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
                   data.count > 60, data.count < 2_000_000
             else {
@@ -422,6 +476,7 @@ final class Favicons {
                let png = await SVGIcons.shared.png(from: data) {
                 decoded = await Favicons.square(png)
             }
+            guard generation == routeGeneration else { return }
             guard let image = decoded else {
                 failed.insert(candidate)
                 continue
@@ -439,8 +494,10 @@ final class Favicons {
         if !unanswered.isEmpty {
             if again {
                 try? await Task.sleep(for: .seconds(3))
-                await download(candidates, site: site, page: page, dark: dark, shy: shy, again: false)
+                await download(candidates, site: site, page: page, dark: dark, shy: shy,
+                               origin: origin, cookies: cookies, generation: generation, refresh: refresh, again: false)
             } else {
+                guard generation == routeGeneration else { return }
                 for candidate in unanswered { unreachable[candidate] = Date() + Favicons.backoff }
             }
             return
@@ -623,6 +680,139 @@ final class Favicons {
     """
 }
 
+/// A favicon on the page's own origin may require its sign-in cookie.
+/// Keep that context local to this request; CDN icons and redirects to
+/// other origins must not receive the page's cookies.
+private final class FaviconRequests: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let origin: URL
+    private let jar: HTTPCookieStorage?
+    private static let limit = 2_000_000
+    private final class Transfer {
+        let done: CheckedContinuation<(Data, URLResponse), Error>
+        var response: URLResponse?
+        var data = Data()
+        init(done: CheckedContinuation<(Data, URLResponse), Error>) { self.done = done }
+    }
+    private let lock = NSLock()
+    private var transfers: [Int: Transfer] = [:]
+
+    /// Cancel the native task even if cancellation arrives before its
+    /// continuation installs it. URLSession delivers completion to the
+    /// delegate, which owns and resumes the continuation exactly once.
+    private final class Cancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: URLSessionTask?
+        private var cancelled = false
+        func install(_ task: URLSessionTask) {
+            let cancel = lock.withLock { self.task = task; return cancelled }
+            if cancel { task.cancel() }
+        }
+        func cancel() {
+            let task = lock.withLock { cancelled = true; return self.task }
+            task?.cancel()
+        }
+    }
+
+    init(origin: URL, cookies: [HTTPCookie]) {
+        self.origin = origin
+        jar = URLSessionConfiguration.ephemeral.httpCookieStorage
+        super.init()
+        jar?.setCookies(cookies, for: origin, mainDocumentURL: origin)
+    }
+
+    /// Keep no more than one small icon in memory. Reject a declared large
+    /// response before accepting its body, and stop chunked or compressed
+    /// responses as soon as their delivered bytes reach the same cap.
+    func data(for url: URL, in session: URLSession) async throws -> (Data, URLResponse) {
+        let cancellation = Cancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { done in
+                let task = session.dataTask(with: scoped(URLRequest(url: url)))
+                lock.withLock { transfers[task.taskIdentifier] = Transfer(done: done) }
+                cancellation.install(task)
+                task.resume()
+            }
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
+
+    private func finish(_ task: URLSessionTask, error: Error?) {
+        guard let transfer = lock.withLock({ transfers.removeValue(forKey: task.taskIdentifier) }) else { return }
+        if let error {
+            transfer.done.resume(throwing: error)
+        } else if let response = transfer.response {
+            transfer.done.resume(returning: (transfer.data, response))
+        } else {
+            transfer.done.resume(throwing: URLError(.badServerResponse))
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard response.expectedContentLength < Int64(Self.limit) else {
+            finish(dataTask, error: URLError(.dataLengthExceedsMaximum))
+            completionHandler(.cancel)
+            return
+        }
+        lock.withLock { transfers[dataTask.taskIdentifier]?.response = response }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        let oversized = lock.withLock { () -> Bool in
+            guard let transfer = transfers[dataTask.taskIdentifier] else { return false }
+            guard data.count < Self.limit - transfer.data.count else { return true }
+            transfer.data.append(data)
+            return false
+        }
+        if oversized {
+            dataTask.cancel()
+            finish(dataTask, error: URLError(.dataLengthExceedsMaximum))
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error { Proxy.authenticationError(error, in: session) }
+        finish(task, error: error)
+    }
+
+    private func scoped(_ request: URLRequest) -> URLRequest {
+        var request = request
+        request.httpShouldHandleCookies = false
+        request.setValue(nil, forHTTPHeaderField: "Cookie")
+        if let url = request.url, Self.sameOrigin(origin, url), let cookies = jar?.cookies(for: url), !cookies.isEmpty {
+            request.setValue(HTTPCookie.requestHeaderFields(with: cookies)["Cookie"], forHTTPHeaderField: "Cookie")
+        }
+        return request
+    }
+
+    private static func sameOrigin(_ a: URL, _ b: URL) -> Bool {
+        func port(_ url: URL) -> Int? { url.port ?? (url.scheme?.lowercased() == "https" ? 443 : 80) }
+        return a.scheme?.lowercased() == b.scheme?.lowercased() && a.host()?.lowercased() == b.host()?.lowercased()
+            && port(a) == port(b)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(scoped(request))
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if !Proxy.authenticate(challenge, in: session, completionHandler: completionHandler) {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if !Proxy.authenticate(challenge, in: session, completionHandler: completionHandler) {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
+
 /// What stands for a page when there is no room for its title: the site's
 /// icon if there is one, and a letter in a faint square until there is.
 struct Mark: View {
@@ -679,13 +869,17 @@ final class IconRelay: NSObject, WKScriptMessageHandler {
         guard message.frameInfo.isMainFrame else { return }
         MainActor.assumeIsolated {
             guard let tab, tab.built === message.webView else { return }
-            Favicons.shared.fetch(for: tab, changed: true)
+            let changed = message.body as? Bool ?? true
+            Favicons.shared.fetch(for: tab, changed: changed || tab.icon == nil)
         }
     }
 
     static let script = """
     (function () {
       if (window.top !== window || !document.head) return;
+      // DocumentEnd has the icon declarations already. Waiting for load
+      // also waits for every advert, video and slow frame on the page.
+      try { webkit.messageHandlers.officeIcon.postMessage(false); } catch (e) {}
       var timer = null, last = 0;
       var icon = function (n) {
         return n && n.nodeType === 1 && n.tagName === 'LINK' && /icon/i.test(n.getAttribute('rel') || '');
@@ -701,7 +895,7 @@ final class IconRelay: NSObject, WKScriptMessageHandler {
         clearTimeout(timer);
         timer = setTimeout(function () {
           last = Date.now();
-          try { webkit.messageHandlers.officeIcon.postMessage(1); } catch (e) {}
+          try { webkit.messageHandlers.officeIcon.postMessage(true); } catch (e) {}
         }, Math.max(500, 2000 - (Date.now() - last)));
       }).observe(document.head, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'rel', 'media'] });
     })();

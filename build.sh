@@ -432,12 +432,15 @@ write_appcast() {
   ln "$ZIP" "$OUT/Search.zip"
   ln "$DMG" "$OUT/Search.dmg"
   write_engine
+  # These aliases keep their exact names on both GitHub and the website.
+  # GitHub replaces spaces in uploaded names, so the branded local names
+  # cannot be used as URL paths in a release feed.
   cat > "$OUT/appcast.json" <<JSON
 {
   "version": "$VERSION",
   "build": $BUILD,
-  "url": "$BASE/Dark%20Search.zip",
-  "dmg": "$BASE/Dark%20Search.dmg",
+  "url": "$BASE/Search.zip",
+  "dmg": "$BASE/Search.dmg",
   "sha256": "$SHA",
   "dmgSha256": "$DMGSHA",
   "notes": "$NOTES",
