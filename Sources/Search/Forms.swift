@@ -162,13 +162,44 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
         return true;
       }
 
+      // Keep the discovery query until input nodes or their types change.
+      // Unrelated chat animations can otherwise search the whole document
+      // four times a second, even when it has no password fields at all.
+      var passwordBoxes = null, mutationWatch = null;
+      function hasPasswordNode(node) {
+        return node && node.nodeType === 1 &&
+          (node.matches('input[type="password"]') || !!node.querySelector('input[type="password"]'));
+      }
+      function changedPasswordNodes(records) {
+        for (var i = 0; i < records.length; i++) {
+          var record = records[i];
+          if (record.type === 'attributes') {
+            if (record.attributeName === 'type' && (record.target.tagName || '').toLowerCase() === 'input') { passwordBoxes = null; return; }
+            continue;
+          }
+          var added = record.addedNodes, removed = record.removedNodes;
+          for (var a = 0; a < added.length; a++) {
+            if (hasPasswordNode(added[a])) { passwordBoxes = null; return; }
+          }
+          for (var r = 0; r < removed.length; r++) {
+            if (hasPasswordNode(removed[r])) { passwordBoxes = null; return; }
+          }
+        }
+      }
+
       // The password box, and the last box before it that could hold a name.
       function pair() {
-        var boxes = document.querySelectorAll('input[type="password"]');
+        // Native queries can run before MutationObserver's microtask. Drain
+        // pending changes first so a newly inserted/retyped field is current.
+        if (mutationWatch) {
+          var pending = mutationWatch.takeRecords();
+          if (pending.length) { changedPasswordNodes(pending); queueLook(); }
+        }
+        var boxes = passwordBoxes || (passwordBoxes = document.querySelectorAll('input[type="password"]'));
         var pass = null;
         for (var p = 0; p < boxes.length; p++) {
           var b = boxes[p];
-          if (available(b)) { pass = b; break; }
+          if (b.isConnected && (b.type || '').toLowerCase() === 'password' && available(b)) { pass = b; break; }
         }
         if (!pass) return null;
         var scope = pass.form || (pass.closest && pass.closest('form')) || document;
@@ -275,7 +306,9 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       // The name box of a sign-in that asks for the password on the next
       // page: "wide", "exact" (only this host's accounts), or nothing.
       function firstStep(el) {
-        if (!texty(el) || aside(el) || elsewhere(el) || !claimsName(el)) return null;
+        // Reject ordinary composers before their visibility needs geometry.
+        if (!el || (el.tagName || '').toLowerCase() !== 'input' ||
+            aside(el) || elsewhere(el) || !claimsName(el) || !texty(el)) return null;
         var scope = el.form || (el.closest && el.closest('form')) || document;
         if (otherForm.test(about(scope)) || otherPage.test(location.pathname.toLowerCase())) return null;
         var all = scope.querySelectorAll('input'), others = 0;
@@ -290,7 +323,9 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       function newPassword(el) { return tokens(el).indexOf('new-password') >= 0; }
       // What a box the caret is in is offered: null for nothing.
       function judge(el) {
-        if (!el || (el.tagName || '').toLowerCase() !== 'input' || !available(el)) return null;
+        if (!el || (el.tagName || '').toLowerCase() !== 'input') return null;
+        if ((el.type || '').toLowerCase() !== 'password' && (aside(el) || elsewhere(el))) return null;
+        if (!available(el)) return null;
         var both = pair();
         if (both) {
           if (el === both.pass) return newPassword(el) ? null : { name: false, wide: true };
@@ -526,7 +561,7 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
         looking = null;
         // Keep the existing quarter-second debounce. A stream of page
         // mutations must not scan all sign-in fields on every change.
-        caret();
+        caret(false, true);
         var both = pair();
         if (both) { tellPair(both); return; }
         if (!told) return;
@@ -538,9 +573,14 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
           window.webkit.messageHandlers.officeForms.postMessage({ kind: 'settled' });
         }, 400);
       }
-      new MutationObserver(function () {
+      function queueLook() {
         if (!looking) looking = setTimeout(look, 250);
-      }).observe(document.documentElement, {
+      }
+      mutationWatch = new MutationObserver(function (records) {
+        changedPasswordNodes(records);
+        queueLook();
+      });
+      mutationWatch.observe(document.documentElement, {
         childList: true, subtree: true, attributes: true,
         attributeFilter: ['style', 'class', 'hidden', 'inert', 'disabled', 'readonly', 'type', 'autocomplete']
       });
@@ -572,7 +612,7 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
 
       // What was last said, so a scroll can keep quiet when nothing moved
       // that anyone is listening for.
-      var said = null;
+      var said = null, saidElement = null, saidLeaf = null;
       var inactive = false;
       // A box the page says takes a passkey: autocomplete="username webauthn".
       function forPasskeys(el) {
@@ -581,12 +621,31 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       }
       // What the box the caret is in was judged to be: judged again when the
       // caret moves, not on every frame of a scroll, which only moves it.
-      var judged = { el: null, verdict: null };
-      function caret(scrolled) {
+      var judged = { el: null, leaf: null, verdict: null };
+      function activeLeaf(el) {
+        // A same-origin chat frame can keep outer focus while its own caret
+        // moves. Reading the active node does not ask WebKit for layout.
+        for (var depth = 0; el && (el.tagName || '').toLowerCase() === 'iframe' && depth < 16; depth++) {
+          try {
+            var inside = el.contentDocument && el.contentDocument.activeElement;
+            if (!inside || inside === el) break;
+            el = inside;
+          } catch (e) { break; }
+        }
+        return el;
+      }
+      function caret(scrolled, quiet) {
         var el = inactive ? null : document.activeElement;
+        var leaf = activeLeaf(el);
+        // There is no account row to position for an ordinary editor. Keep
+        // its typing state during scrolling without synchronously laying out
+        // a large chat on every animation frame. Mutation/lifecycle/resize
+        // callbacks still revalidate availability; frame focus is rechecked.
+        if (scrolled === true && judged.el === el && judged.leaf === leaf &&
+            !judged.verdict && !forPasskeys(el)) return;
         // The boxes are only looked for with the caret in one: this runs on
         // every frame of every scroll, and looking goes through the whole page.
-        if (scrolled !== true || judged.el !== el) judged = { el: el, verdict: judge(el) };
+        if (scrolled !== true || judged.el !== el || judged.leaf !== leaf) judged = { el: el, leaf: leaf, verdict: judge(el) };
         var verdict = judged.verdict;
         var rect = null;
         // A first step's name box: the accounts hang from it as from a
@@ -600,8 +659,13 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
         }
         var typing = editable(el);
         var now = typing + (rect ? ' ' + passwords + ' ' + name + ' ' + wide + ' ' + rect.x + ' ' + rect.y + ' ' + rect.w + ' ' + rect.h : '');
-        if (scrolled === true && now === said) return;
+        // Explicit focus/history/activation events must reannounce after
+        // native code clears its account row. Only passive refreshes dedupe,
+        // and a replacement field with identical geometry is still new.
+        if ((scrolled === true || quiet === true) && now === said && saidElement === el && saidLeaf === leaf) return;
         said = now;
+        saidElement = el;
+        saidLeaf = leaf;
         window.webkit.messageHandlers.officeForms.postMessage({
           kind: 'focus',
           typing: typing,
@@ -616,11 +680,17 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
       // whatever hangs from it has to move too. Once a frame at most, and
       // only when something did change: with the caret nowhere near a sign-in,
       // every frame of every scroll used to send the same answer again.
-      var moving = false;
-      function moved() {
+      var moving = false, resized = false;
+      function moved(event) {
+        if (event && event.type === 'resize') resized = true;
         if (moving) return;
         moving = true;
-        requestAnimationFrame(function () { moving = false; caret(true); });
+        requestAnimationFrame(function () {
+          moving = false;
+          var recheck = resized;
+          resized = false;
+          caret(!recheck, true);
+        });
       }
       window.addEventListener('scroll', moved, true);
       window.addEventListener('resize', moved);
