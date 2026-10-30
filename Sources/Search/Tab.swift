@@ -2381,6 +2381,10 @@ final class PageView: WKWebView {
     /// page in it itself; Search adding them again showed each one twice.
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
+        // Opening in this tab is already a normal click on the link.
+        for item in menu.items where item.identifier?.rawValue == "WKMenuItemIdentifierOpenLink" {
+            menu.removeItem(item)
+        }
         // Call <number>, first, when the right-click landed on one and the
         // dialer is on (see DialMenu.swift).
         addCallItem(to: menu)
