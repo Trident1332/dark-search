@@ -54,9 +54,18 @@ final class Assistant: ObservableObject, Identifiable {
     private var task: Task<Void, Never>?
     private var connection: OpenCodeAI.Connection?
     private var consentKey: String?
+    private weak var sourceTab: Tab?
+    @Published private(set) var inspectEnabled = false
+    @Published private(set) var inspectionBusy = false
+    @Published private(set) var inspectionSnapshot: AIInspectionSnapshot?
+    @Published private(set) var inspectionProblem: String?
+    private var inspectionTask: Task<Void, Never>?
+    var inspection: AIInspection? { sourceTab?.aiInspection }
+
 
     init(tab: Tab, provider: AIProvider, model: String, summary: Bool, selection: String? = nil, standalone: Bool = false) {
         self.tab = tab.id
+        self.sourceTab = tab
         self.sourceURL = tab.pageAddress
         self.standalone = standalone
         self.provider = provider
@@ -84,15 +93,16 @@ final class Assistant: ObservableObject, Identifiable {
             self.context = read
             self.addressed = read?.addressed ?? false
             self.reading = false
+            self.inspectEnabled = tab.aiInspection.recording
             guard self.context != nil else {
                 self.trouble = "There's nothing on this page to read."
                 return
             }
-            if summary { self.ask(.summary) }
+            if summary { if self.inspectEnabled { self.captureForQuestion(.summary) } else { self.ask(.summary) } }
         }
     }
 
-    var busy: Bool { reading || turns.last.map { !$0.done } ?? false }
+    var busy: Bool { inspectionBusy || reading || turns.last.map { !$0.done } ?? false }
 
     var pendingQuestion: String? {
         guard case .question(let question) = waiting else { return nil }
@@ -109,13 +119,67 @@ final class Assistant: ObservableObject, Identifiable {
         let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, !busy, notice == nil, context != nil else { return }
         draft = ""
-        ask(.question(String(question.prefix(2000))))
+        let ask = AIPage.Ask.question(String(question.prefix(2000)))
+        if inspectEnabled {
+            captureForQuestion(ask)
+        } else { self.ask(ask) }
     }
 
     func submitSuggestion(_ question: String) {
         guard !busy, notice == nil, context != nil else { return }
         draft = question
         submit()
+    }
+
+    func setInspection(_ enabled: Bool) {
+        guard !standalone, !enabled || (!busy && notice == nil) else { return }
+        inspectionTask?.cancel(); inspectionTask = nil
+        if !enabled {
+            inspectionBusy = false
+            cancelAnswer()
+            inspectEnabled = false; inspectionSnapshot = nil; inspectionProblem = nil
+            sourceTab?.aiInspection.stop()
+            return
+        }
+        guard provider != .thisMac else {
+            inspectionProblem = "Choose OpenCode or another provider with tool support to let AI read inspection data."
+            return
+        }
+        guard let sourceTab else { return }
+        inspectionBusy = true
+        inspectionTask = Task { [weak self, weak sourceTab] in
+            guard let self, let sourceTab else { return }
+            await sourceTab.aiInspection.start(in: sourceTab)
+            guard !Task.isCancelled else { return }
+            self.inspectEnabled = sourceTab.aiInspection.recording
+            if self.inspectEnabled {
+                do { self.inspectionSnapshot = try await sourceTab.aiInspection.snapshot() }
+                catch { self.inspectionProblem = error.localizedDescription }
+            } else { self.inspectionProblem = sourceTab.aiInspection.problem }
+            self.inspectionBusy = false
+        }
+    }
+    func refreshInspection() {
+        guard inspectEnabled, !busy else { return }
+        captureForQuestion(nil)
+    }
+    private func captureForQuestion(_ question: AIPage.Ask?) {
+        guard let inspection else { return }
+        inspectionBusy = true; inspectionProblem = nil
+        inspectionTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let snapshot = try await inspection.snapshot()
+                guard !Task.isCancelled else { return }
+                self.inspectionSnapshot = snapshot
+                self.inspectionBusy = false
+                if let question { self.ask(question) }
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.inspectionBusy = false; self.inspectionProblem = error.localizedDescription
+                if case .question(let text) = question { self.draft = text }
+            }
+        }
     }
 
     private func ask(_ ask: AIPage.Ask) {
@@ -171,8 +235,11 @@ final class Assistant: ObservableObject, Identifiable {
         let system = standalone ? "You are a helpful assistant. Answer the person directly in plain text. You have no access to their tabs, files or device. Distinguish uncertain claims from facts." : AIPage.system(fence: fence)
         let stream = provider == .thisMac
             ? AIEngine.shared.stream(system: system, messages: messages)
-            : AIClient.shared.stream(provider, model: model, system: system, messages: messages, key: key,
-                                     connection: connection)
+            : inspectEnabled && inspectionSnapshot != nil
+                ? AIClient.shared.inspect(provider, model: model, system: system, messages: messages, key: key,
+                                          connection: connection, snapshot: inspectionSnapshot!, live: inspection!)
+                : AIClient.shared.stream(provider, model: model, system: system, messages: messages, key: key,
+                                         connection: connection)
         connection = nil
         let turnID = turns[turns.count - 1].id
         task = Task { @MainActor [weak self] in
@@ -200,7 +267,7 @@ final class Assistant: ObservableObject, Identifiable {
         turn.failed = failed
         turns[turns.count - 1] = turn
         // Checked away from the window's thread: a long answer is a long look.
-        let id = turn.id, answer = turn.answer, standalone = self.standalone
+        let id = turn.id, answer = turn.answer, standalone = self.standalone || inspectEnabled
         Task.detached(priority: .userInitiated) { [weak self] in
             let strays = standalone ? [] : AIPage.strays(in: answer, from: read)
             await MainActor.run {
@@ -218,6 +285,7 @@ final class Assistant: ObservableObject, Identifiable {
     }
 
     func stop() {
+        inspectionTask?.cancel(); inspectionTask = nil
         task?.cancel()
         task = nil
         connection = nil
@@ -340,7 +408,10 @@ extension Browser {
     }
 
     func closeAssistant() {
-        if let assistant = assisting { closeAssistant(for: assistant.tab) }
+        if let assistant = assisting {
+            tabs.first { $0.id == assistant.tab }?.aiInspection.stop()
+            closeAssistant(for: assistant.tab)
+        }
         else { hideAssistant() }
     }
 
@@ -353,7 +424,7 @@ extension Browser {
         sidePanelFollows(tab)
         guard let assistant = assistantSessions[tab.id] else { return }
         let privatePage = tab.shy || tab.usesTor || !tab.store.isPersistent
-        guard tab.isWeb || (assistant.standalone && tab.isBlank), assistant.sourceURL == tab.pageAddress,
+        guard tab.isWeb || (assistant.standalone && tab.isBlank), assistant.inspectEnabled || assistant.sourceURL == tab.pageAddress,
               !privatePage || assistant.provider.isLocal else {
             closeAssistant(for: tab.id)
             return
@@ -794,6 +865,7 @@ struct AssistantPanel: View {
             } else {
                 scrolling
             }
+            inspection
             contextLine
             composer
             footer
@@ -808,6 +880,10 @@ struct AssistantPanel: View {
             models = (try? OpenCodeAI.catalogue()) ?? []
             if !assistant.summary, !drawn { typing = true }
         }
+    }
+
+    @ViewBuilder private var inspection: some View {
+        if conversational { InspectionControls(assistant: assistant).padding(.horizontal, 24).padding(.bottom, 10) }
     }
 
     /// A small name and Close; a plus to start over once something was said.
