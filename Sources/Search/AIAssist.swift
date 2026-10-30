@@ -382,15 +382,65 @@ extension Browser {
 
 // MARK: - the panel
 
+/// Color stays in small surfaces and accents so long answers remain easy to read.
+private enum AssistantStyle {
+    static func gradient(_ opacity: Double = 1) -> LinearGradient {
+        LinearGradient(colors: [Color(red: 0.34, green: 0.48, blue: 0.96).opacity(opacity),
+                                Color(red: 0.64, green: 0.40, blue: 0.90).opacity(opacity),
+                                Color(red: 0.20, green: 0.69, blue: 0.73).opacity(opacity)],
+                       startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+    static let arrival = Animation.easeOut(duration: 0.24)
+}
+
+/// Only the three dots redraw on the clock, never the conversation or its layout.
+private struct AssistantThinking: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var started = Date()
+    var drawn = false
+    var title = "Thinking"
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title).font(.system(size: 12.5)).foregroundStyle(Palette.muted)
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || drawn || scenePhase != .active)) { clock in
+                let time = reduceMotion || drawn ? 0 : max(0, clock.date.timeIntervalSince(started))
+                HStack(spacing: 3) {
+                    ForEach(0..<3) { index in
+                        let wave = (sin(time * 4 - Double(index) * 0.8) + 1) / 2
+                        Circle().fill(AssistantStyle.gradient())
+                            .frame(width: 4, height: 4)
+                            .opacity(0.4 + wave * 0.6)
+                            .offset(y: reduceMotion || drawn ? 0 : -wave * 3)
+                    }
+                }
+                .frame(height: 12)
+            }
+            .accessibilityHidden(true)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .onAppear { started = Date() }
+    }
+}
+
 struct AssistantPanel: View {
     @ObservedObject var browser: Browser
     @ObservedObject var assistant: Assistant
     /// A deterministic rendering of these same controls, without native
     /// text fields or scroll views, for the isolated picture command.
     var drawn = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var appeared = false
     @FocusState private var typing: Bool
     @State private var models: [OpenCodeAI.Model] = []
     @State private var expandedContext = false
+
+    private var motion: Animation? { reduceMotion || drawn ? nil : AssistantStyle.arrival }
+    private var arrival: AnyTransition {
+        reduceMotion || drawn ? .opacity : .opacity.combined(with: .offset(y: 8))
+    }
 
     private var catalogue: [OpenCodeAI.Model] {
         if !models.isEmpty { return models }
@@ -441,8 +491,17 @@ struct AssistantPanel: View {
             privacyNote
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Palette.ground)
+        .background {
+            Palette.ground
+            AssistantStyle.gradient(0.07)
+                .mask(LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom))
+                .allowsHitTesting(false)
+        }
+        .opacity(appeared || drawn ? 1 : 0)
+        .offset(x: appeared || drawn || reduceMotion ? 0 : 10)
+        .animation(motion, value: appeared)
         .onAppear {
+            appeared = true
             models = (try? OpenCodeAI.catalogue()) ?? []
             if !assistant.summary, !drawn { typing = true }
         }
@@ -450,7 +509,11 @@ struct AssistantPanel: View {
 
     private var header: some View {
         HStack(spacing: 9) {
-            Image(systemName: "sparkles").font(.system(size: 13, weight: .medium))
+            Image(systemName: "sparkles")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(AssistantStyle.gradient())
+                .frame(width: 28, height: 28)
+                .background(AssistantStyle.gradient(0.13), in: RoundedRectangle(cornerRadius: 9))
             Text("Ask AI").font(.system(size: 13, weight: .semibold))
             Spacer(minLength: 0)
             Door(icon: "gearshape", help: "Settings › AI") { _ = browser.show(InternalPage(.settings, SettingsPanel.Page.ai.rawValue)) }
@@ -465,6 +528,7 @@ struct AssistantPanel: View {
     @ViewBuilder
     private var modelControl: some View {
         HStack(spacing: 0) {
+            Spacer(minLength: 0)
             if assistant.provider == .openCode && !drawn {
                 Menu {
                     ForEach(Array(Set(catalogue.map(\.providerName))).sorted(), id: \.self) { provider in
@@ -489,7 +553,6 @@ struct AssistantPanel: View {
             } else {
                 modelChip
             }
-            Spacer(minLength: 0)
         }
     }
 
@@ -511,7 +574,7 @@ struct AssistantPanel: View {
     private func contextCard(_ context: AIPage.Read) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Button {
-                withAnimation(Motion.quick) { expandedContext.toggle() }
+                withAnimation(motion) { expandedContext.toggle() }
             } label: {
                 HStack(spacing: 7) {
                     Image(systemName: selected ? "text.quote" : "doc.text")
@@ -623,37 +686,44 @@ struct AssistantPanel: View {
                 Text(verbatim: trouble).font(.system(size: 12.5)).foregroundStyle(Palette.muted)
                     .fixedSize(horizontal: false, vertical: true)
             } else if assistant.reading {
-                HStack(spacing: 8) {
-                    Image(systemName: "sparkles").font(.system(size: 12))
-                    Text("Reading the page…").font(.system(size: 12.5))
-                }
-                .foregroundStyle(Palette.muted)
+                AssistantThinking(drawn: drawn, title: "Reading the page")
             } else if empty {
-                emptyState
+                emptyState.transition(.opacity)
             }
             if assistant.addressed, assistant.notice == nil {
                 caution("This page has text written for an AI to follow. The answer may have been steered by it.")
             }
             ForEach(assistant.turns) { turn in
-                TurnView(turn: turn).id(turn.id)
+                TurnView(turn: turn, drawn: drawn).id(turn.id).transition(arrival)
             }
             if let question = assistant.pendingQuestion { questionBubble(question).id("pending-question") }
-            if let notice = assistant.notice { noticeCard(notice) }
+            if let notice = assistant.notice { noticeCard(notice).transition(arrival) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Stable IDs trigger one entrance per turn, never an animation per token.
+        .animation(motion, value: assistant.turns.map(\.id))
+        .animation(motion, value: assistant.notice != nil)
+        .animation(motion, value: assistant.reading)
     }
 
     private var scrolling: some View {
         GeometryReader { area in
             ScrollViewReader { scroller in
                 ScrollView(showsIndicators: false) {
-                    conversation
+                    VStack(spacing: 0) {
+                        conversation
+                        Color.clear.frame(height: 1).id("answer-bottom")
+                    }
                         .frame(minHeight: max(0, area.size.height - 28), alignment: empty ? .center : .topLeading)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 14)
                 }
                 .onChange(of: assistant.turns.last?.answer) { _, _ in
-                    if let last = assistant.turns.last { scroller.scrollTo(last.id, anchor: .bottom) }
+                    // Follow streamed growth directly; overlapping scroll animations
+                    // per token cause the answer to lag and then jump.
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { scroller.scrollTo("answer-bottom", anchor: .bottom) }
                 }
                 .onChange(of: assistant.pendingQuestion) { _, question in
                     if question != nil { scroller.scrollTo("pending-question", anchor: .top) }
@@ -685,22 +755,22 @@ struct AssistantPanel: View {
                     }
                     .disabled(assistant.notice != nil)
             }
-            if assistant.busy && !assistant.reading {
-                Button { assistant.cancelAnswer() } label: { sendIcon(stopping: true) }
-                    .buttonStyle(.plain)
-                    .help("Stop answer")
-                    .accessibilityLabel("Stop answer")
-            } else {
-                Button { assistant.submit() } label: { sendIcon(stopping: false) }
-                    .buttonStyle(.plain)
-                    .disabled(!canSend)
-                    .help("Send question")
-                    .accessibilityLabel("Send question")
-            }
+            let stopping = assistant.busy && !assistant.reading
+            Button {
+                if stopping { assistant.cancelAnswer() } else { assistant.submit() }
+            } label: { sendIcon(stopping: stopping) }
+                .buttonStyle(.plain)
+                .disabled(!stopping && !canSend)
+                .help(stopping ? "Stop answer" : "Send question")
+                .accessibilityLabel(stopping ? "Stop answer" : "Send question")
         }
         .padding(12)
-        .background(Palette.wash.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Palette.ground)
+            RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AssistantStyle.gradient(typing ? 0.12 : 0.05))
+        }
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(AssistantStyle.gradient(typing ? 0.7 : 0.24), lineWidth: 1))
+        .animation(motion, value: typing)
         .padding(.horizontal, 14)
         .padding(.top, 6)
     }
@@ -708,9 +778,12 @@ struct AssistantPanel: View {
     private func sendIcon(stopping: Bool) -> some View {
         Image(systemName: stopping ? "stop.fill" : "arrow.up")
             .font(.system(size: stopping ? 11 : 13, weight: .semibold))
-            .foregroundStyle(Palette.ground)
+            .foregroundStyle(Color.white)
             .frame(width: 29, height: 29)
-            .background(Palette.ink.opacity(stopping || canSend ? 0.95 : 0.66), in: Circle())
+            .background(AssistantStyle.gradient(stopping || canSend ? 1 : 0.35), in: Circle())
+            .contentTransition(.opacity)
+            .animation(motion, value: canSend)
+            .animation(motion, value: stopping)
     }
 
     private var privacyNote: some View {
@@ -768,7 +841,8 @@ struct AssistantPanel: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 11)
                 .padding(.vertical, 9)
-                .background(Palette.wash.opacity(0.8), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(AssistantStyle.gradient(0.16), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(AssistantStyle.gradient(0.2), lineWidth: 1))
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
     }
@@ -777,6 +851,8 @@ struct AssistantPanel: View {
 
     private struct TurnView: View {
         let turn: Assistant.Turn
+        var drawn = false
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @State private var copied = false
 
         var body: some View {
@@ -785,12 +861,13 @@ struct AssistantPanel: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "sparkles")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Palette.muted)
+                        .foregroundStyle(AssistantStyle.gradient())
                         .frame(width: 14)
                         .padding(.top, 2)
                     VStack(alignment: .leading, spacing: 9) {
                         if turn.answer.isEmpty, !turn.done {
-                            Text("Thinking…").font(.system(size: 12.5)).foregroundStyle(Palette.faint)
+                            AssistantThinking(drawn: drawn)
+                                .transition(.opacity)
                         }
                         // Plain text cannot fetch images or turn model output
                         // into links that the original page never contained.
@@ -834,10 +911,16 @@ struct AssistantPanel: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    // Fade the first text in once, then leave every streamed
+                    // update immediate so animations cannot accumulate.
+                    .animation(reduceMotion || drawn ? nil : .easeOut(duration: 0.18), value: turn.answer.isEmpty)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .onChange(of: turn.answer) { _, _ in copied = false }
+            .animation(reduceMotion || drawn ? nil : AssistantStyle.arrival, value: turn.done)
+            // Streamed text must update without interpolating its geometry.
+            .animation(nil, value: turn.answer)
         }
     }
 }
