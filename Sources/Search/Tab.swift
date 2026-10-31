@@ -31,7 +31,7 @@ enum Web {
     @MainActor static func release(_ controller: WKUserContentController) {
         for name in [ScrollRelay.name, VeilRelay.name, FormRelay.name, ImageRelay.name, MediaKeys.name,
                      StoreRelay.name, PasskeyRelay.name, MiddleRelay.name, IconRelay.name, PopupGestureRelay.name, DuskRelay.name,
-                     TranslateRelay.name, DialRelay.name, DialerSiteRelay.name] {
+                     TranslateRelay.name, DialRelay.name, DialerSiteRelay.name, OSINTMenuRelay.name] {
             controller.removeScriptMessageHandler(forName: name, contentWorld: world)
             controller.removeScriptMessageHandler(forName: name, contentWorld: .page)
         }
@@ -666,6 +666,7 @@ final class Tab: ObservableObject, Identifiable {
     /// What a right-click lands on, for Call <number> (DialMenu.swift), and
     /// otto's click-to-call on the sites Settings › Dialer lists.
     private let dial = DialRelay()
+    private let osintMenu = OSINTMenuRelay()
     private let siteDial = DialerSiteRelay()
     private let media = MediaKeys()
     /// Counting down once the page's sound stops, to give the media keys
@@ -935,6 +936,13 @@ final class Tab: ObservableObject, Identifiable {
             guard let self else { return }
             self.onAskAI?(self, selection)
         }
+        web.onOSINT = { [weak self] context, resolver in
+            guard let self, let browser=self.delegate as? Browser, browser.tabs.contains(where: { $0 === self }) else { return }
+            browser.showOSINT(context,from:self,imageResolver:resolver)
+        }
+        web.osintContext = { [weak self] in self?.osintMenu.take() }
+        web.osintFrame = { [weak self] in self?.osintMenu.frame }
+        osintMenu.web=web
         web.canAskAI = { [weak self] in
             guard let self, let browser = self.delegate as? Browser else { return false }
             return !browser.isPopup && browser.tabs.contains { $0 === self }
@@ -971,6 +979,7 @@ final class Tab: ObservableObject, Identifiable {
         controller.add(veils_, contentWorld: Web.world, name: VeilRelay.name)
         controller.add(images, contentWorld: Web.world, name: ImageRelay.name)
         controller.add(dial, contentWorld: Web.world, name: DialRelay.name)
+        controller.add(osintMenu, contentWorld: Web.world, name: OSINTMenuRelay.name)
         controller.addScriptMessageHandler(siteDial, contentWorld: Web.world, name: DialerSiteRelay.name)
         controller.add(media, contentWorld: Web.world, name: MediaKeys.name)
         controller.add(shop, contentWorld: Web.world, name: StoreRelay.name)
@@ -1135,7 +1144,7 @@ final class Tab: ObservableObject, Identifiable {
         // (DialMenu.swift). The main frame, on a site Settings › Dialer
         // lists: otto's click-to-call, only while the dialer is on.
         controller.addUserScript(
-            WKUserScript(source: DialRelay.watch, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: Web.world)
+            WKUserScript(source: OSINTMenuRelay.script + ";\n" + DialRelay.watch, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: Web.world)
         )
         controller.addUserScript(dialerBridgeScript())
         // Every frame, in Search's world: a paused video gives the media keys
@@ -2189,6 +2198,8 @@ final class Tab: ObservableObject, Identifiable {
         web.dialNumber = nil
         web.onCall = nil
         web.onAskAI = nil
+        web.onOSINT = nil; web.osintContext = nil; web.osintFrame = nil
+        osintMenu.web = nil
         web.canAskAI = nil
         web.translating = nil
         web.onTranslate = nil
@@ -2372,6 +2383,10 @@ final class MiddleRelay: NSObject, WKScriptMessageHandler {
 final class PageView: WKWebView {
     var onMenuClosed: (() -> Void)?
     var onAskAI: ((String?) -> Void)?
+    var onOSINT: ((OSINTContext, OSINTImageResolver?) -> Void)?
+    var osintContext: (() -> OSINTContext?)?
+    var osintFrame: (() -> WKFrameInfo?)?
+    var osintPoint: CGPoint?
     var canAskAI: (() -> Bool)?
 
     override func didCloseMenu(_ menu: NSMenu, with event: NSEvent?) {
@@ -2383,6 +2398,8 @@ final class PageView: WKWebView {
     /// page in it itself; Search adding them again showed each one twice.
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
+        let point=convert(event.locationInWindow,from:nil)
+        osintPoint=CGPoint(x:point.x,y:isFlipped ? point.y : bounds.height-point.y)
         // Opening in this tab is already a normal click on the link.
         for item in menu.items where item.identifier?.rawValue == "WKMenuItemIdentifierOpenLink" {
             menu.removeItem(item)
@@ -2391,6 +2408,7 @@ final class PageView: WKWebView {
         // dialer is on (see DialMenu.swift).
         addCallItem(to: menu)
         addAskAIItem(to: menu)
+        addOSINTItem(to: menu)
         // WebKit names it for a window, but a new window's page arrives here
         // as a new tab (Browser's createWebViewWith), so it says so. The tab
         // stays behind this one, as in Safari and Chrome, and as a ⌘-click's

@@ -1975,6 +1975,45 @@ final class Bench {
             // seen is checked on a release candidate instead.
             answer(["error": "visible is switched off: it made a window, and no bench verb makes one for now — check this on a release candidate"])
 
+        case "osint":
+            guard Store.testing else { answer(["error":"OSINT probes require a test world"]); return }
+            let session=browser.osint
+            switch request["action"] as? String {
+            case "open":
+                if let endpoint=request["searx"] as? String { session.searx=endpoint }
+                if let all=request["all"] as? Bool { session.allSites=all }
+                browser.showOSINT(OSINTContext(text:request["query"] as? String ?? "",label:"Probe input",kind:(request["kind"] as? String).flatMap(OSINTKind.init(rawValue:)) ?? .auto))
+            case "image":
+                guard let path=request["path"] as? String else { answer(["error":"Missing image path"]); return }
+                do { browser.showOSINT(); session.image(try Data(contentsOf:URL(fileURLWithPath:path)),name:URL(fileURLWithPath:path).lastPathComponent,source:path) }
+                catch { answer(["error":error.localizedDescription]); return }
+            case "stop": session.stop()
+            case "clear": session.clear()
+            case "save":
+                if let id=(request["id"] as? String).flatMap(UUID.init(uuidString:)) ?? session.visible.first?.id { session.toggleSaved(id,profile:browser.profileID) }
+            case "restore":
+                session.loadSaved(browser.profileID)
+                if let saved=session.savedReports.first { session.restore(saved) }
+            case "askAI": browser.osintToAI()
+            case "picture":
+                guard let path=request["path"] as? String else { answer(["error":"Missing path"]); return }
+                let host=NSHostingView(rootView:OSINTPanel(browser:browser,session:session,drawn:true).frame(width:400,height:850).environment(\.colorScheme,.dark))
+                host.frame=NSRect(origin:.zero,size:host.fittingSize)
+                let window=NSWindow(contentRect:host.frame,styleMask:.borderless,backing:.buffered,defer:false)
+                window.appearance=NSAppearance(named:.darkAqua);window.contentView=host;host.layoutSubtreeIfNeeded()
+                DispatchQueue.main.asyncAfter(deadline:.now()+0.3) {
+                    guard let bitmap=host.bitmapImageRepForCachingDisplay(in:host.bounds) else { answer(["error":"Nothing drawn"]);return }
+                    host.cacheDisplay(in:host.bounds,to:bitmap)
+                    do { try bitmap.representation(using:.png,properties:[:])?.write(to:URL(fileURLWithPath:path));answer(["saved":path]) }
+                    catch { answer(["error":error.localizedDescription]) }
+                    window.contentView=nil
+                }; return
+            default: break
+            }
+            var state: [String:Any]=["shown":browser.sidePanel == .osint,"running":session.running,"checked":session.checked,"unavailable":session.unavailable,"problem":session.problem ?? "","saved":session.savedReports.count,"draft":browser.assisting?.draft ?? ""]
+            if let report=session.report,let data=try? JSONEncoder().encode(report),let json=try? JSONSerialization.jsonObject(with:data) { state["report"]=json }
+            answer(state)
+
         case "aiInspect":
             guard Store.testing, let tab = find(request, in: browser) ?? browser.active else { answer(["error":"Inspection probe requires a tab"]); return }
             let capture = tab.aiInspection
@@ -3628,6 +3667,7 @@ final class Bench {
             let web = browser.sidePanel == .dialer ? browser.dialerPage?.web : SidePanelPages.shared.web(in: browser)
             var content: [String: Any] = ["kind": "none"]
             switch browser.sidePanel {
+            case .osint: content = ["kind":"osint","query":browser.osint.report?.context.text ?? "","running":browser.osint.running]
             case .assistant:
                 content = ["kind": "assistant", "model": browser.assisting?.model ?? "",
                            "context": browser.assisting?.context?.text ?? ""]

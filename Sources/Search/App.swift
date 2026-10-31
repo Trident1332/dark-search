@@ -178,6 +178,7 @@ struct SearchApp: App {
                     Button(browser.dialerShown ? "Close Dialer" : "Show Dialer") { browser.toggleDialer() }
                         .shortcut("view.dialer")
                 }
+                Button("Show OSINT") { browser.showOSINT() }
                 // Websites in the side panel, only once they are on
                 // (Settings › General).
                 if browser.prefs.sitesInPanel {
