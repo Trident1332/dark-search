@@ -80,7 +80,7 @@ final class AIInspection: ObservableObject {
                             }
                         }
                         return
-                    } catch { problem = error.localizedDescription; break }
+                    } catch { problem = Self.describe(error, in: "inspector's recorder"); break }
                 }
             }
             try? await Task.sleep(for: .milliseconds(100))
@@ -111,11 +111,33 @@ final class AIInspection: ObservableObject {
             problem = state["problem"] as? String
         }
     }
+    /// WebKit says only "A JavaScript exception occurred" of a script that
+    /// threw. The exception's own message and line travel in the error's
+    /// user info: say those, and which script it was.
+    static func describe(_ error: Error, in script: String) -> String {
+        let failure = error as NSError
+        guard failure.domain == WKErrorDomain, failure.code == WKError.javaScriptExceptionOccurred.rawValue else {
+            return error.localizedDescription
+        }
+        var text = "The \(script) script threw"
+        if let message = failure.userInfo["WKJavaScriptExceptionMessage"] as? String, !message.isEmpty {
+            text += ": " + message
+        } else {
+            text += " an exception"
+        }
+        if let line = failure.userInfo["WKJavaScriptExceptionLineNumber"] as? Int, line > 0 { text += " (line \(line))" }
+        return text
+    }
+
     func snapshot() async throws -> AIInspectionSnapshot {
         guard recording, let frontend, let page else { throw AIError.unreachable("Start Inspect page first.") }
         let token = generation
-        let captured = try await frontend.callAsyncJavaScript("return await window.__searchAIInspection.snapshot()", arguments: [:], in: nil, contentWorld: .page)
-        let dom = try await page.evaluateJavaScript(Self.pageSnapshot, in: nil, contentWorld: Web.world)
+        let captured: Any?
+        do { captured = try await frontend.callAsyncJavaScript("return await window.__searchAIInspection.snapshot()", arguments: [:], in: nil, contentWorld: .page) }
+        catch { throw AIError.unreachable(Self.describe(error, in: "network capture")) }
+        let dom: Any?
+        do { dom = try await page.evaluateJavaScript(Self.pageSnapshot, in: nil, contentWorld: Web.world) }
+        catch { throw AIError.unreachable(Self.describe(error, in: "page snapshot")) }
         guard recording, token == generation else { throw AIError.unreachable("Inspection stopped while capturing. Start it again.") }
         guard let json = captured as? String else { throw AIError.unreachable("WebKit did not return a network snapshot (\(type(of: captured))).") }
         guard let pageJSON = dom as? String else { throw AIError.unreachable("WebKit did not return a page snapshot (\(type(of: dom))).") }
@@ -150,7 +172,10 @@ final class AIInspection: ObservableObject {
                 return try await frontend.callAsyncJavaScript("return await window.__searchAIInspection.read(part,id,offset,count)",arguments:["part":part,"id":arguments["id"] as? String ?? "","offset":offset,"count":count],in:nil,contentWorld:.page) as? String ?? "{}"
             default: return AIInspectionSnapshot.json(["error":"Unknown inspector tool"])
             }
-        } catch { return AIInspectionSnapshot.json(["error":error.localizedDescription]) }
+        } catch {
+            let script = ["run_console": "console", "inspect_object": "object", "read_inspection": "inspection read"][name] ?? name
+            return AIInspectionSnapshot.json(["error": Self.describe(error, in: script)])
+        }
     }
     static let consoleScript = #"""
     const target = targetID ? WI.targets.find(t=>t.identifier===targetID) : (WI.pageTarget||WI.mainTarget);
