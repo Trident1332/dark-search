@@ -794,6 +794,104 @@ private struct AssistantPill: View {
     }
 }
 
+/// The catalogue under the model's name, by provider, then Settings: a
+/// native menu popped up by hand, so the name stays drawn as it is.
+private final class ModelMenu: NSObject {
+    var choose: (String) -> Void = { _ in }
+    var settings: () -> Void = {}
+
+    func show(_ catalogue: [OpenCodeAI.Model], current: String) {
+        let menu = NSMenu()
+        for provider in Array(Set(catalogue.map(\.providerName))).sorted() {
+            menu.addItem(.sectionHeader(title: provider))
+            for model in catalogue where model.providerName == provider {
+                let item = NSMenuItem(title: model.name, action: #selector(pick(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = model.id
+                item.state = model.id == current ? .on : .off
+                menu.addItem(item)
+            }
+        }
+        if !catalogue.isEmpty { menu.addItem(.separator()) }
+        let settings = NSMenuItem(title: "AI Settings…", action: #selector(open(_:)), keyEquivalent: "")
+        settings.target = self
+        menu.addItem(settings)
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    @objc private func pick(_ item: NSMenuItem) {
+        if let id = item.representedObject as? String { choose(id) }
+    }
+
+    @objc private func open(_ item: NSMenuItem) { settings() }
+}
+
+/// A line of status under the context: small, muted, two lines at most.
+private struct SideLine: View {
+    let text: String
+
+    var body: some View {
+        Text(verbatim: text)
+            .font(.system(size: 11.5))
+            .foregroundStyle(Palette.muted)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The mark at the end of the context line: Inspect page, lit while on.
+/// A click turns it on or off; its full controls are behind the line.
+private struct SideMarks: View {
+    @ObservedObject var assistant: Assistant
+    let conversational: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            if conversational {
+                AskQuiet(icon: "scope",
+                         help: assistant.inspectEnabled
+                            ? "Inspect page is on: the live console, page source and network bodies go with your question, unredacted. Click to stop."
+                            : "Inspect page: send the live console, page source and network bodies with your question, unredacted",
+                         label: assistant.inspectEnabled ? "Stop inspecting the page" : "Inspect the page",
+                         tint: assistant.inspectEnabled ? AssistantStyle.accent : nil) {
+                    assistant.setInspection(!assistant.inspectEnabled)
+                }
+                .disabled(!assistant.inspectEnabled && (assistant.busy || assistant.notice != nil))
+            }
+        }
+    }
+}
+
+/// A word under the context line while a capture is on, or when it has
+/// something to say.
+private struct SideStatus: View {
+    @ObservedObject var assistant: Assistant
+
+    var body: some View {
+        if assistant.inspectionBusy {
+            SideLine(text: "Capturing the page…")
+        } else if let problem = assistant.inspectionProblem {
+            SideLine(text: "Inspection failed · \(problem)")
+        } else if assistant.inspectEnabled, let inspection = assistant.inspection {
+            InspectionLine(inspection: inspection)
+        }
+    }
+}
+
+private struct InspectionLine: View {
+    @ObservedObject var inspection: AIInspection
+
+    var body: some View {
+        if let problem = inspection.problem {
+            SideLine(text: "Inspecting · \(problem)")
+        } else {
+            SideLine(text: "Inspecting · \(count(inspection.requestCount, "request", "requests")) · \(count(inspection.bodyCount, "body", "bodies"))")
+        }
+    }
+
+    private func count(_ n: Int, _ one: String, _ many: String) -> String { "\(n) \(n == 1 ? one : many)" }
+}
+
 struct AssistantPanel: View {
     @ObservedObject var browser: Browser
     @ObservedObject var assistant: Assistant
@@ -807,6 +905,7 @@ struct AssistantPanel: View {
     @State private var expandedContext = false
     @State private var overSend = false
     @State private var overModel = false
+    @State private var menu = ModelMenu()
 
     private var moves: Bool { !reduceMotion && !drawn }
     private var motion: Animation? { moves ? AssistantStyle.arrival : nil }
@@ -824,6 +923,13 @@ struct AssistantPanel: View {
 
     private var chosenModel: OpenCodeAI.Model? { catalogue.first { $0.id == assistant.model } }
     private var modelName: String { Self.modelLabel(for: assistant.model, provider: assistant.provider, models: catalogue) }
+    /// The name cut in the middle past 26 characters: the footer is one
+    /// line, and the note at its other end keeps its place.
+    private var shortModelName: String {
+        let name = modelName
+        guard name.count > 26 else { return name }
+        return String(name.prefix(13)) + "…" + String(name.suffix(12))
+    }
     private var selected: Bool { assistant.selection != nil }
     /// About a page, rather than a conversation begun from the address bar.
     private var conversational: Bool { !assistant.standalone }
@@ -865,7 +971,6 @@ struct AssistantPanel: View {
             } else {
                 scrolling
             }
-            inspection
             contextLine
             composer
             footer
@@ -882,8 +987,13 @@ struct AssistantPanel: View {
         }
     }
 
-    @ViewBuilder private var inspection: some View {
-        if conversational { InspectionControls(assistant: assistant).padding(.horizontal, 24).padding(.bottom, 10) }
+    /// Inspect page, folded behind the context line: a mark at its end,
+    /// lit while on, a word under it while it is on or has something to
+    /// say, and the full controls when the line is unfolded.
+    private var sideMarks: some View { SideMarks(assistant: assistant, conversational: conversational) }
+    private var sideStatus: some View { SideStatus(assistant: assistant) }
+    @ViewBuilder private var sideControls: some View {
+        if conversational { InspectionControls(assistant: assistant) }
     }
 
     /// A small name and Close; a plus to start over once something was said.
@@ -1012,50 +1122,62 @@ struct AssistantPanel: View {
     @ViewBuilder
     private var contextLine: some View {
         if conversational, assistant.reading || assistant.context != nil {
-            VStack(alignment: .leading, spacing: 8) {
-                Button {
-                    withAnimation(motion) { expandedContext.toggle() }
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: selected ? "text.quote" : "doc.text").font(.system(size: 10, weight: .medium))
-                        if assistant.reading {
-                            Text("Reading the page")
-                            ReadingSweep(drawn: drawn)
-                        } else if let context = assistant.context {
-                            Text(verbatim: contextTitle(context))
-                                .foregroundStyle(AssistantStyle.soft)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                            if let host = context.url?.host() {
-                                Text(verbatim: "· \(host)").lineLimit(1).fixedSize()
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 4) {
+                    Button {
+                        withAnimation(motion) { expandedContext.toggle() }
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: selected ? "text.quote" : "doc.text").font(.system(size: 10, weight: .medium))
+                            if assistant.reading {
+                                Text("Reading the page")
+                                ReadingSweep(drawn: drawn)
+                            } else if let context = assistant.context {
+                                Text(verbatim: contextTitle(context))
+                                    .foregroundStyle(AssistantStyle.soft)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                if let host = context.url?.host() {
+                                    Text(verbatim: "· \(host)").lineLimit(1).fixedSize()
+                                }
                             }
+                            Spacer(minLength: 0)
                         }
-                        Spacer(minLength: 0)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Palette.muted)
+                        .contentShape(Rectangle())
                     }
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Palette.muted)
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .disabled(assistant.context == nil)
+                    .help(expandedContext ? "Fold away" : "Show the full context sent with your question")
+                    .accessibilityLabel(expandedContext ? "Collapse context" : "Expand context")
+                    sideMarks
                 }
-                .buttonStyle(.plain)
-                .disabled(assistant.context == nil)
-                .help(expandedContext ? "Collapse context" : "Show the full context sent with your question")
-                .accessibilityLabel(expandedContext ? "Collapse context" : "Expand context")
-                if expandedContext, let context = assistant.context {
-                    ScrollView {
-                        Text(verbatim: context.text)
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(Palette.ink)
-                            .lineSpacing(2)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                sideStatus
+                if expandedContext {
+                    VStack(alignment: .leading, spacing: 10) {
+                        sideControls
+                        if let context = assistant.context {
+                            ScrollView {
+                                Text(verbatim: context.text)
+                                    .font(.system(size: 12.5))
+                                    .foregroundStyle(Palette.ink)
+                                    .lineSpacing(2)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(maxHeight: 160)
+                        }
                     }
-                    .frame(maxHeight: 160)
+                    .padding(.top, 4)
                     .transition(arrival)
                 }
             }
-            .padding(.horizontal, 24)
+            .padding(.leading, 24)
+            .padding(.trailing, 18)
             .padding(.bottom, 8)
             .animation(motion, value: assistant.reading)
+            .animation(motion, value: expandedContext)
             .arriving(5, on: !drawn, moves: moves)
         }
     }
@@ -1156,28 +1278,15 @@ struct AssistantPanel: View {
     @ViewBuilder
     private var modelControl: some View {
         if assistant.provider == .openCode && !drawn {
-            Menu {
-                ForEach(Array(Set(catalogue.map(\.providerName))).sorted(), id: \.self) { provider in
-                    Section(provider) {
-                        ForEach(catalogue.filter { $0.providerName == provider }) { model in
-                            Button { browser.chooseAssistantModel(model.id) } label: {
-                                if model.id == assistant.model {
-                                    Label(model.name, systemImage: "checkmark")
-                                } else {
-                                    Text(model.name)
-                                }
-                            }
-                        }
-                    }
-                }
-                Divider()
-                Button("AI settings…") { openSettings() }
+            Button {
+                menu.choose = { browser.chooseAssistantModel($0) }
+                menu.settings = { openSettings() }
+                menu.show(catalogue, current: assistant.model)
             } label: { modelLabelView }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize(horizontal: false, vertical: true)
-            .disabled(assistant.busy || assistant.notice != nil)
-            .accessibilityLabel("AI model")
+                .buttonStyle(.plain)
+                .disabled(assistant.busy || assistant.notice != nil)
+                .help("Choose a model")
+                .accessibilityLabel("AI model")
         } else {
             Button { openSettings() } label: { modelLabelView }
                 .buttonStyle(.plain)
@@ -1192,10 +1301,9 @@ struct AssistantPanel: View {
 
     private var modelLabelView: some View {
         HStack(spacing: 5) {
-            Text(verbatim: modelName)
+            Text(verbatim: shortModelName)
                 .font(.system(size: 11.5, weight: .medium))
                 .lineLimit(1)
-                .truncationMode(.middle)
             Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
         }
         .foregroundStyle(overModel ? Palette.ink : AssistantStyle.soft)
