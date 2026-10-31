@@ -34,6 +34,7 @@ final class Assistant: ObservableObject, Identifiable {
     @Published private(set) var model: String
     /// The exact quote captured by the context menu, or nil for the page.
     let selection: String?
+    let selectedText: AISelectedText?
     /// Asked for a summary, rather than opened for a question.
     let summary: Bool
 
@@ -50,6 +51,7 @@ final class Assistant: ObservableObject, Identifiable {
 
     private let fence = AIPage.newFence()
     private var messages: [AIMessage] = []
+    private(set) var executionHistory = AIExecutionHistory()
     private var waiting: AIPage.Ask?
     private var task: Task<Void, Never>?
     private var connection: OpenCodeAI.Connection?
@@ -73,8 +75,17 @@ final class Assistant: ObservableObject, Identifiable {
         self.summary = summary
         let quote = selection?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.selection = quote.isEmpty ? nil : String(quote.prefix(AIPage.limit))
+        if let web = tab.built, let selected = self.selection {
+            self.selectedText = AISelectedText.take(in: web, matching: selected)
+        } else { self.selectedText = nil }
         self.destinationHost = provider == .openCode
             ? ((try? OpenCodeAI.catalogue())?.first { $0.id == model }?.host ?? "your OpenCode provider") : provider.host
+        selectedText?.onReplace = { [weak self] text in
+            guard let self, let old = self.context else { return }
+            let updated = AIPage.shaped(title: old.title, url: old.url, text: text, links: old.links)
+            self.context = updated
+            self.addressed = updated.addressed
+        }
         if standalone {
             self.context = AIPage.Read(title: "", url: nil, text: "", links: [], cut: false)
             self.reading = false
@@ -224,21 +235,26 @@ final class Assistant: ObservableObject, Identifiable {
         trouble = nil
         switch ask {
         case .summary:
-            messages = [AIMessage(role: .user, text: AIPage.opening(read, .summary, fence: fence))]
+            messages = [AIMessage(role: .user, text: AIPage.opening(read, .summary, fence: fence, selected: selection != nil))]
             turns.append(Turn(question: nil))
         case .question(let question):
-            messages.append(AIMessage(role: .user, text: !standalone && messages.isEmpty ? AIPage.opening(read, ask, fence: fence) : question))
+            messages.append(AIMessage(role: .user, text: !standalone && messages.isEmpty ? AIPage.opening(read, ask, fence: fence, selected: selection != nil) : question))
             turns.append(Turn(question: question))
         }
         // The key, read now and let go with the request.
         let key = provider.isLocal || provider == .openCode ? nil : AIKeys.key(for: provider)
-        let system = standalone ? "You are a helpful assistant. Answer the person directly in plain text. You have no access to their tabs, files or device. Distinguish uncertain claims from facts." : AIPage.system(fence: fence)
+        let system = standalone ? "You are a helpful assistant. Answer the person directly in plain text. You have no access to their tabs, files or device. Distinguish uncertain claims from facts." : AIPage.system(fence: fence, selected: selection != nil)
+        let activity = executionHistory.context
+        let ordinarySystem = system + (activity.isEmpty ? "" : "\n\n" + activity)
         let stream = provider == .thisMac
-            ? AIEngine.shared.stream(system: system, messages: messages)
+            ? AIEngine.shared.stream(system: ordinarySystem, messages: messages)
             : inspectEnabled && inspectionSnapshot != nil
                 ? AIClient.shared.inspect(provider, model: model, system: system, messages: messages, key: key,
-                                          connection: connection, snapshot: inspectionSnapshot!, live: inspection!)
-                : AIClient.shared.stream(provider, model: model, system: system, messages: messages, key: key,
+                                          connection: connection, snapshot: inspectionSnapshot!, live: inspection!, selectedText: selectedText,
+                                          priorActivity: activity, onToolResult: { [weak self] entry in
+                                              await MainActor.run { self?.executionHistory.append(entry) }
+                                          })
+                : AIClient.shared.stream(provider, model: model, system: ordinarySystem, messages: messages, key: key,
                                          connection: connection)
         connection = nil
         let turnID = turns[turns.count - 1].id
@@ -264,7 +280,9 @@ final class Assistant: ObservableObject, Identifiable {
         guard let last = turns.last, !last.done, expected == nil || last.id == expected, let read = context else { return }
         var turn = turns[turns.count - 1]
         turn.done = true
-        turn.failed = failed
+        let visible = !turn.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        turn.failed = failed ?? (visible ? nil : "The provider stopped without returning an answer. You can ask it to continue.")
+        executionHistory.recordOutcome(turn.failed)
         turns[turns.count - 1] = turn
         // Checked away from the window's thread: a long answer is a long look.
         let id = turn.id, answer = turn.answer, standalone = self.standalone || inspectEnabled
@@ -275,16 +293,17 @@ final class Assistant: ObservableObject, Identifiable {
                 self.turns[index].strays = strays
             }
         }
-        if failed == nil, !turn.answer.isEmpty {
+        if visible {
+            // Keep partial text too: it remains visible in the conversation,
+            // while the app-owned outcome explains why the response stopped.
             messages.append(AIMessage(role: .assistant, text: turn.answer))
-        } else if !messages.isEmpty {
-            // A question that got no answer isn't part of what follows; the
-            // page goes again with the next one if it was the first.
-            messages.removeLast()
         }
+        // A visible question remains part of the conversation even when its
+        // answer failed. Follow-ups must not lose the person's original ask.
     }
 
     func stop() {
+        selectedText?.invalidate()
         inspectionTask?.cancel(); inspectionTask = nil
         task?.cancel()
         task = nil
@@ -304,7 +323,7 @@ final class Assistant: ObservableObject, Identifiable {
         guard !reading, turns.last?.done == false else { return }
         task?.cancel()
         task = nil
-        finish(nil)
+        finish("Stopped by you.")
     }
 }
 
