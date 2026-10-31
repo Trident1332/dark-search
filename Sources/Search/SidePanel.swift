@@ -35,6 +35,7 @@ enum SidePanelContent: Equatable {
     case dialer
     /// A conversation about the explicitly captured page or selected quote.
     case assistant
+    case osint
 }
 
 /// The sites offered in View › Side Panel, as they are typed: a short list,
@@ -181,6 +182,7 @@ extension Browser {
     /// Closed: an extension's page is let go, as Chrome does. The dialer's
     /// stays, signed in, but a call in progress ends with the panel.
     func closeSidePanel() {
+        if sidePanel == .osint { osint.stop() }
         if sidePanel == .assistant { closeAssistant() }
         if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
         if case .dialer = sidePanel { dialerPage?.setVisible(false) }
@@ -294,7 +296,7 @@ final class SidePanelPages: NSObject {
                 if #available(macOS 15.4, *), let context = Extensions.shared.contexts[id] {
                     _ = load(url, from: context, in: browser)
                 }
-            case .dialer, .assistant:
+            case .dialer, .assistant, .osint:
                 // Its page takes no route of the proxy's: nothing to make again.
                 break
             }
@@ -670,6 +672,8 @@ struct SidePanelView: View {
             }
         case .dialer:
             DialerPanelView(browser: browser)
+        case .osint:
+            OSINTPanel(browser:browser,session:browser.osint)
         case .assistant:
             if let assistant = browser.assisting {
                 AssistantPanel(browser: browser, assistant: assistant).id(assistant.id)
