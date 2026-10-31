@@ -22,12 +22,15 @@ extension PageView {
     @objc private func askAI(_ item: NSMenuItem) {
         guard canAskAI?() != false,
               let page = url, ["http", "https"].contains(page.scheme?.lowercased() ?? "") else { return }
-        evaluateJavaScript(AIPage.selected, in: nil, in: Web.world) { [weak self] result in
-            // Navigation while WebKit answered must not attach the old
-            // selection to a new page, nor open a closed tab's panel.
-            guard let self, self.url == page, let onAskAI = self.onAskAI else { return }
-            let selected = ((try? result.get()) as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            onAskAI(selected.isEmpty ? nil : String(selected.prefix(AIPage.limit)))
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let captured = await AISelectedText.capture(in: self)
+            // Bind the exact range before opening the panel takes focus away.
+            guard self.url == page, self.canAskAI?() != false, let onAskAI = self.onAskAI else {
+                captured.target?.invalidate()
+                return
+            }
+            onAskAI(captured.text.isEmpty ? nil : captured.text)
         }
     }
 }
