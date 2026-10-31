@@ -1,5 +1,35 @@
+import WebKit
 import XCTest
 @testable import Search
+
+/// A script that throws is reported by what it threw and which script it
+/// was, never by WebKit's bare "A JavaScript exception occurred".
+@MainActor
+final class AIInspectionErrorTests: XCTestCase {
+    func testScriptExceptionsSayTheMessageTheLineAndTheScript() {
+        let thrown = NSError(domain: WKErrorDomain, code: WKError.javaScriptExceptionOccurred.rawValue,
+                             userInfo: ["WKJavaScriptExceptionMessage": "TypeError: undefined is not an object", "WKJavaScriptExceptionLineNumber": 3])
+        XCTAssertEqual(AIInspection.describe(thrown, in: "page snapshot"),
+                       "The page snapshot script threw: TypeError: undefined is not an object (line 3)")
+        let bare = NSError(domain: WKErrorDomain, code: WKError.javaScriptExceptionOccurred.rawValue)
+        XCTAssertEqual(AIInspection.describe(bare, in: "page snapshot"), "The page snapshot script threw an exception")
+        XCTAssertEqual(AIInspection.describe(AIError.unreachable("Start Inspect page first."), in: "page snapshot"), "Start Inspect page first.")
+    }
+
+    func testWebKitCarriesTheMessageOfARealException() async throws {
+        let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        web.loadHTMLString("<!doctype html><title>Fixture</title>", baseURL: nil)
+        let deadline = Date().addingTimeInterval(8)
+        while web.isLoading, Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        let error: Error? = await withCheckedContinuation { continuation in
+            web.evaluateJavaScript("(() => { throw new TypeError('fixture boom') })()") { _, error in continuation.resume(returning: error) }
+        }
+        let thrown = try XCTUnwrap(error)
+        let said = AIInspection.describe(thrown, in: "page")
+        XCTAssertTrue(said.hasPrefix("The page script threw: "), "\(said) · \((thrown as NSError).userInfo)")
+        XCTAssertTrue(said.contains("fixture boom"), "\(said) · \((thrown as NSError).userInfo)")
+    }
+}
 
 final class AIInspectionSnapshotTests: XCTestCase {
     func testSuccessfulResponsesWithNullErrorAreNotFailures() {
