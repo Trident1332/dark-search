@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 
@@ -35,6 +36,12 @@ FILES = {
     "docs/libevent.txt": "licenses/libevent.txt",
     "docs/openssl.txt": "licenses/openssl.txt",
 }
+# Tor keeps a release on dist only while it is current, then moves it to the
+# archive. The pinned hash is checked whichever of its servers answers.
+SOURCES = (
+    "https://dist.torproject.org/torbrowser/{version}/{name}",
+    "https://archive.torproject.org/tor-package-archive/torbrowser/{version}/{name}",
+)
 MAX_ARCHIVE = 64 * 1024 * 1024
 MAX_EXPANDED = 128 * 1024 * 1024
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,7 +62,8 @@ def digest(path):
 def archive_for(arch, cache):
     platform, expected = ARCHIVES[arch]
     name = f"tor-expert-bundle-macos-{platform}-{VERSION}.tar.gz"
-    url = f"https://dist.torproject.org/torbrowser/{VERSION}/{name}"
+    urls = [source.format(version=VERSION, name=name) for source in SOURCES]
+    url = urls[0]
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / name
     if path.is_symlink():
@@ -63,15 +71,25 @@ def archive_for(arch, cache):
     if not path.exists():
         temporary = None
         try:
-            with tempfile.NamedTemporaryFile(dir=cache, prefix=".tor-", delete=False) as output:
-                temporary = Path(output.name)
-                with urlopen(url, timeout=90) as response:
-                    size = 0
-                    for chunk in iter(lambda: response.read(1024 * 1024), b""):
-                        size += len(chunk)
-                        if size > MAX_ARCHIVE:
-                            raise BundleError("The Tor archive exceeds its download size limit")
-                        output.write(chunk)
+            for index, candidate in enumerate(urls):
+                try:
+                    with tempfile.NamedTemporaryFile(dir=cache, prefix=".tor-", delete=False) as output:
+                        temporary = Path(output.name)
+                        with urlopen(candidate, timeout=90) as response:
+                            size = 0
+                            for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                                size += len(chunk)
+                                if size > MAX_ARCHIVE:
+                                    raise BundleError("The Tor archive exceeds its download size limit")
+                                output.write(chunk)
+                    url = candidate
+                    break
+                except HTTPError as error:
+                    # Gone from this server: the next one. Anything else is a failure.
+                    if error.code != 404 or index == len(urls) - 1:
+                        raise
+                    temporary.unlink(missing_ok=True)
+                    temporary = None
             if digest(temporary) != expected:
                 raise BundleError("The downloaded Tor archive does not match its authenticated hash")
             os.replace(temporary, path)
