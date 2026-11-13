@@ -243,21 +243,23 @@ final class DialerSiteRelay: NSObject, WKScriptMessageHandlerWithReply {
             if (!active || e.source !== window || e.origin !== origin || !e.data || e.data.source !== 'otto') return;
             var m = e.data;
             if (m.type === 'ping') { ready(); return; }
-            var send = { type: m.type };
-            if (m.type === 'dial') { send.number = m.number; send.name = m.name; send.ref = m.ref; }
+            // Otto 1.16: "dial-canada" is a dial that names its line, for that call only.
+            var canada = m.type === 'dial-canada', dial = canada || m.type === 'dial';
+            var send = { type: dial ? 'dial' : m.type };
+            if (dial) { send.number = m.number; send.name = m.name; send.ref = m.ref; if (canada) send.line = 'numero-ca'; }
             else if (m.type === 'getConfig' || m.type === 'setConfig') { send.config = m.config; }
             else if (m.type === 'calls-ack') { send.ids = m.ids; }
             else if (m.type !== 'calls-sync') return;
             Promise.resolve(relay.postMessage(send)).then(function (r) {
               r = r || {};
-              if (m.type === 'dial') post(r.ok ? { type: 'dialing', number: r.number, mode: 'panel' }
+              if (dial) post(r.ok ? { type: 'dialing', number: r.number, mode: 'panel' }
                                              : { type: 'error', number: r.number || '', error: r.error || 'The dialer did not respond' });
               else if (m.type === 'getConfig') post({ type: 'config', reqId: m.reqId, ok: !!r.ok, config: r.config, error: r.error });
               else if (m.type === 'setConfig') post({ type: 'configSaved', reqId: m.reqId, ok: !!r.ok, error: r.error });
               else if (m.type === 'calls-sync') postCalls(r.calls, true);
             }, function (err) {
               var text = String((err && err.message) || err || 'The dialer did not respond');
-              if (m.type === 'dial') post({ type: 'error', number: String(m.number || ''), error: text });
+              if (dial) post({ type: 'error', number: String(m.number || ''), error: text });
               else if (m.type === 'getConfig' || m.type === 'setConfig') post({ type: m.type === 'getConfig' ? 'config' : 'configSaved', reqId: m.reqId, ok: false, error: text });
             });
           }
@@ -300,7 +302,10 @@ final class DialerSiteRelay: NSObject, WKScriptMessageHandlerWithReply {
             guard let tab, let browser = Browsers.all.first(where: { $0.tabs.contains { $0 === tab } })
             else { return ["ok": false, "error": "No window to call from"] }
             let name = String((body["name"] as? String ?? "").prefix(80))
-            guard browser.call(number, name: name, ref: Dialer.cleanRef(body["ref"])) else {
+            // The one line a request may name, as Ottocaller's worker has it.
+            let line = body["line"] as? String
+            guard line == nil || line == Dialer.requestLine else { return ["ok": false, "error": "Unknown outgoing line"] }
+            guard browser.call(number, name: name, ref: Dialer.cleanRef(body["ref"]), line: line) else {
                 return ["ok": false, "error": dialer.blockedReason ?? "The dialer is unavailable"]
             }
             return ["ok": true, "number": number, "mode": "panel"]

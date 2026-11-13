@@ -59,11 +59,12 @@
           <span class="lbl" id="providerLbl">Numero</span>
           <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
         </button>
-        <div class="menu vmenu" id="providerMenu" hidden role="menu" aria-label="Number">
+        <!-- Otto 1.16's order: United Kingdom, Canada, United States. dialer.js fills each row. -->
+        <div class="menu vmenu" id="providerMenu" hidden role="menu" aria-label="Call route">
           <button id="numeroDefault" type="button" role="menuitemradio" data-provider="numero" aria-checked="true">Numero</button>
-          <button id="numeroUS" type="button" role="menuitemradio" data-provider="numero-us" aria-checked="false" hidden>Numero US</button>
-          <button id="numeroCA" type="button" role="menuitemradio" data-provider="numero-ca" aria-checked="false" hidden>Numero Canada</button>
           <button id="telicallUK" type="button" role="menuitemradio" data-provider="telicall" aria-checked="false">Telicall</button>
+          <button id="numeroCA" type="button" role="menuitemradio" data-provider="numero-ca" aria-checked="false" hidden>Canada</button>
+          <button id="numeroUS" type="button" role="menuitemradio" data-provider="numero-us" aria-checked="false" hidden>United States</button>
         </div>
       </div>
       <div class="mwrap">
@@ -136,6 +137,7 @@
   <script src="vendor/phone.min.js"></script>
   <script src="vendor/sip.min.js"></script>
   <script src="macvoice.js"></script>
+  <script src="ice.js"></script>
   <script src="calls.js"></script>
   <script src="dialer.js"></script>
 </body>

@@ -240,6 +240,9 @@ body:not(.has-entry) .phone[data-state="idle"] .back { opacity: .4; }
 
 /* Menus open upward from their segment. */
 .menu.vmenu { position: absolute; left: 50%; translate: -50% 0; bottom: calc(100% + 10px); min-width: 156px; transform-origin: bottom center; }
+#providerMenu { min-width: 224px; }
+#providerMenu .route-flag { width: 24px; height: 16px; flex: none; border-radius: 2px; overflow: hidden; }
+#providerMenu .route-dot { color: var(--muted); }
 #voiceMenu { min-width: 188px; left: auto; right: 0; translate: 0 0; transform-origin: bottom right; }   /* rightmost segment: anchor right so it never leaves the card */
 .menu button[aria-checked="true"] { color: var(--accent-txt); }
 #providerMenu button[aria-checked="true"]::after, .menu .vplain[aria-checked="true"]::after, .menu .vlist button.on::after {
@@ -280,7 +283,7 @@ body.sheet .scrim { opacity: 1; pointer-events: auto; }
 .phone { transition: transform .45s var(--spring); }
 body.sheet .phone { transform: scale(.985); }
 .recents {
-  position: absolute; z-index: 6; left: 12px; right: 12px; bottom: 12px; margin: 0 auto;
+  position: absolute; z-index: 6; left: 12px; right: 12px; bottom: 12px; width: auto; margin: 0 auto;
   top: min(var(--sheet-top, 70%), calc(100% - 58px));   /* resting: just under the dialer card; at least the header shows */
   display: flex; flex-direction: column; padding: 12px var(--pad) 10px; cursor: pointer;
   transition: top .45s var(--spring), box-shadow .3s;
@@ -353,7 +356,7 @@ body.sheet .phone { transform: scale(.985); }
 }
 @media (max-height: 540px) {   /* a panel too short even for the smallest keypad scrolls instead of stacking the sheet */
   body { overflow-y: auto; }
-  .recents, .recents.open { position: static; margin-top: 12px; top: auto; box-shadow: var(--shadow-card); }
+  .recents, .recents.open { position: static; width: 100%; margin-top: 12px; top: auto; box-shadow: var(--shadow-card); }
   .rlist { overflow-y: auto; max-height: 40vh; mask-image: none; -webkit-mask-image: none; }
   .scrim, body.sheet .phone { display: none; transform: none; }
 }
