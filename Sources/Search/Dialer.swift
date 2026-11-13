@@ -66,6 +66,9 @@ final class Dialer: ObservableObject {
 
     /// Local development servers require an explicit origin grant.
     nonisolated static let defaultSites = ["https://otto.investigate.agency"]
+    /// The one line a call request may name for itself (Ottocaller 1.16's
+    /// "Call with Ottocaller (Canada)"); the page reads it for that call only.
+    nonisolated static let requestLine = "numero-ca"
 
     /// What the page reads as its connection (chrome.storage.local's keys).
     nonisolated static let configKeys = ["wss", "domain", "user", "password", "autodial", "region", "numeroUS", "numeroCA", "telicallUK"]
@@ -907,10 +910,11 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     /// A number to call, with who it is and otto's reference when there is
     /// one. Handed straight to the page once it listens; before then it
     /// waits where the page looks first (storage.session's pendingDial).
-    func dial(_ number: String, name: String = "", ref: [String: Any]? = nil) {
+    func dial(_ number: String, name: String = "", ref: [String: Any]? = nil, line: String? = nil) {
         guard !released, visible, Dialer.shared.setup.on, Dialer.shared.blockedReason == nil else { return }
         var request: [String: Any] = ["number": number, "name": String(name.prefix(80)), "at": Int(Date().timeIntervalSince1970 * 1000)]
         if let ref { request["ref"] = ref }
+        if line == Dialer.requestLine { request["line"] = line }
         pending = request
         deliver()
     }
@@ -1157,9 +1161,9 @@ extension Browser {
 
     /// A number to call: the dialer comes up and takes it.
     @discardableResult
-    func call(_ number: String, name: String = "", ref: [String: Any]? = nil) -> Bool {
+    func call(_ number: String, name: String = "", ref: [String: Any]? = nil, line: String? = nil) -> Bool {
         guard showDialer() else { return false }
-        dialerPage?.dial(number, name: name, ref: ref)
+        dialerPage?.dial(number, name: name, ref: ref, line: line)
         return true
     }
 

@@ -15,7 +15,7 @@
  * `region` option.
  *
  * Inputs:
- *   chrome.storage.session.pendingDial { number, name, windowId, ref, at }   set by the background
+ *   chrome.storage.session.pendingDial { number, name, windowId, ref, line, at }   set by the background
  *   runtime message { type: "dialer:dial", number, name, windowId, ref }   when the panel is open
  *   ?n=<number>&auto=1&name=<label>&ref=<json>   the popup-window fallback carries the request in the URL
  *   chrome.storage.local { wss, domain, user, password, autodial, region, provider, voice }
@@ -47,6 +47,7 @@
   var MEDIA_TIMEOUT_NOTE = "The microphone didn't start. Keep Dark Search in front and check microphone access in System Settings, then try again.";
   var provider = "numero";     // outbound trunk; "telicall" adds an X-Provider INVITE header
   var numeroLine = "us";      // an owned Numero line, chosen explicitly in the Number menu
+  var requestedLine = "";      // the line a call request asked for ("numero-ca"), for that number only; the saved choice stays
   var voice = "";              // voice changer: semitones sent as an X-Voice INVITE header, "" = off
   var region = "GB";           // default country for national numbers (options: region)
   var entry = "";              // canonical dial string (digits / + / * / #), no spaces
@@ -59,6 +60,8 @@
   var outbox = [];             // copy of chrome.storage.local "callOutbox", so a closing panel can add to it without reading first
   var Calls = window.OttoCalls;   // calls.js: the call record and how an ending maps to an outcome
   var activeNetworkRoute = null, routeExpiryTimer = null, routeSettingsEpoch = 0, connectionRefreshID = 0;
+  var routeNotice = null;      // a route interruption's subtitle, until its registration succeeds
+  var displayCall = null, resultNotice = null; // the current call's local result, independent of registration
   var sessionHandlers = new Set();
 
   function routeFailure(message) { var error = new Error(message); error.name = "ProtectedRouteError"; return error; }
@@ -89,13 +92,14 @@
     sessionHandlers.clear();
   }
   function stopNetworkRoute(message) {
+    displayCall = null; resultNotice = null;
     generation++; recoveryRevision++; activeNetworkRoute = null;
     clearTimeout(routeExpiryTimer); routeExpiryTimer = null;
     closeSessionHandlers();
     hangup();
     var previous = simple; simple = null; registered = false; connecting = false; callBtn.disabled = true;
     if (previous) { try { Promise.resolve(previous.disconnect()).catch(function () {}); } catch (e) { /* already closed */ } }
-    setStatus("Calls paused", "err"); subEl.textContent = message;
+    setStatus("Calls paused", "err"); subEl.textContent = routeNotice = message;
   }
   function requireNetworkRoute() {
     try {
@@ -138,7 +142,8 @@
       }
       var handler;
       try {
-        var settings = Object.assign({}, options, { peerConnectionConfiguration: Object.assign({}, options && options.peerConnectionConfiguration, iceConfiguration(route)) });
+        var settings = Object.assign({}, options, { iceGatheringTimeout: OttoICE.gatheringTimeout,
+          peerConnectionConfiguration: Object.assign({}, options && options.peerConnectionConfiguration, iceConfiguration(route)) });
         handler = make(session, settings);
         var peer = handler && handler.peerConnection, config = peer && peer.getConfiguration();
         var servers = config && config.iceServers, urls = servers && servers.length === 1 && servers[0].urls;
@@ -149,6 +154,11 @@
         }
         var close = handler.close;
         handler.close = function () { sessionHandlers.delete(handler); return close.apply(handler, arguments); };
+        var token = activeAttempt, call = cur;
+        OttoICE.guard(handler, { relayOnly: route.mode === "proxy",
+          current: function () { return !stopped && panelVisible && gen === generation && route === activeNetworkRoute && activeAttempt === token && networkRouteCurrent(route, gen, inCall); },
+          failed: function () { if (call && cur === call) { call.error = true; call.failureKind = "audio-route"; } }
+        });
         sessionHandlers.add(handler);
         return handler;
       } catch (error) {
@@ -194,7 +204,15 @@
     return typeof value === "string" && /^\+44[1-9]\d{8,9}$/.test(value) ? value : "";
   }
   function telicallBound() { return !!(CFG && typeof CFG.telicallUK === "string" && CFG.telicallUK.trim()); }
+  // The line in force: a request's own (Otto 1.16: "Call with Ottocaller (Canada)"), else the saved one.
+  function activeLine() {
+    return requestedLine === "numero-ca" ? { provider: "numero", numeroLine: "ca" } : { provider: provider, numeroLine: numeroLine };
+  }
+  // What the entry dials: a keypad number is read with the default country first, as a pasted
+  // number or a call link is, so "020 7946 0958" routes as +44 20 7946 0958 (Otto 1.16.5).
+  function dialNumber() { return NORMALIZE(entry, region).dial || cleanNumber(entry); }
   function numberRoute(number) {
+    var chosen = activeLine(), provider = chosen.provider, numeroLine = chosen.numeroLine;
     var route = { user: number, provider: provider, numeroLine: "", telicallLine: "", fromNumber: "" };
     if (provider === "telicall" && Calls.external(number) && telicallBound()) {
       var uk = telicallNumber();
@@ -215,7 +233,7 @@
         || context.cancelEpoch !== cancelEpoch || context.revision !== recoveryRevision || !networkRouteCurrent(activeNetworkRoute, generation)) return false;
     if (context.kind !== "out") return true;
     var currentRoute = numberRoute(context.number);
-    return cleanNumber(entry) === context.number && !currentRoute.error
+    return dialNumber() === context.number && !currentRoute.error
       && ["user", "provider", "numeroLine", "telicallLine", "fromNumber"].every(function (key) { return currentRoute[key] === context.route[key]; });
   }
   function retryContext(kind, number, route, ref) {
@@ -389,8 +407,26 @@
             provider: route ? route.provider : provider, direction: direction || "out", answeredAt: 0,
             numeroLine: route ? route.numeroLine : "", telicallLine: route ? route.telicallLine : "", fromNumber: route ? route.fromNumber : "",
             voice: (direction || "out") === "out" ? voice : "",     // only calls we place are shifted
-            ref: ref || null, hung: false, code: 0, error: false, dropped: false, endedAt: 0, filed: false };
+            ref: ref || null, hung: false, code: 0, failureKind: "", error: false, dropped: false, endedAt: 0, filed: false, generation: generation };
+    displayCall = cur; resultNotice = null;
     return cur;
+  }
+  function showAudioRouteFailure() {
+    resultNotice = Calls.failure({ outcome: "failed", failureKind: "audio-route" });
+    setStatus(resultNotice.status, "err"); subEl.textContent = resultNotice.message;
+  }
+  function showCallResult(call) {
+    if (!call || call !== displayCall || !call.endedAt || call.generation !== generation || stopped || !panelVisible
+        || cur || calling || inCall || incoming || recovering || dialNumber() !== call.number) return false;
+    var outcome = Calls.outcome(call), result = Calls.failure(call);
+    if (!result) {
+      var label = outcome === "answered" ? "Call ended" : (OUTCOME[outcome] || OUTCOME.failed)[1];
+      result = { status: label, message: label };
+    }
+    resultNotice = result;
+    subEl.textContent = result.message;
+    setStatus(result.status, outcome === "failed" ? "err" : "");
+    return true;
   }
   /* The call is over. SIP.js reports the hang-up first and the reason second: the final status
    * of a rejected INVITE reaches dial()'s request delegate later in the same turn, and an error
@@ -401,6 +437,8 @@
     if (!call || call.endedAt) return;
     call.endedAt = Date.now();
     if (cur === call) cur = null;
+    // A request's line was for that call. One that failed to start keeps it, for the retry.
+    if (call.direction === "out" && requestedLine && !call.error) { requestedLine = ""; renderProvider(); }
     ending.push(call);
     if (now) fileCall(call, true); else setTimeout(function () { fileCall(call); }, 0);
   }
@@ -409,9 +447,13 @@
     call.filed = true;
     ending = ending.filter(function (c) { return c !== call; });
     var rec = Calls.record(call, call.endedAt);
-    history.unshift({ at: call.at, number: call.number, display: call.display, name: call.name, provider: call.provider,
+    var recent = { at: call.at, number: call.number, display: call.display, name: call.name, provider: call.provider,
                       numeroLine: call.numeroLine, telicallLine: call.telicallLine, fromNumber: call.fromNumber,
-                      direction: call.direction, voice: call.voice, outcome: rec.outcome, duration: rec.durationSec });
+                      direction: call.direction, voice: call.voice, outcome: rec.outcome, duration: rec.durationSec };
+    var code = Calls.sipStatus(call.code), kind = Calls.failureKind(call.failureKind || (call.dropped ? "connection" : ""));
+    if (code) recent.sipStatus = code;
+    if (kind) recent.failureKind = kind;
+    history.unshift(recent);
     if (history.length > HISTORY_MAX) history.length = HISTORY_MAX;
     try { chrome.storage.local.set({ history: history }); } catch (e) { /* storage unavailable */ }
     renderHistory();
@@ -469,11 +511,13 @@
       var o = OUTCOME[h.outcome] || ["", h.outcome || ""];
       var cls = h.direction === "in" ? "in" : o[0];
       var title = h.name || h.display || h.number;
-      var lineLabel = h.provider === "telicall" ? h.telicallLine === "uk" ? "Telicall UK" : "Telicall" : h.numeroLine === "us" ? "Numero US" : h.numeroLine === "ca" ? "Numero Canada" : "Numero";
+      var lineLabel = h.provider === "telicall" ? h.telicallLine === "uk" ? "United Kingdom" : "Telicall" : h.numeroLine === "us" ? "United States" : h.numeroLine === "ca" ? "Canada" : "Numero";
       var sub = (h.name ? (h.display || h.number) + " · " : "") + lineLabel + (h.fromNumber ? " · " + h.fromNumber : "") +
                 (h.direction === "in" ? " · incoming" : "");
+      var failure = Calls.failure({ outcome: h.outcome, sipStatus: h.sipStatus, failureKind: h.failureKind });
+      if (failure) sub = failure.message + " · " + sub;
       var right = h.outcome === "answered" ? fmt(h.duration || 0) : o[1];
-      html += '<li style="--i:' + Math.min(i, 12) + '"><button type="button" class="rrow" data-i="' + i + '" title="Call again">' +
+      html += '<li style="--i:' + Math.min(i, 12) + '"><button type="button" class="rrow" data-i="' + i + '" title="' + esc(failure ? failure.message : "Call again") + '">' +
         '<span class="ric ' + cls + '">' + (h.direction === "in" ? ICON_IN : h.outcome === "answered" ? ICON_OUT : ICON_MISS) + "</span>" +
         '<span class="rmain"><span class="rname">' + esc(title) + '</span><span class="rsub">' + esc(sub) + "</span></span>" +
         '<span class="rmeta"><span class="rwhen">' + esc(timeLabel(h.at)) + '</span><span class="rdur ' + o[0] + '">' + esc(right) + "</span></span>" +
@@ -629,6 +673,7 @@
   // Renders the readout. A character the keypad appended slides in on its own; a new number
   // (paste, otto, recents) fades in whole; a deletion just redraws. Long numbers step down a size.
   function renderNum() {
+    if (displayCall && dialNumber() !== displayCall.number) { displayCall = null; resultNotice = null; }
     var t = formatDisplay(entry), prev = numEl.textContent || "";
     if (prev && t.length > prev.length && t.indexOf(prev) === 0) {
       numEl.textContent = prev;
@@ -643,11 +688,18 @@
   }
 
   // Replace the current entry (keypad edits append to it instead).
-  function setEntry(dialStr, ext) { entry = dialStr || ""; entryExt = ext || ""; renderNum(); }
+  // A request may name its line; any other change to the entry returns to the saved one.
+  function setEntry(dialStr, ext, line) {
+    var before = requestedLine;
+    displayCall = null; resultNotice = null; entry = dialStr || ""; entryExt = ext || "";
+    requestedLine = line === "numero-ca" ? line : "";
+    renderNum();
+    if (before !== requestedLine) { recoveryRevision++; renderProvider(); }
+  }
 
-  function setNumber(n, name) {
+  function setNumber(n, name, line) {
     var r = NORMALIZE(n, region);
-    setEntry(r.dial || cleanNumber(n), r.ext);
+    setEntry(r.dial || cleanNumber(n), r.ext, line);
     whoEl.textContent = name ? String(name) : "";
     hintFor(r);
   }
@@ -678,7 +730,7 @@
   });
   function press(d) {
     if (inCall) { try { simple.sendDTMF(d); } catch (e) { /* not in a session */ } return; }
-    entry += d; whoEl.textContent = ""; renderNum();
+    setEntry(entry + d, entryExt); whoEl.textContent = "";
   }
   // A key typed on the keyboard lights its on-screen twin, like a tap would.
   function flashKey(d) {
@@ -691,7 +743,7 @@
   zeroKey.addEventListener("pointerdown", function () {
     if (inCall) return;
     zeroTimer = setTimeout(function () {
-      entry = entry.slice(0, -1) + "+"; renderNum();
+      setEntry(entry.slice(0, -1) + "+", entryExt);
       zeroTimer = null;
     }, 450);
   });
@@ -699,12 +751,12 @@
     zeroKey.addEventListener(ev, function () { if (zeroTimer) { clearTimeout(zeroTimer); zeroTimer = null; } });
   });
 
-  function clearAll() { entry = ""; entryExt = ""; whoEl.textContent = ""; renderNum(); }
+  function clearAll() { setEntry("", ""); whoEl.textContent = ""; }
   // ⌫ — a tap deletes one character; holding it for ~3s clears the whole number.
   var backHold = null, backCleared = false, backBtn = $("back");
   backBtn.addEventListener("click", function () {
     if (backCleared) { backCleared = false; return; }        // the hold already cleared it
-    if (!inCall) { entry = entry.slice(0, -1); renderNum(); }
+    if (!inCall) { setEntry(entry.slice(0, -1), entryExt); }
   });
   backBtn.addEventListener("pointerdown", function () {
     if (inCall) return;
@@ -721,7 +773,7 @@
   document.addEventListener("keydown", function (e) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;               // let ⌘V / ⌘A through to paste/copy
     if (/^[0-9*#+]$/.test(e.key)) { press(e.key); flashKey(e.key); }
-    else if (e.key === "Backspace") { if (!inCall) { entry = entry.slice(0, -1); renderNum(); } }
+    else if (e.key === "Backspace") { if (!inCall) { setEntry(entry.slice(0, -1), entryExt); } }
     else if (e.key === "Enter") { if (inCall) hangup(); else dial(); }
     else if (e.key === "Escape") { if (!sheetOpen() && !document.querySelector(".menu:not([hidden])") && inCall) hangup(); }   // dismiss first; hang up only when nothing is open
   });
@@ -855,10 +907,11 @@
 
   // Number: which trunk (and therefore which caller number) the call goes out on.
   var providerBtn = $("provider"), providerMenu = $("providerMenu"), providerLbl = $("providerLbl");
-  function providerChoice() { return provider === "numero" && numeroBound() ? "numero-" + numeroLine : provider; }
+  function providerChoice() { var c = activeLine(); return c.provider === "numero" && numeroBound() ? "numero-" + c.numeroLine : c.provider; }
   // A line with a number is a row of its country's flag (search.css draws it from data-flag),
-  // a middle dot and the number as the readout would show it; the provider's name is the
-  // row's tooltip and what a screen reader says. A provider without a number is its name.
+  // a middle dot and the number as the readout would show it; the country's name, as Otto's
+  // route menu has it, is the row's tooltip and what a screen reader says. A provider without
+  // a number is its name.
   function lineRow(button, flag, name, number, otherwise) {
     var shown = number ? formatDisplay(number) || number : otherwise;
     button.setAttribute("data-flag", flag);
@@ -867,16 +920,17 @@
     button.textContent = flag ? "· " + shown : name;
   }
   function renderProvider() {
+    var chosen = activeLine(), provider = chosen.provider, numeroLine = chosen.numeroLine;
     var bound = numeroBound(), selected = numeroNumber(numeroLine), ukBound = telicallBound(), uk = telicallNumber();
     if (providerLbl) providerLbl.textContent = provider === "telicall" ? ukBound ? uk ? "UK" : "Choose" : "Telicall" : !bound ? "Numero" : selected ? numeroLine === "ca" ? "Canada" : "US" : "Choose";
-    if (providerBtn) providerBtn.title = provider === "telicall" && ukBound ? uk ? "Telicall UK · " + (formatDisplay(uk) || uk) : "Set a valid UK number in Settings › Dialer" : provider === "numero" && bound ? selected ? "Numero " + (numeroLine === "ca" ? "Canada" : "US") + " · " + (formatDisplay(selected) || selected) : "Choose an available owned Numero number" : "Number the call goes out on";
-    lineRow($("telicallUK"), ukBound ? "GB" : "", ukBound ? "Telicall UK" : "Telicall", uk, "invalid number");
+    if (providerBtn) providerBtn.title = provider === "telicall" && ukBound ? uk ? "Call route · United Kingdom · " + (formatDisplay(uk) || uk) : "Set a valid UK number in Settings › Dialer" : provider === "numero" && bound ? selected ? "Call route · " + (numeroLine === "ca" ? "Canada" : "United States") + " · " + (formatDisplay(selected) || selected) : "Choose an available owned Numero number" : "Number the call goes out on";
+    lineRow($("telicallUK"), ukBound ? "GB" : "", ukBound ? "United Kingdom" : "Telicall", uk, "invalid number");
     $("telicallUK").disabled = ukBound && !uk;
     $("numeroDefault").hidden = bound;
     ["us", "ca"].forEach(function (line) {
       var button = $(line === "us" ? "numeroUS" : "numeroCA"), number = numeroNumber(line);
       button.hidden = !bound; button.disabled = !number;
-      lineRow(button, line === "us" ? "US" : "CA", "Numero " + (line === "us" ? "US" : "Canada"), number, "not configured");
+      lineRow(button, line === "us" ? "US" : "CA", line === "us" ? "United States" : "Canada", number, "not configured");
     });
     if (providerMenu) providerMenu.querySelectorAll("[data-provider]").forEach(function (b) {
       b.setAttribute("aria-checked", b.getAttribute("data-provider") === providerChoice() ? "true" : "false");
@@ -884,13 +938,15 @@
   }
   attachMenu(providerBtn, providerMenu, "data-provider", providerChoice, function (v) {
     var before = providerChoice();
+    requestedLine = "";                          // a pick in the menu outranks the request's line
+    if (pending) pending.line = "";
     if (v === "numero-us" || v === "numero-ca") {
       var line = v.slice(7);
-      if (!numeroNumber(line)) return;
+      if (!numeroNumber(line)) { renderProvider(); return; }
       numeroLine = line; provider = "numero";
     } else if (v === "telicall" && (!telicallBound() || telicallNumber())) provider = "telicall";
     else if (v === "numero" && !numeroBound()) provider = "numero";
-    else return;
+    else { renderProvider(); return; }
     if (before !== providerChoice()) recoveryRevision++;
     renderProvider();
     try { chrome.storage.local.set({ provider: provider, numeroLine: numeroLine }); } catch (e) { /* storage unavailable */ }
@@ -985,6 +1041,11 @@
       function current() { return !settled && !stopped && panelVisible && token === activeAttempt && gen === generation && networkRouteCurrent(activeNetworkRoute, gen); }
       function finish(error, stream) {
         if (settled) { stopStream(stream); return; }
+        if (error && current() && cur && error.name !== "AbortError") {
+          cur.error = true; // SIP may report termination before client.call() rejects.
+          cur.failureKind = /NotAllowed|PermissionDenied|permission|not allowed/i.test(String((error.name || "") + " " + (error.message || ""))) ? "microphone-denied"
+            : error.name === "MediaStartTimeoutError" ? "microphone-timeout" : usesMacVoice ? "voice" : "capture";
+        }
         if (error && current() && /NotAllowed|PermissionDenied|permission|not allowed/i.test(String((error.name || "") + " " + (error.message || "")))) {
           mediaFailure = { token: token, gen: gen, kind: "denied" };
         }
@@ -1034,6 +1095,7 @@
 
   async function boot() {
     if (stopped) return;
+    displayCall = null; resultNotice = null;
     var gen = ++generation;
     activeNetworkRoute = null;
     clearTimeout(routeExpiryTimer); routeExpiryTimer = null;
@@ -1123,6 +1185,7 @@
       },
       onCallHangup: function () {
         if (gen !== generation) return;
+        var endedCall = cur || displayCall;
         if (cur && mediaFailed(attempt, gen)) cur.error = true;
         callEnd(cur);
         cancelPendingMedia();
@@ -1132,6 +1195,8 @@
         $("mute").classList.remove("on"); $("muteLbl").textContent = "Mute";
         calling = false; syncButtons(); subEl.textContent = "Call ended"; stopTimer();
         setStatus(registered ? "Registered" : "Not registered", registered ? "reg" : "");
+        showCallResult(endedCall);
+        if (endedCall && endedCall.failureKind === "audio-route") showAudioRouteFailure();
         showMediaFailure();
         if (network.mode === "proxy" && network.expiresAt * 1000 <= Date.now()) {
           stopNetworkRoute("The protected call route expired. Reconnect the proxy before calling");
@@ -1146,12 +1211,18 @@
         }
         registered = true; connecting = false;
         if (inCall) return;
-        setStatus("Registered", "reg");
+        if (!calling && !incoming && !endingCall && !recovering && (!resultNotice || subEl.textContent !== resultNotice.message)) setStatus("Registered", "reg");
         callBtn.disabled = false;
+        // Registration owns only the old route notice. A later number hint,
+        // microphone error or call message still belongs to that operation.
+        if (routeNotice && subEl.textContent === routeNotice && !calling && !incoming && !endingCall && !recovering) {
+          hintFor(NORMALIZE(entry, region));
+        }
+        routeNotice = null;
         if (pending) {
           var p = pending; pending = null;
           if (panelVisible && !stopped) {
-            setNumber(p.number, p.name); setLead(p.ref);
+            setNumber(p.number, p.name, p.line); setLead(p.ref);
             if (CFG.autodial !== false) dial();
           }
         }
@@ -1221,7 +1292,7 @@
   async function dial(retry) {
     var context = retry && retry.microphoneRetry && retry.kind === "out" ? retry : null;
     if (context && !retryCurrent(context)) return;
-    var n = context ? context.number : cleanNumber(entry);
+    var n = context ? context.number : dialNumber();
     if (!n || stopped || !panelVisible || !registered || inCall || calling || incoming || endingCall || recovering || !simple) return;
     if (!requireNetworkRoute()) return;
     var route = context ? context.route : numberRoute(n); // freeze the chosen line before permission/media work can yield
@@ -1229,6 +1300,7 @@
     var ref = context ? context.ref : lead && lead.number === n ? lead.ref : null;
     context = context || retryContext("out", n, route, ref);
     var token = ++attempt, gen = generation, client = simple;
+    displayCall = null; resultNotice = null;
     context.token = token;
     mediaFailure = null;
     activeAttempt = token;
@@ -1249,7 +1321,13 @@
     lead = null;                                 // one call per reference
     var call = callStart(n, context.name, "out", ref, route);
     // The final answer to our INVITE (486 busy, 480 no answer, …), kept for the call record.
-    var finalStatus = function (resp) { var sc = resp && resp.message && resp.message.statusCode; if (sc) call.code = sc; };
+    var finalStatus = function (resp) {
+      var message = resp && resp.message, sc = Calls.sipStatus(message && message.statusCode);
+      // The server's own fixed word for a number type Telicall won't carry (Otto 1.16.3), never a reason phrase.
+      if (sc >= 300 && call.provider === "telicall" && typeof message.getHeader === "function"
+          && message.getHeader("X-Ottocaller-Error") === "telicall-number-type") call.failureKind = "number-type";
+      if (sc) { call.code = sc; showCallResult(call); }
+    };
     startRingback();                             // ring while dialing, not only once 180 arrives
     try {
       var extraHeaders = call.provider === "telicall" ? ["X-Provider: telicall"] : [];
@@ -1283,16 +1361,14 @@
       MacVoice.stop();
       calling = false; syncButtons();
       var text = String(e && ((e.name || "") + " " + (e.message || "")) || e);
-      call.error = true; callEnd(call);
+      call.error = true; call.failureKind = call.failureKind || (/voice service/i.test(text) ? "voice" : "call"); callEnd(call);
       nudge(displayEl, "shake");
-      if (/voice service/i.test(text)) subEl.textContent = text.replace(/^\w*Error\s*/, "");
-      else if (/NotAllowed|PermissionDenied|permission|not allowed/i.test(text)) {
+      if (/NotAllowed|PermissionDenied|permission|not allowed/i.test(text)) {
         needMic();
         context.cleanup = failMediaStart(client, call);
         if (await recoverMicrophone(context)) return dial(context);
       }
-      else subEl.textContent = "Call failed";
-      console.error(e);
+      else { failMediaStart(client, call); showCallResult(call); }
     }
   }
   function failMediaStart(client, call) {
@@ -1307,6 +1383,7 @@
   async function hangup() {
     // A queued number or permission check is a call too, even while the red button is inert.
     cancelPendingMedia();
+    closeSessionHandlers();
     pending = null; activeAttempt = 0; attempt++; cancelEpoch++; recovering = null; entryExt = ""; lead = null;
     var client = simple, decline = incoming, hadCall = !!cur;
     if (!inCall && cur) cur.hung = true;
@@ -1355,6 +1432,12 @@
       await client.answer();
     }
     catch (e) {
+      if (e && e.name === "AudioRouteError") {
+        if (token !== activeAttempt || gen !== generation || stopped || !panelVisible) return;
+        await hangup();
+        showAudioRouteFailure();
+        return;
+      }
       if (mediaFailed(token, gen) || /NotAllowed|PermissionDenied|permission|not allowed/i.test(String((e && e.name || "") + " " + (e && e.message || "")))) {
         if (!retryCurrent(context)) return;
         // SIP may already have terminated an Invitation whose media failed. Never
@@ -1410,7 +1493,7 @@
 
   /* ------------------------------ requests from otto ------------------------------ */
 
-  function requestDial(number, name, ref) {
+  function requestDial(number, name, ref, line) {
     if (stopped || !panelVisible) return;
     var r = NORMALIZE(number, region);
     var n = r.dial || cleanNumber(number);
@@ -1430,12 +1513,12 @@
       catch (error) { stopNetworkRoute(error.message); return; }
     }
     closeSheet();
-    setEntry(n, r.ext); whoEl.textContent = name ? String(name) : "";
+    setEntry(n, r.ext, line); whoEl.textContent = name ? String(name) : "";
     setLead(ref);
     if (CFG && CFG.autodial === false) { pending = null; subEl.textContent = "Ready to call"; return; }
     if (registered) dial();
     else {
-      pending = { number: number, name: name, ref: ref };
+      pending = { number: number, name: name, ref: ref, line: line };
       subEl.textContent = connecting ? "Will call once registered…" : "Not registered";
     }
   }
@@ -1450,7 +1533,7 @@
     if (!msg) return;
     if (msg.type === "mic-granted") {
       // the one-time microphone tab reported back: resume the call it interrupted
-      if (panelVisible && !stopped && pending && registered && !inCall) { var p = pending; pending = null; setNumber(p.number, p.name); setLead(p.ref); dial(); }
+      if (panelVisible && !stopped && pending && registered && !inCall) { var p = pending; pending = null; setNumber(p.number, p.name, p.line); setLead(p.ref); dial(); }
       else if (panelVisible && !stopped && !inCall) subEl.textContent = "Microphone allowed";
       return;
     }
@@ -1459,7 +1542,7 @@
     windowReady.then(function () {
       if (!wasVisible || requestEpoch !== cancelEpoch || !forMe(msg.windowId)) return;
       chrome.storage.session.remove("pendingDial").catch(function () {});
-      requestDial(msg.number, msg.name, Calls.cleanRef(msg.ref));
+      requestDial(msg.number, msg.name, Calls.cleanRef(msg.ref), msg.line);
     });
   });
 
@@ -1544,7 +1627,7 @@
   var startNumber = q.get("n") ? NORMALIZE(q.get("n"), region).dial : "";
   var startRef = null;
   try { startRef = q.get("ref") ? Calls.cleanRef(JSON.parse(q.get("ref"))) : null; } catch (e) { startRef = null; }
-  if (startNumber) { setNumber(q.get("n"), startName); setLead(startRef); }
+  if (startNumber) { setNumber(q.get("n"), startName, q.get("line")); setLead(startRef); }
 
   var startupEpoch = cancelEpoch;
   Promise.all([freshConfiguration(CFG_KEYS.concat(NUMERO_KEYS, TELICALL_KEYS, ["provider", "numeroLine", "region", "voice"])), chrome.storage.session.get("pendingDial"), windowReady]).then(function (r) {
@@ -1559,12 +1642,12 @@
     if (entry) renderNum();                       // re-render a URL-supplied number with the real region
     var pd = r[1] && r[1].pendingDial;
     if (cancelEpoch === startupEpoch && panelVisible && startNumber && q.get("auto") === "1" && CFG.autodial !== false) {
-      pending = { number: q.get("n"), name: startName, ref: startRef };   // popup fallback: request in the URL
+      pending = { number: q.get("n"), name: startName, ref: startRef, line: q.get("line") };   // popup fallback: request in the URL
     } else if (pd && pd.number && Date.now() - (pd.at || 0) < 60000 && forMe(pd.windowId)) {
       chrome.storage.session.remove("pendingDial").catch(function () {});
       var pdRef = Calls.cleanRef(pd.ref);
-      setNumber(pd.number, pd.name); setLead(pdRef);              // with autodial off, the Call button still dials for this lead
-      if (cancelEpoch === startupEpoch && panelVisible && CFG.autodial !== false) pending = { number: pd.number, name: pd.name, ref: pdRef };
+      setNumber(pd.number, pd.name, pd.line); setLead(pdRef);              // with autodial off, the Call button still dials for this lead
+      if (cancelEpoch === startupEpoch && panelVisible && CFG.autodial !== false) pending = { number: pd.number, name: pd.name, ref: pdRef, line: pd.line };
     }
     boot();
   }).catch(function () { if (!stopped) stopNetworkRoute("The call route couldn't be read. Try again"); });

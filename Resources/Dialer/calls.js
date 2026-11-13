@@ -72,6 +72,30 @@
     return "no-answer";            // it ended unanswered and nothing more was reported
   }
 
+  // Local diagnostics use only a bounded status and fixed kinds. Never display a
+  // SIP reason phrase or an exception message, and never add these to record/clean.
+  function sipStatus(value) { return typeof value === "number" && isFinite(value) && Math.floor(value) === value && value >= 200 && value <= 699 ? value : 0; }
+  function failureKind(value) {
+    return ["capture", "microphone-denied", "microphone-timeout", "voice", "connection", "audio-route", "number-type", "call"].indexOf(value) >= 0 ? value : "";
+  }
+  function failure(c) {
+    c = c || {};
+    if ((c.outcome || outcome(c)) !== "failed") return null;
+    var code = sipStatus(c.sipStatus || c.code), kind = failureKind(c.failureKind);
+    if (kind === "audio-route") return { status: "Audio connection unavailable", message: "The audio connection could not be prepared. Check the proxy and try again." };
+    if (kind === "capture") return { status: "Microphone unavailable", message: "The microphone could not start. Check the selected input device, then try again." };
+    if (kind === "microphone-denied") return { status: "Microphone blocked", message: "Microphone blocked — allow Dark Search to use the microphone, then try again" };
+    if (kind === "microphone-timeout") return { status: "Microphone didn't start", message: "The microphone didn't start. Keep Dark Search in front and check microphone access in System Settings, then try again." };
+    if (kind === "number-type") return { status: "Call refused", message: "Telicall rejected the request: invalid phone number type. Choose another line for this number." };
+    if (kind === "voice") return { status: "Voice service unavailable", message: "The voice service could not start. Check it or choose another voice, then try again." };
+    if (code === 402) return { status: "Call refused", message: "The provider refused the call (SIP 402). Check the account's calling plan and selected number." };
+    if (code === 603) return { status: "Call refused", message: "The provider or recipient refused the call (SIP 603)" };
+    if (code === 488) return { status: "Audio connection failed", message: "The phone server could not establish the audio connection (SIP 488). Try reconnecting the dialer." };
+    if (code) return { status: "Call failed", message: "The provider could not complete the call (SIP " + code + ")" };
+    if (kind === "connection" || c.dropped) return { status: "Call disconnected", message: "The connection to the calling server was lost. Reconnect before trying again." };
+    return { status: "Call failed", message: "Call failed. No further details were provided." };
+  }
+
   // The record for a finished call. `c` is the dialer's call object (see callStart in dialer.js).
   function record(c, endedAt) {
     var started = Number(c.at) || 0, answered = c.answeredAt ? Number(c.answeredAt) : null;
@@ -145,7 +169,8 @@
   var api = {
     OUTBOX_KEY: OUTBOX_KEY, OUTBOX_MAX: OUTBOX_MAX, REF_MAX: REF_MAX, OUTCOMES: OUTCOMES,
     newId: newId, cleanRef: cleanRef, plainNumber: plainNumber, external: external,
-    outcome: outcome, record: record, clean: clean, list: list, append: append, ack: ack
+    outcome: outcome, sipStatus: sipStatus, failureKind: failureKind, failure: failure,
+    record: record, clean: clean, list: list, append: append, ack: ack
   };
   if (typeof module === "object" && module && module.exports) module.exports = api;
   else root.OttoCalls = api;
