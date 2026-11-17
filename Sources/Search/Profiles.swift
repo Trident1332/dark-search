@@ -106,6 +106,11 @@ final class Profiles: ObservableObject {
         return made
     }
 
+    /// Quitting: every history made so far, written now.
+    static func flushHistories() {
+        for history in histories.values { history.flush() }
+    }
+
     static func bookmarks(_ id: UUID) -> Bookmarks {
         if let made = bookmarkLists[id] { return made }
         let made = Bookmarks(file: id == Profile.personalID ? "bookmarks.json" : "bookmarks-\(id.uuidString).json")
@@ -164,6 +169,7 @@ final class Profiles: ObservableObject {
         Spaces.eraseStore(Profiles.stores.removeValue(forKey: id), id: id)
         Profiles.histories.removeValue(forKey: id)?.retire()
         Profiles.bookmarkLists.removeValue(forKey: id)?.retire()
+        Archive.forget(profile: id)
         // Never opened this run: their files go all the same.
         for name in ["history-\(id.uuidString).json", "bookmarks-\(id.uuidString).json"] {
             Disk.remove(Store.file(name))

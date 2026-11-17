@@ -2,7 +2,8 @@
 <!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
 <dictionary title="Dark Search Terminology">
     <!-- Read-only, in Safari's words and codes: a script can ask for the address
-         and title of the tabs, plus window space/profile names. Private tabs are not listed.
+         and title of the tabs, and the names of a window's space and profile,
+         and nothing else. Private tabs are not listed.
          count is here because "repeat with t in tabs" asks for it. -->
     <suite name="Dark Search Suite" code="Srch" description="Windows and their tabs, to read.">
         <command name="count" code="corecnte" description="Return the number of elements of a particular class within an object.">

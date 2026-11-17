@@ -39,13 +39,26 @@ final class Favicons: NSObject {
     /// What each address was last found to wear, in each look, until a page
     /// changes: the History panel asks for two thousand at a time, and a page
     /// with no icon of its own is matched against every page of its site.
-    private var lookups: [String: NSImage?] = [:]
+    private final class Lookup {
+        weak var image: NSImage?
+        let missing: Bool
+        init(_ image: NSImage?) { self.image = image; missing = image == nil }
+    }
+    private var lookups: [String: Lookup] = [:]
     private var loaded = false
     private var saving = false
     /// Icons a page stopped wearing, to be deleted once no page wears them.
     private var dropped: Set<String> = []
 
-    private var memory: [String: NSImage] = [:]
+    private let memory: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.totalCostLimit = 16 * 1024 * 1024
+        return cache
+    }()
+    /// Private icons have no disk copy to return to if their drawing is evicted.
+    private var shyImages: [String: Data] = [:]
+    /// A drawing can be evicted before its file has finished being written.
+    private var pendingImages: [String: Data] = [:]
     private var busy: Set<String> = []
     private let requested = NSHashTable<Tab>.weakObjects()
     private var routeGeneration = 0
@@ -94,6 +107,9 @@ final class Favicons: NSObject {
         try? FileManager.default.removeItem(at: Favicons.folder)
         pages.removeAll()
         shyPages.removeAll()
+        memory.removeAllObjects()
+        shyImages.removeAll()
+        pendingImages.removeAll()
         dropped.removeAll()
         loaded = true
         missing.removeAll()
@@ -123,9 +139,12 @@ final class Favicons: NSObject {
         guard !shyPages.isEmpty else { return }
         for site in shyPages.values { for page in site.values { dropped.formUnion([page.light, page.dark].compactMap { $0 }) } }
         shyPages.removeAll()
+        shyImages.removeAll()
         save()
     }
     private static func file(_ ident: String) -> URL { folder.appendingPathComponent(ident + ".png") }
+    /// The SVG a drawing was made from, kept beside it until it goes.
+    private static func svg(_ ident: String) -> URL { folder.appendingPathComponent(ident + ".svg") }
 
     /// Whether the chrome is dark right now. A site that declares an icon
     /// for `prefers-color-scheme: dark` is asked for that one, and it is
@@ -155,8 +174,8 @@ final class Favicons: NSObject {
 
     private static func segments(_ page: String) -> [Substring] { page.split(separator: "/") }
 
-    /// The name an icon is kept under: its own address, so pages that point
-    /// at the same file share one copy.
+    /// The name an icon is kept under: its own address, with the look an SVG
+    /// is drawn in, so pages that point at the same file share one copy.
     private static func ident(_ icon: URL) -> String { ident(icon.absoluteString) }
 
     private static func ident(_ text: String) -> String {
@@ -204,16 +223,27 @@ final class Favicons: NSObject {
         guard !saving else { return }
         saving = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in
-            saving = false
-            let gone = prune().map(Favicons.file)
-            guard let data = try? JSONEncoder().encode(pages) else { return }
-            let folder = Favicons.folder, index = Favicons.index
-            Favicons.disk.async {
-                try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                try? data.write(to: index, options: .atomic)
-                for file in gone { try? FileManager.default.removeItem(at: file) }
-            }
+            write(now: false)
         }
+    }
+
+    /// Quitting: the write still waiting out `save`'s pause, made before the
+    /// process ends rather than never.
+    func flush() { write(now: true) }
+
+    private func write(now: Bool) {
+        guard saving else { return }
+        saving = false
+        let gone = prune().flatMap { [Favicons.file($0), Favicons.svg($0)] }
+        guard let data = try? JSONEncoder().encode(pages) else { return }
+        let folder = Favicons.folder, index = Favicons.index
+        let put: @Sendable () -> Void = {
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? data.write(to: index, options: .atomic)
+            for file in gone { try? FileManager.default.removeItem(at: file) }
+        }
+        // sync also waits out any write of the index already queued.
+        if now { Favicons.disk.sync(execute: put) } else { Favicons.disk.async(execute: put) }
     }
 
     /// Forgets the pages seen longest ago once there are too many, and says
@@ -238,7 +268,8 @@ final class Favicons: NSObject {
         let gone = dropped.subtracting(worn)
         dropped.removeAll()
         for ident in gone {
-            memory[ident] = nil
+            memory.removeObject(forKey: ident as NSString)
+            shyImages[ident] = nil
             absent.insert(ident)
         }
         return gone
@@ -262,10 +293,13 @@ final class Favicons: NSObject {
     private func lookup(_ site: String, page: String?, shy: Bool) -> NSImage? {
         load()
         let key = "\(Favicons.dark) \(shy) \(site) \(page ?? "")"
-        if let known = lookups[key] { return known }
+        if let known = lookups[key] {
+            if let image = known.image { return image }
+            if known.missing { return nil }
+        }
         let other = site.hasPrefix("www.") ? String(site.dropFirst(4)) : "www." + site
         let found = nearest(site, page: page, shy: shy) ?? nearest(other, page: page, shy: shy)
-        lookups[key] = found
+        lookups[key] = Lookup(found)
         return found
     }
 
@@ -303,7 +337,11 @@ final class Favicons: NSObject {
     }
 
     private func known(_ ident: String) -> NSImage? {
-        if let hit = memory[ident] { return hit }
+        if let hit = memory.object(forKey: ident as NSString) { return hit }
+        if let data = shyImages[ident] ?? pendingImages[ident], let image = NSImage(data: data) {
+            remember(image, as: ident)
+            return image
+        }
         // An icon with no file on disk is looked for there once, not on every
         // line of every list that shows it: the History panel asked for two
         // thousand of them each time it drew. One that arrives later goes
@@ -313,8 +351,16 @@ final class Favicons: NSObject {
             absent.insert(ident)
             return nil
         }
-        memory[ident] = image
+        remember(image, as: ident)
         return image
+    }
+
+    private func remember(_ image: NSImage, as ident: String) {
+        // From the file's own pixel size: asking for a CGImage here would
+        // decode every icon on the main thread as it comes in.
+        let pixels = image.representations.map { $0.pixelsWide * $0.pixelsHigh }.max() ?? 0
+        let cost = pixels > 0 ? pixels * 4 : 128 * 128 * 8
+        memory.setObject(image, forKey: ident as NSString, cost: cost)
     }
 
     private static func fresh(_ ident: String) -> Bool {
@@ -329,9 +375,16 @@ final class Favicons: NSObject {
         missing = []
         failed = []
         for tab in tabs {
-            guard tab.address != nil else { continue }
-            tab.icon = cached(for: tab.address, shy: tab.shy)
-            fetch(for: tab)
+            guard let url = tab.address else { continue }
+            // One not kept for this look yet: the page's own in the other
+            // stays on until it comes. Another page's would be a guess.
+            let page = Favicons.page(url)
+            let own = Favicons.site(url).flatMap { (tab.shy ? shyPages[$0]?[page] : nil) ?? pages[$0]?[page] }
+            tab.icon = cached(for: url, shy: tab.shy) ?? own.flatMap { image($0, dark: !Favicons.dark) }
+            // A page still on its way is asked when it finishes loading:
+            // asked now, it answers from the document before it, or from
+            // nothing yet, and is set down as having no icon.
+            if !tab.loading { fetch(for: tab) }
         }
     }
 
@@ -341,9 +394,9 @@ final class Favicons: NSObject {
         let site = host.lowercased()
         guard cached(site) == nil, let image = await Favicons.square(data) else { return }
         let ident = Favicons.ident("adopted:" + site)
-        memory[ident] = image
+        remember(image, as: ident)
         absent.remove(ident)
-        Favicons.keep(image, for: ident)
+        keep(image, for: ident)
         if pages[site]?["/"] == nil { pages[site, default: [:]]["/"] = Page(light: ident, seen: 0) }
         save()
         arrived?(site)
@@ -420,9 +473,14 @@ final class Favicons: NSObject {
         return .any
     }
 
-    private func download(_ candidates: [URL], site: String, page: String, dark: Bool, shy: Bool,
-                          origin: URL, cookies: [HTTPCookie], generation: Int, refresh: Bool, again: Bool = true) async {
+    /// Not private, and with defaults for what only a page knows, so a test
+    /// can ask for an icon outright.
+    func download(_ candidates: [URL], site: String, page: String, dark: Bool, shy: Bool,
+                  origin: URL? = nil, cookies: [HTTPCookie] = [], generation: Int? = nil, refresh: Bool = false,
+                  again: Bool = true) async {
+        let generation = generation ?? routeGeneration
         guard generation == routeGeneration else { return }
+        guard let origin = origin ?? candidates.first else { return }
         let busyKey = site + page
         defer { if generation == routeGeneration { busy.remove(busyKey) } }
         let requests = FaviconRequests(origin: origin, cookies: cookies)
@@ -442,24 +500,40 @@ final class Favicons: NSObject {
         var asked = false
         for candidate in candidates where !failed.contains(candidate) && !OnionAddress.isOnion(candidate) {
             if let until = unreachable[candidate], until > Date() { continue }
-            let ident = Favicons.ident(candidate)
+            let plain = Favicons.ident(candidate)
+            // An SVG can draw a dark look of its own (#807), so each look
+            // keeps its own drawing of one; any other file is one picture.
+            let drawn = Favicons.ident(candidate.absoluteString + (dark ? " dark" : " light"))
+            let other = Favicons.ident(candidate.absoluteString + (dark ? " light" : " dark"))
             // Another page of the site wears the same file, and it is fresh.
-            if !refresh, !shy, Favicons.fresh(ident), let image = known(ident) {
+            if !refresh, !shy, let ident = [drawn, plain].first(where: Favicons.fresh), let image = known(ident) {
                 wear(ident, image, site: site, page: page, dark: dark, shy: shy)
                 return
             }
+            // The other look was drawn from an SVG kept beside it, and is
+            // fresh: this look is drawn from the same, not asked for again.
+            var kept: Data?
+            if !shy, Favicons.fresh(other) { kept = try? Data(contentsOf: Favicons.svg(other)) }
+            var answer = kept.map { ($0, URLResponse(url: candidate, mimeType: "image/svg+xml", expectedContentLength: $0.count, textEncodingName: nil)) }
             asked = true
-            // No answer at all is the network, not the site.
-            let data: Data, response: URLResponse
-            do {
-                (data, response) = try await requests.data(for: candidate, in: session)
-            } catch {
-                guard generation == routeGeneration else { return }
-                if (error as? URLError)?.code == .dataLengthExceedsMaximum {
-                    failed.insert(candidate)
-                } else {
-                    unanswered.append(candidate)
+            // No answer at all is the network, not the site. Through the
+            // page's own requests (FaviconRequests), which stop an oversized
+            // answer as readIcon does.
+            if answer == nil {
+                do {
+                    answer = try await requests.data(for: candidate, in: session)
+                } catch {
+                    guard generation == routeGeneration else { return }
+                    if (error as? URLError)?.code == .dataLengthExceedsMaximum {
+                        failed.insert(candidate)
+                    } else {
+                        unanswered.append(candidate)
+                    }
+                    continue
                 }
+            }
+            guard let (data, response) = answer else {
+                unanswered.append(candidate)
                 continue
             }
             guard generation == routeGeneration else { return }
@@ -470,20 +544,26 @@ final class Favicons: NSObject {
                 continue
             }
             var decoded = await Favicons.square(data)
+            var ident = plain
             // An SVG icon: drawn by WebKit, never by a decoder of this
             // process's own, then read back as the PNG it drew (#680).
             if decoded == nil, SVGIcons.looksLikeSVG(data, response: response),
-               let png = await SVGIcons.shared.png(from: data) {
+               let png = await (dark ? SVGIcons.dark : SVGIcons.light).png(from: data) {
                 decoded = await Favicons.square(png)
+                ident = drawn
             }
             guard generation == routeGeneration else { return }
             guard let image = decoded else {
                 failed.insert(candidate)
                 continue
             }
-            memory[ident] = image
+            remember(image, as: ident)
             absent.remove(ident)
-            if !shy { Favicons.keep(image, for: ident) }
+            let sent = ident == drawn && kept == nil
+            if shy {
+                if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                   let png = rep.representation(using: .png, properties: [:]) { shyImages[ident] = png }
+            } else { keep(image, for: ident, svg: sent ? data : nil) }
             wear(ident, image, site: site, page: page, dark: dark, shy: shy)
             return
         }
@@ -507,6 +587,20 @@ final class Favicons: NSObject {
         // Not asked again this session: hammering a site for an icon it
         // doesn't have is exactly the kind of thing a quiet browser doesn't do.
         missing.insert(busyKey)
+    }
+
+    /// An oversized answer is a failed icon, not an unanswered request.
+    nonisolated static func readIcon(_ url: URL, session: URLSession) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await session.bytes(from: url)
+        defer { bytes.task.cancel() }
+        let limit = 2_000_000
+        guard response.expectedContentLength < limit else { return (Data(), response) }
+        var data = Data()
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count >= limit { return (Data(), response) }
+        }
+        return (data, response)
     }
 
     private func wear(_ ident: String, _ image: NSImage, site: String, page: String, dark: Bool, shy: Bool) {
@@ -582,16 +676,21 @@ final class Favicons: NSObject {
         }.value
     }
 
-    private static func keep(_ image: NSImage, for ident: String) {
+    private func keep(_ image: NSImage, for ident: String, svg: Data? = nil) {
         guard let tiff = image.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff),
               let png = rep.representation(using: .png, properties: [:])
         else { return }
-        let file = Favicons.file(ident)
-        let dir = folder
-        Favicons.disk.async {
+        let file = Favicons.file(ident), source = Favicons.svg(ident)
+        let dir = Favicons.folder
+        pendingImages[ident] = png
+        Favicons.disk.async { [weak self] in
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try? png.write(to: file, options: .atomic)
+            if let svg { try? svg.write(to: source, options: .atomic) }
+            DispatchQueue.main.async { [weak self] in
+                if self?.pendingImages[ident] == png { self?.pendingImages[ident] = nil }
+            }
         }
     }
 
@@ -908,12 +1007,21 @@ final class IconRelay: NSObject, WKScriptMessageHandler {
 /// drawn on a canvas at a tab's size and handed back as a PNG, which only
 /// the PNG decoder here then reads. No SVG parser runs in Search's process.
 ///
-/// One small view, not in any window, with a store that keeps nothing and
-/// page scripts off; it is let go after a few seconds without work, and
+/// A small view per look, not in any window, with a store that keeps nothing
+/// and page scripts off; each is let go after ten seconds without work, and
 /// with it its process. What it draws is kept as the PNGs every icon is.
 @MainActor
 final class SVGIcons: NSObject, WKNavigationDelegate {
-    static let shared = SVGIcons()
+    /// One for each look, since an SVG is drawn in the look of the view it's
+    /// in; one view switched between them drew some icons in the other look.
+    static let light = SVGIcons(dark: false), dark = SVGIcons(dark: true)
+
+    private let dark: Bool
+    private init(dark: Bool) {
+        self.dark = dark
+        super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(proxyChanged), name: Proxy.contentChanged, object: nil)
+    }
 
     /// The largest SVG drawn, in bytes. Icons are a few kilobytes.
     nonisolated static let limit = 256 * 1024
@@ -927,11 +1035,6 @@ final class SVGIcons: NSObject, WKNavigationDelegate {
     private var waiting: [CheckedContinuation<Void, Never>] = []
     private var idle: DispatchWorkItem?
     private var running = 0
-
-    private override init() {
-        super.init()
-        NotificationCenter.default.addObserver(self, selector: #selector(proxyChanged), name: Proxy.contentChanged, object: nil)
-    }
 
     @objc private func proxyChanged() { letGo() }
 
@@ -961,7 +1064,7 @@ final class SVGIcons: NSObject, WKNavigationDelegate {
                 done = true
                 answer.resume(returning: png)
             }
-            web.callAsyncJavaScript(SVGIcons.draw, arguments: ["src": source, "side": SVGIcons.side],
+            web.callAsyncJavaScript(SVGIcons.draw, arguments: ["src": source, "side": SVGIcons.side, "dark": dark],
                                     in: nil, in: .defaultClient) { result in
                 guard case .success(let value) = result, let text = value as? String, text.hasPrefix(prefix),
                       text.utf8.count < 2_000_000
@@ -978,8 +1081,15 @@ final class SVGIcons: NSObject, WKNavigationDelegate {
 
     /// The image is decoded and drawn in the web process; only the PNG it
     /// makes comes back. Kept to its proportions, centred in the square.
+    /// An SVG takes its look from its <img> as it loads: detached, or not yet
+    /// laid out, it is drawn light whatever the view's look, and kept so.
+    /// A view made while Search was the other look takes on its own after
+    /// a while on some Macs (#917): nothing is drawn before it has.
     private static let draw = """
+    while (matchMedia('(prefers-color-scheme: dark)').matches !== dark) await new Promise(wait => setTimeout(wait, 20));
     const img = new Image();
+    document.body.append(img);
+    img.offsetWidth;
     img.src = src;
     await img.decode();
     const w = img.naturalWidth || side, h = img.naturalHeight || side;
@@ -1005,6 +1115,7 @@ final class SVGIcons: NSObject, WKNavigationDelegate {
             Proxy.shared.prepare(config)
             let made = WKWebView(frame: NSRect(x: 0, y: 0, width: 16, height: 16), configuration: config)
             Proxy.shared.track(made)
+            made.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             made.navigationDelegate = self
             web = made
             loaded = false

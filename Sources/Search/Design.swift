@@ -153,8 +153,12 @@ enum Metrics {
     /// The tab strip. The window's title bar is grown to match it so the
     /// traffic lights come down with the tabs — otherwise giving the row room
     /// to breathe just leaves it sitting below three buttons it used to line
-    /// up with.
-    static let strip: CGFloat = 52
+    /// up with. Shorter tab bar, with the tabs across the top, takes it down
+    /// to a few points above and below the 28-point tabs: a strip, not a
+    /// toolbar. The column keeps the full band, as its first row shares it.
+    @MainActor static var strip: CGFloat {
+        Shared.prefs.compactStrip && !Shared.prefs.sidebar ? 36 : 52
+    }
     /// The row under the strip, with the tabs across the top: back, forward,
     /// reload and home, the address, the bookmark and the menu
     /// (see AddressBar.swift). The page starts under both.
@@ -239,13 +243,39 @@ struct EdgeGrip: View {
 // One spring for anything that moves between two places, one for anything that
 // arrives or leaves. Using the same two everywhere is most of why a thing feels
 // like a single piece of software rather than a pile of views.
-// When macOS Reduce Motion is on in System Settings, transitions become
-// immediate so the interface does not jump or slide.
+// When macOS Reduce Motion is on in System Settings, or Reduce animations in
+// Search's own, transitions become immediate so the interface does not jump
+// or slide.
 enum Motion {
     /// Whether interface transitions should be immediate, following the
-    /// Mac's own accessibility setting.
+    /// Mac's own accessibility setting or Search's Reduce animations.
     static var reduced: Bool {
-        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        instant || (testReduceMotion ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+    }
+
+    /// A test run's stand-in for the Mac's Reduce Motion, so what Reduce
+    /// animations does alone can be seen on a Mac that has it on.
+    nonisolated(unsafe) static var testReduceMotion: Bool?
+
+    /// Settings › Appearance › Reduce animations, for Search alone: every
+    /// transition is immediate, as under Reduce Motion, and so are the fades
+    /// Reduce Motion keeps. The tab ⌘1–⌘9 picks is lit at once, the page
+    /// shows at once, a panel is there or gone. Kept here rather than read
+    /// from the settings each time, since quick is asked for in nearly every
+    /// row's body; Preferences sets it as it reads and writes the switch.
+    nonisolated(unsafe) static var instant = false
+
+    nonisolated static let instantKey = "motion.instant"
+
+    /// `seconds`, or none with Reduce animations on: for the fades that run
+    /// on a length of their own rather than on the animations below.
+    static func seconds(_ seconds: TimeInterval) -> TimeInterval {
+        instant ? 0 : seconds
+    }
+
+    /// `animation`, or none with Reduce animations on, the same way.
+    static func timed(_ animation: Animation) -> Animation? {
+        instant ? nil : animation
     }
 
     /// Whether the Mac is short of power: Low Power Mode is on, or it is hot
@@ -259,11 +289,26 @@ enum Motion {
     /// Only once it is turned on in Settings › General (Preferences.lightMotion).
     static var light: Bool {
         guard Store.settings.bool(forKey: lightKey) else { return false }
-        let info = ProcessInfo.processInfo
-        return info.isLowPowerModeEnabled || info.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
+        return lowPowerMode || ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
+    }
+
+    /// The same switch, with Low Power Mode on and nothing else: idle tabs
+    /// sleep sooner then (see Browser.sleepAfter). Heat alone doesn't count,
+    /// since what a sleeping tab gives back is mostly memory, and a hot Mac
+    /// has enough of that.
+    static var savingPower: Bool {
+        Store.settings.bool(forKey: lightKey) && lowPowerMode
     }
 
     nonisolated static let lightKey = "motion.light"
+
+    /// Low Power Mode, from Battery in System Settings, or a test run's stand-in
+    /// for it: only an admin can turn the real one on.
+    nonisolated(unsafe) static var testLowPower: Bool?
+
+    private static var lowPowerMode: Bool {
+        testLowPower ?? ProcessInfo.processInfo.isLowPowerModeEnabled
+    }
 
     static var glide: Animation? {
         reduced ? nil : light ? .easeOut(duration: 0.16) : .spring(response: 0.34, dampingFraction: 0.82)

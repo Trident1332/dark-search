@@ -43,6 +43,8 @@ enum Session {
 
         /// Keep a Tor tab on Tor even after it followed a clearnet redirect.
         var tor: Bool = false
+
+        enum CodingKeys: String, CodingKey { case url, title, pin, name, home, groupID, pinID, touched, letGo, listed, muted, tor }
     }
 
     struct Shape: Codable {

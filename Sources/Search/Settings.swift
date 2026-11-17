@@ -23,6 +23,9 @@ struct SettingsPanel: View {
 
     @ObservedObject private var updater = Updater.shared
     @ObservedObject private var shield = Shield.shared
+    @ObservedObject private var sync = Sync.shared
+    /// The keys rows name, as Settings › Shortcuts has them now.
+    @ObservedObject private var shortcuts = ShortcutStore.shared
     @State private var isDefault = Links.isDefault
     /// A site shortcut being written, kept out of Preferences until it's saved.
     @State private var draft: Keyword?
@@ -510,9 +513,9 @@ struct SettingsPanel: View {
         let counts = SettingsIndex.applies(item, prefs)
         return SettingRow(
             icon: item.icon,
-            title: title(of: item),
-            detail: counts ? detail(of: item) : SettingsIndex.needs(item),
-            more: counts ? item.more : nil,
+            title: shortcuts.relabel(title(of: item)),
+            detail: shortcuts.relabel(counts ? detail(of: item) : SettingsIndex.needs(item)),
+            more: counts ? item.more.map(shortcuts.relabel) : nil,
             wide: item.kind == .wide,
             lit: lit == item.id,
             tint: tint(of: item),
@@ -608,7 +611,9 @@ struct SettingsPanel: View {
             return isDefault ? "Dark Search is the default browser on this Mac" : item.detail
         case "downloads.folder":
             return prefs.downloads.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        case "sync": return sync.on ? sync.summary : item.detail
         case "search.engine": return searchDetail
+        case "search.shift": return shiftDetail
         case "search.suggest": return suggestDetail
         case "search.keywords": return keywordDetail
         case "passwords.save": return savingDetail
@@ -733,6 +738,9 @@ struct SettingsPanel: View {
             // Coming from another browser, now or any time later: the same
             // page as File › Bring Things Over… and the Welcome's.
             Pill("Transfer") { browser.lead(to: InternalPage(.importing)) }
+        case "sync":
+            // On asks for the folder first; cancelled, it stays off.
+            Switch(on: Binding(get: { sync.on }, set: { $0 ? sync.choose() : sync.turnOff() }))
         case "quit.confirm": Switch(on: $prefs.confirmsQuit)
         case "downloads.folder": Pill("Change") { chooseFolder() }
         case "downloads.ask": Switch(on: $prefs.asksWhereToSave)
@@ -756,6 +764,8 @@ struct SettingsPanel: View {
                 (look, look == .system ? "Auto" : look.title, AnyView(LookPicture(look: look)))
             }, selection: $prefs.look)
         case "pages.dusk": Switch(on: $prefs.darkensPages)
+        case "inspector.chrome": Switch(on: $prefs.inspectorChrome)
+        case "inspector.dark": Switch(on: $prefs.inspectorDark)
         case "tabs.layout":
             Pictures(options: TabsLayout.allCases.map { ($0, $0.title, AnyView(LayoutPicture(layout: $0))) },
                      selection: Binding(
@@ -763,6 +773,7 @@ struct SettingsPanel: View {
                         set: { layout in withAnimation(Motion.glide) { prefs.tabsLayout = layout } }
                      ))
         case "sidebar.hides": Switch(on: $prefs.sideHides)
+        case "sidebar.foldIcons": Switch(on: $prefs.foldsToIcons)
         case "layout.cards":
             Pictures(options: [(true, "As a card", AnyView(CardPicture(card: true))),
                                (false, "Edge to edge", AnyView(CardPicture(card: false)))],
@@ -770,16 +781,23 @@ struct SettingsPanel: View {
                         get: { prefs.cards },
                         set: { on in withAnimation(Motion.glide) { prefs.cards = on } }
                      ))
+        case "tabs.compact":
+            Switch(on: Binding(
+                get: { prefs.compactStrip },
+                set: { on in withAnimation(Motion.glide) { prefs.compactStrip = on } }
+            ))
         case "sidebar.roomy":
             Switch(on: Binding(
                 get: { prefs.roomyTabs },
                 set: { on in withAnimation(Motion.glide) { prefs.roomyTabs = on } }
             ))
+        case "sidebar.player": Switch(on: $prefs.showsPlayer)
         case "glyph": Segmented(options: Glyph.allCases.map { ($0, $0.title) }, selection: $prefs.glyph)
         case "tabs.reading": Switch(on: $prefs.showsReading)
         case "tabs.give": Switch(on: $prefs.tabsGive)
         case "bookmarks.bar": Switch(on: $prefs.bookmarksBar)
         case "motion.light": Switch(on: $prefs.lightMotion)
+        case "motion.instant": Switch(on: $prefs.instantMotion)
         case "note.split": Always()
         default: EmptyView()
         }
@@ -799,6 +817,10 @@ struct SettingsPanel: View {
             .fixedSize()
         case "tabs.newAfterLast": Switch(on: $prefs.newTabAfterLast)
         case "tabs.closeGoesBack": Switch(on: $prefs.closeGoesBack)
+        case "tabs.undoReopens": Switch(on: $prefs.undoReopensTab)
+        case "tabs.switcherBehindFirst": Switch(on: $prefs.switcherBehindFirst)
+        case "tabs.switcherLeavesOutPins": Switch(on: $prefs.switcherLeavesOutPins)
+        case "tabs.frontBeside": Switch(on: $prefs.frontLinksBeside)
         case "tabs.lazy": Switch(on: $prefs.lazyTabs)
         case "tabs.popupWindows": Switch(on: $prefs.popupWindows)
         case "tabs.sleep":
@@ -841,6 +863,17 @@ struct SettingsPanel: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .fixedSize()
+        case "search.shift":
+            Picker("", selection: $prefs.shiftEngine) {
+                Text("Off").tag(Engine?.none)
+                Divider()
+                ForEach(Engine.allCases) { engine in
+                    Text(engine.title).tag(Engine?.some(engine))
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
         case "search.suggest": Switch(on: $prefs.engineSuggests)
         case "search.keywords":
             if draft == nil {
@@ -854,18 +887,25 @@ struct SettingsPanel: View {
                 }
             }
         case "links.little": Switch(on: $prefs.littleLinks)
+        case "links.little.tabs": Switch(on: $prefs.littleFindsTabs)
         case "reader.twins": Switch(on: $prefs.readsTwins)
         case "reader.follows": Switch(on: $prefs.readerFollowsLook)
         case "float.style": Segmented(options: FloatStyle.allCases.map { ($0, $0.title) }, selection: $prefs.floatStyle)
         case "float.own":
             Segmented(options: FloatOwn.allCases.map { ($0, $0.title) }, selection: $prefs.floatOwn, wide: true)
                 .frame(maxWidth: 340)
+        case "float.minimize": Switch(on: $prefs.floatMinimizes)
         case "media.click": Switch(on: $prefs.waitsForPlay)
         case "fullscreen.escapeTwice": Switch(on: $prefs.escapeTwice)
+        case "fullscreen.keepsWindow": Switch(on: $prefs.keepsWindow)
+        case "translate.target":
+            if PageTranslator.available { TranslateTargetPicker(prefs: prefs) }
+            else { Text("Requires macOS 15").foregroundStyle(Palette.muted) }
         case "pageZoom":
             // The number itself takes it back to 100%.
             Steps(stops: Preferences.zooms, value: $prefs.pageZoom, home: 1) { "\(Int(($0 * 100).rounded()))%" }
         case "pages.120": Segmented(options: FastPages.allCases.map { ($0, $0.title) }, selection: $prefs.fastPages)
+        case "pages.capture": Switch(on: $prefs.capturesPages)
         case "autocorrect": Switch(on: $prefs.autocorrect)
         case "note.panel", "note.translate", "note.sitesearch", "note.links", "note.flick": Always()
         default: EmptyView()
@@ -895,9 +935,12 @@ struct SettingsPanel: View {
         case "spaces": Switch(on: $prefs.usesSpaces)
         case "profiles": Pill("New Profile") { ProfileMenu.askNew() }
         case "profiles.oneWindow": Switch(on: $prefs.profilesInOneWindow)
+        case "spaces.links": Switch(on: $prefs.sendsLinksToSpaces)
         case "pins.keep": Switch(on: $prefs.pinsKeepSite)
         case "pins.list": Switch(on: $prefs.listsPins)
+        case "pins.folders": Switch(on: $prefs.pinFolders)
         case "newtab.floating": Switch(on: $prefs.floatingNewTab)
+        case "newtab.recent": Switch(on: $prefs.recentInNewTab)
         case "commandbar": Switch(on: $prefs.commandBar)
         case "start.fresh": Switch(on: $prefs.startsFresh)
         case "note.sharedpins", "note.pinback": Always()
@@ -916,6 +959,23 @@ struct SettingsPanel: View {
         case "passwords.fill": Switch(on: $prefs.fillsPasswords)
         case "passkeys": Switch(on: $prefs.passkeys)
         case "passwords.apple": Switch(on: $prefs.applePasswords)
+        // Turned on, macOS is asked whether Search may read Contacts; a no,
+        // or no card of yours, leaves it off and says why.
+        case "contacts.fill":
+            Switch(on: Binding(get: { prefs.fillsContacts }, set: { on in
+                guard on else { prefs.fillsContacts = false; return }
+                Task { @MainActor in
+                    guard await MeCard.shared.ask() else {
+                        browser.announce("Dark Search may not read Contacts: System Settings › Privacy & Security › Contacts")
+                        return
+                    }
+                    guard await MeCard.shared.reload() else {
+                        browser.announce("No card of yours in Contacts: pick yours there, then Card › Make This My Card")
+                        return
+                    }
+                    prefs.fillsContacts = true
+                }
+            }))
         case "shield": Switch(on: $prefs.shielded)
         case "sites.keep": Switch(on: Binding(get: { !prefs.keepsSignIns }, set: { prefs.keepsSignIns = !$0 }))
         case "privacy.clickIDs": Switch(on: $prefs.removesClickIDs)
@@ -1019,8 +1079,11 @@ struct SettingsPanel: View {
             .labelsHidden()
             .pickerStyle(.menu)
             .fixedSize()
+        case "links.peek.stays": Switch(on: $prefs.peekStays)
         case "autoscroll": Switch(on: $prefs.autoScroll)
         case "swipe.history": Switch(on: $prefs.holdsHistory)
+        case "launcher.on": Switch(on: $prefs.launcher)
+        case "launcher.key": LauncherKeyBox(prefs: prefs)
         case "note.switcher": Always()
         case "updates.version": versionControl
         case "updates.auto": Switch(on: $prefs.installsUpdates)
@@ -1039,7 +1102,9 @@ struct SettingsPanel: View {
     private func after(_ item: SettingsItem, searched: Bool) -> some View {
         switch item.id {
         case "search.engine":
-            if prefs.engine == .custom { customEngine }
+            if prefs.engine == .custom { templateField($prefs.customEngine) }
+        case "search.shift":
+            if prefs.shiftEngine == .custom { templateField($prefs.shiftCustom) }
         case "search.keywords":
             keywordEditor
             // What ⌘T opens to, and the way back after an extension took
@@ -1078,6 +1143,11 @@ struct SettingsPanel: View {
         case "profiles":
             if !searched {
                 ProfileList(browser: browser)
+                    .under()
+            }
+        case "spaces.links":
+            if !searched, prefs.usesSpaces, prefs.sendsLinksToSpaces {
+                SpaceRouteList(prefs: prefs)
                     .under()
             }
         case "proxy.on":
@@ -1131,13 +1201,14 @@ struct SettingsPanel: View {
         }
     }
 
-    private var customEngine: some View {
+    /// A custom engine's address, under the row that chose Custom.
+    private func templateField(_ text: Binding<String>) -> some View {
         ZStack(alignment: .leading) {
-            if prefs.customEngine.isEmpty {
+            if text.wrappedValue.isEmpty {
                 Text("https://example.com/search?q=%s")
                     .foregroundStyle(Palette.muted.opacity(0.8))
             }
-            TextField("", text: $prefs.customEngine)
+            TextField("", text: text)
                 .textFieldStyle(.plain)
                 .foregroundStyle(Palette.ink)
         }
@@ -1177,15 +1248,23 @@ struct SettingsPanel: View {
             .padding(.trailing, 14)
             .padding(.bottom, 6)
         }
-        ForEach(prefs.keywords) { entry in
+        // The one being changed is up in the editor, not here as well.
+        ForEach(prefs.keywords.filter { $0.id != draft?.id }) { entry in
             HStack(spacing: 8) {
-                Text(entry.keyword)
-                    .frame(width: 50, alignment: .leading)
-                Text("→").foregroundStyle(Palette.muted)
-                Text(entry.template)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                // Clicked, a saved shortcut opens in the editor to be
+                // changed, rather than deleted and written again.
+                HStack(spacing: 8) {
+                    Text(entry.keyword)
+                        .frame(width: 50, alignment: .leading)
+                    Text("→").foregroundStyle(Palette.muted)
+                    Text(entry.template)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { draft = entry }
+                .help("Click to change")
                 Button {
                     prefs.keywords.removeAll { $0.id == entry.id }
                 } label: {
@@ -1209,7 +1288,8 @@ struct SettingsPanel: View {
     /// only exists once its address is one it's safe to send words to.
     private var draftProblem: String? {
         guard let draft else { return nil }
-        return Keyword.problem(word: draft.keyword, template: draft.template, among: prefs.keywords)
+        return Keyword.problem(word: draft.keyword, template: draft.template,
+                               among: prefs.keywords.filter { $0.id != draft.id })
     }
 
     private var keywordDetail: String {
@@ -1222,10 +1302,17 @@ struct SettingsPanel: View {
 
     private func saveDraft() {
         guard let current = draft, draftProblem == nil else { return }
-        prefs.keywords.append(Keyword(
+        let saved = Keyword(
+            id: current.id,
             keyword: current.keyword.trimmingCharacters(in: .whitespacesAndNewlines),
             template: current.template.trimmingCharacters(in: .whitespacesAndNewlines)
-        ))
+        )
+        // One being changed keeps its place in the list.
+        if let index = prefs.keywords.firstIndex(where: { $0.id == saved.id }) {
+            prefs.keywords[index] = saved
+        } else {
+            prefs.keywords.append(saved)
+        }
         draft = nil
     }
 
@@ -1240,10 +1327,21 @@ struct SettingsPanel: View {
 
     private var searchDetail: String {
         guard prefs.engine == .custom else { return "Where words that aren't an address go" }
-        guard Engine.accepts(prefs.customEngine) else {
+        guard Engine.accepts(Engine.written(prefs.customEngine)) else {
             return "An http or https address with %s where the words go. Until then, Google"
         }
         return "Words go to \(prefs.engine.name(custom: prefs.customEngine))"
+    }
+
+    private var shiftDetail: String {
+        guard let engine = prefs.shiftEngine else {
+            return SettingsIndex.item("search.shift")?.detail ?? ""
+        }
+        guard engine == .custom else { return "Shift-Return sends what you typed to \(engine.title)" }
+        guard Engine.accepts(Engine.written(prefs.shiftCustom)) else {
+            return "An http or https address with %s where the words go. Until then, Google"
+        }
+        return "Shift-Return sends what you typed to \(engine.name(custom: prefs.shiftCustom))"
     }
 
     /// Says so when a password manager extension has taken the saving over.

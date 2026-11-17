@@ -144,8 +144,11 @@ enum Vault {
 
     static func kept(matching host: String, wide: Bool = true) -> [Kept] {
         let domain = registrable(host)
-        return entries().filter { belongs($0.host, to: host, wide: wide, domain: domain) }
-            .sorted { ($0.used ?? .distantPast) > ($1.used ?? .distantPast) }
+        let matched = entries().filter { belongs($0.host, to: host, wide: wide, domain: domain) }
+        // The host's own accounts first, the site's others after them: each
+        // group newest first.
+        let newest: (Kept, Kept) -> Bool = { ($0.used ?? .distantPast) > ($1.used ?? .distantPast) }
+        return matched.filter { $0.host == host }.sorted(by: newest) + matched.filter { $0.host != host }.sorted(by: newest)
     }
 
     static func all() -> [Kept] {

@@ -1,12 +1,24 @@
 import SwiftUI
 import AppKit
 
+/// What is typed in a window's field and what answers it (`Browser.typing`):
+/// the field and its list watch it, and nothing else has to.
+@MainActor
+final class FieldState: ObservableObject {
+    @Published var typed = ""
+    @Published var offers: [Suggestion] = []
+    @Published var ending: String?
+    @Published var picked: Int?
+    @Published var siteOffer: SearchSite?
+}
+
 /// One field, in the middle, and the few places it thinks you mean. It takes
 /// addresses and only addresses: type something that isn't a place and it
 /// shivers and says so, rather than quietly handing your keystrokes to a
 /// search engine.
 struct Omnibox: View {
     @ObservedObject var browser: Browser
+    @ObservedObject private var typing: FieldState
     /// Raised over a page by ⌘L, rather than standing on an empty tab.
     let over: Bool
 
@@ -22,6 +34,14 @@ struct Omnibox: View {
     var fitted = false
     /// The page whose pane this field stands on, with Split View on.
     var tab: Tab.ID?
+
+    init(browser: Browser, over: Bool, fitted: Bool = false, tab: Tab.ID? = nil) {
+        self.browser = browser
+        self.typing = browser.typing
+        self.over = over
+        self.fitted = fitted
+        self.tab = tab
+    }
 
     var body: some View {
         Group {
@@ -233,6 +253,12 @@ struct Omnibox: View {
                         .truncationMode(.tail)
                 }
                 Spacer(minLength: 0)
+                // A command's key, as Arc's Command Bar shows it.
+                if case .command(let command) = offer.kind, let key = command.key {
+                    Text(key)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Palette.muted)
+                }
                 if offer.kind == .bookmark {
                     // Kept by you, not only visited: the bookmark's mark,
                     // at the end now that the site's icon leads the row.
@@ -434,14 +460,23 @@ private struct Breath: NSViewRepresentable {
 /// needs a real text field and its delegate.
 struct AddressField: NSViewRepresentable {
     @ObservedObject var browser: Browser
+    @ObservedObject private var typing: FieldState
     /// The pane's page, for a field standing on one (see Coordinator.focus).
     var tab: Tab.ID?
+
+    init(browser: Browser, tab: Tab.ID? = nil) {
+        self.browser = browser
+        self.typing = browser.typing
+        self.tab = tab
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(browser: browser) }
 
     /// The field each window made last: the one on show. SwiftUI can make a
     /// new one while the one before is still fading out, in the window and
-    /// still told of every request for the keys. Only the new field answers.
+    /// still told of every request for the keys (from the second ⌘T on a
+    /// page, since #718). That one answered after the new one, took the keys
+    /// back, and left the window with them: nothing had them.
     private static let shown = NSMapTable<Browser, Field>.weakToWeakObjects()
 
     func makeNSView(context: Context) -> Field {
@@ -576,9 +611,12 @@ struct AddressField: NSViewRepresentable {
         /// The keys to the field, now if it is in a window, or the moment it is.
         @MainActor func focus(_ field: Field) {
             guard browser.fieldShowing, browser.editingTab == nil else { return }
-            // A field over a page being left can receive the same request
-            // as the new tab's, then take the keys with it as it disappears.
+            // Only the field of the page in front. With Split View on, ⌘T's
+            // request reaches the field over the page just left too, in the
+            // moment before it goes: answered there, the keys went with it
+            // and were left to the window, which beeps at every key.
             guard tab == nil || tab == browser.activeID else { return }
+            // One on its way out has no keys to take.
             guard AddressField.shown.object(forKey: browser) === field else { return }
             guard let window = field.window else {
                 field.arrived = { [weak self, weak field] in
@@ -654,6 +692,11 @@ struct AddressField: NSViewRepresentable {
             let length = field.stringValue.count
             guard start <= length else { return }
             editor.selectedRange = NSRange(location: start, length: length - start)
+            // The start in view, not the end: selecting a long completion
+            // scrolled the field to its last characters, hiding what was
+            // typed and the site it goes to (#1055). The ending stays
+            // selected, so the next key still replaces it.
+            editor.scrollRangeToVisible(NSRange(location: 0, length: 0))
         }
 
         func control(

@@ -89,6 +89,8 @@ final class HeldQuestion {
     }
 
     func present() {
+        // A dismissed or already presented question must not be shown again.
+        guard drop != nil else { return }
         drop = nil
         show()
     }
@@ -178,15 +180,17 @@ extension Browser {
     /// background — or in another space — waits until you go to that tab, as
     /// in Safari and Chrome: over the tab in front, a prompt() asking for a
     /// password would pass for that page's. A tab closed first gets the
-    /// answer a dismissed dialog gives.
+    /// answer a dismissed dialog gives. A peek hidden behind another tab
+    /// (see peekInFront) waits the same way, until it is in front again.
     @discardableResult
     func ask(from webView: WKWebView, show: @escaping () -> Void, drop: @escaping () -> Void) -> HeldQuestion? {
-        let known = tabs + parkedTabs
+        let known = tabs + parkedTabs + [peekTab].compactMap { $0 }
         // Questions from tabs that have gone some other way than close(_:).
         for id in heldDialogs.keys where !known.contains(where: { $0.id == id }) {
             heldDialogs.removeValue(forKey: id)?.forEach { $0.dismiss() }
         }
-        guard let tab = known.first(where: { $0.built === webView }), tab.id != activeID else {
+        guard let tab = known.first(where: { $0.built === webView }), tab.id != activeID,
+              tab.id != peekTab?.id || !peekInFront else {
             show()
             return nil
         }
@@ -463,6 +467,10 @@ extension Browser {
     /// those under memory pressure — background tabs first. Left alone, the
     /// tab shows white until somebody thinks to reload. Saying so, with the
     /// one thing worth offering, is what the failure view is for.
+    ///
+    /// WebKit's private form of the callback, which says why the process
+    /// went (see PageEnd). Answered, WebKit calls it in place of the public
+    /// one below, which stays for a WebKit that doesn't know this one.
     @objc(_webView:webContentProcessDidTerminateWithReason:)
     func webView(_ webView: WKWebView, webContentProcessDidTerminateWithReason reason: Int) {
         pageProcessEnded(webView, PageEnd(webKit: reason))
@@ -472,6 +480,9 @@ extension Browser {
         pageProcessEnded(webView, .unknown)
     }
 
+    /// Said in the system log, so a page that kept reloading or went white
+    /// can be traced afterwards to why: the reason, and what was done about
+    /// it. The site stays private there; the reason doesn't.
     private static let pageLog = Logger(subsystem: "com.officecommun.search", category: "Pages")
 
     private func pageProcessEnded(_ webView: WKWebView, _ end: PageEnd) {
@@ -480,14 +491,17 @@ extension Browser {
         guard let tab = tab(for: webView) else { return }
         dropQuestions(for: tab.id)
         guard !tab.proxyPaused else { return }
+        let host = tab.address?.host() ?? ""
+        // On screen, either half of a pair: straight back, a reload beats a
+        // white page with a button on it — unless it keeps dying (see
+        // recoverFromCrash). Behind another tab: the moment you come back to it.
         let outcome: String
-        if tab.id == activeID, !tab.isBlank {
+        if visibleTabIDs.contains(tab.id), !tab.isBlank {
             outcome = tab.recoverFromCrash(end) ? "loaded again" : "kept dying, left for Try again"
         } else {
             tab.stale = true
             outcome = "loaded again when shown"
         }
-        let host = tab.address?.host() ?? ""
         Self.pageLog.error("A page's process ended (\(end.name, privacy: .public)) on \(host, privacy: .private): \(outcome, privacy: .public)")
     }
 }

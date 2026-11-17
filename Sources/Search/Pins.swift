@@ -28,10 +28,14 @@ struct PinDef: Codable, Equatable {
     /// A pin created from a Tor tab keeps that route even when its home is
     /// an ordinary website reached from an onion page.
     var tor: Bool = false
+    /// The folder among the pinned rows that holds it (see PinFolders.swift),
+    /// nil at the top of them. Written only when it is in one, so the file
+    /// is unchanged for anyone with no folders.
+    var folder: UUID? = nil
 }
 
 extension PinDef {
-    private enum Keys: String, CodingKey { case id, letter, home, title, name, listed, tor }
+    private enum Keys: String, CodingKey { case id, letter, home, title, name, listed, tor, folder }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -42,6 +46,7 @@ extension PinDef {
         name = try c.decodeIfPresent(String.self, forKey: .name)
         listed = try c.decodeIfPresent(Bool.self, forKey: .listed)
         tor = try c.decodeIfPresent(Bool.self, forKey: .tor) ?? false
+        folder = try c.decodeIfPresent(UUID.self, forKey: .folder)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -53,6 +58,7 @@ extension PinDef {
         try c.encodeIfPresent(name, forKey: .name)
         try c.encodeIfPresent(listed, forKey: .listed)
         if tor { try c.encode(true, forKey: .tor) }
+        try c.encodeIfPresent(folder, forKey: .folder)
     }
 }
 
@@ -128,6 +134,28 @@ enum Pins {
         return true
     }
 
+    /// Pins as another Mac left them (see Sync.swift): each of `spaces`
+    /// given its list and the profile its shared one, and every window
+    /// told of what changed, as when another window changes them.
+    static func adopt(_ defs: [UUID: [PinDef]], in spaces: [UUID], shared: [PinDef], profile: UUID) {
+        load()
+        var changed: [UUID] = []
+        for space in spaces where (bySpace[space] ?? []) != (defs[space] ?? []) {
+            bySpace[space] = defs[space].flatMap { $0.isEmpty ? nil : $0 }
+            changed.append(space)
+        }
+        let sharedChanged = (sharedBy[profile] ?? []) != shared
+        if sharedChanged { sharedBy[profile] = shared.isEmpty ? nil : shared }
+        guard !changed.isEmpty || sharedChanged else { return }
+        save()
+        for space in changed {
+            NotificationCenter.default.post(name: Pins.changed, object: nil, userInfo: ["space": space])
+        }
+        if sharedChanged {
+            NotificationCenter.default.post(name: Pins.changed, object: nil, userInfo: ["shared": true, "profile": profile])
+        }
+    }
+
     /// A profile deleted: the pins its spaces all showed go with it.
     static func forgetShared(of profile: UUID) {
         load()
@@ -137,6 +165,7 @@ enum Pins {
 
     /// A space deleted: its pins go with it.
     static func forget(_ space: UUID) {
+        PinFolders.forget(space)
         guard bySpace.removeValue(forKey: space) != nil else { return }
         save()
     }
@@ -154,7 +183,9 @@ enum Pins {
     /// A space's own pin, shown by every space from now on: at the end of
     /// the shared ones.
     nonisolated static func share(_ id: UUID, own: [PinDef], shared: [PinDef]) -> (own: [PinDef], shared: [PinDef]) {
-        guard let pin = own.first(where: { $0.id == id }) else { return (own, shared) }
+        guard var pin = own.first(where: { $0.id == id }) else { return (own, shared) }
+        // Folders are a space's own: a pin every space shows is in none.
+        pin.folder = nil
         return (own.filter { $0.id != id }, shared + [pin])
     }
 

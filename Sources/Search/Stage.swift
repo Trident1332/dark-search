@@ -94,7 +94,7 @@ struct Page: View {
                 TorLoading()
             }
 
-            Swiping(pull: tab.pull)
+            Swiping(pulling: tab.pulling)
         }
         // These fades are for one tab's page changing. Going to another tab
         // changes them all at once, and the one being left faded out under
@@ -106,8 +106,7 @@ struct Page: View {
         .animation(Motion.quick, value: tab.failure)
         .animation(Motion.quick, value: tab.floating)
         .animation(Motion.quick, value: tab.reader)
-        .animation(.easeOut(duration: 0.2), value: tab.cover == nil)
-        .animation(.easeOut(duration: 0.16), value: tab.pull == nil)
+        .animation(Motion.timed(.easeOut(duration: 0.2)), value: tab.cover == nil)
     }
 }
 
@@ -126,9 +125,10 @@ struct TorLoading: View {
 /// What a sideways swipe puts over the page: the disc, or the list a held
 /// one opens. The page's own stage, and a small window's (Little.swift).
 struct Swiping: View {
-    let pull: Pull?
+    @ObservedObject var pulling: Pulling
 
     var body: some View {
+        let pull = pulling.pull
         ZStack {
             if let pull, pull.stops != nil {
                 // In the disc's place, grown from its own edge: it sits in a
@@ -152,6 +152,7 @@ struct Swiping: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
         }
+        .animation(Motion.timed(.easeOut(duration: 0.16)), value: pull == nil)
     }
 }
 
@@ -200,7 +201,7 @@ private struct Disc: View {
         .offset(x: (pull.back ? 1 : -1) * (10 + reach * 0.2 + (pull.going ? 12 : 0)))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: pull.back ? .leading : .trailing)
         .allowsHitTesting(false)
-        .animation(.easeOut(duration: 0.22), value: pull.going)
+        .animation(Motion.timed(.easeOut(duration: 0.22)), value: pull.going)
     }
 }
 
@@ -249,8 +250,8 @@ private struct HistoryList: View {
         .offset(x: (pull.back ? 1 : -1) * (10 + reach * 0.2), y: slide)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: pull.back ? .leading : .trailing)
         .allowsHitTesting(false)
-        .animation(.spring(response: 0.22, dampingFraction: 0.9), value: pull.picked)
-        .animation(.easeOut(duration: 0.26), value: pull.going)
+        .animation(Motion.timed(.spring(response: 0.22, dampingFraction: 0.9)), value: pull.picked)
+        .animation(Motion.timed(.easeOut(duration: 0.26)), value: pull.going)
     }
 
     @ViewBuilder
@@ -489,8 +490,9 @@ final class StageView: NSView {
             }
             // Nothing of its own here: the last tab's page, left as it was,
             // stood at its old size in a stage grown to the whole window,
-            // with an empty band beside it where the column had been.
-            if homecoming != nil { clearUnwanted() }
+            // with an empty band beside it where the column had been. Nor
+            // the tab shown in front of it while it filled the screen.
+            if homecoming != nil || Shared.prefs.keepsWindow { clearUnwanted() }
             return
         }
 
@@ -506,6 +508,13 @@ final class StageView: NSView {
     private func clearUnwanted() {
         let docked = inspecting
         for view in subviews where view !== wanted && !(docked && Self.isInspector(view)) {
+            // Another tab in front while this page fills the screen: WebKit
+            // brings the page home to its placeholder, so that stays, under
+            // the tab in front, and so does the page on its way back.
+            if Shared.prefs.keepsWindow {
+                if Self.isPlaceholder(view) { continue }
+                if let page = view as? WKWebView, page.fullscreenState != .notInFullscreen { continue }
+            }
             // Unseen, and still drawn: WebKit asks whether its view is in a
             // window and not hidden, not whether anything shows of it.
             if view === parting {
@@ -747,9 +756,9 @@ struct DragStrip: NSViewRepresentable {
     }
 
     private final class Strip: NSView {
-        var reserved: CGFloat = 0
-        var below: CGFloat = 0
-        var trailing: CGFloat = 0
+        var reserved: CGFloat = 0 { didSet { if reserved != oldValue { aimCursor() } } }
+        var below: CGFloat = 0 { didSet { if below != oldValue { aimCursor() } } }
+        var trailing: CGFloat = 0 { didSet { if trailing != oldValue { aimCursor() } } }
         var onDoubleClick: (() -> Void)?
 
         private var pressed: NSEvent?
@@ -801,9 +810,24 @@ struct DragStrip: NSViewRepresentable {
             window.isMovable = count == 0
         }
 
+        /// A title bar's pointer is the arrow. The strip had no say in it,
+        /// so the I-beam a page or a field last set came along onto the
+        /// title bar and stayed through the whole drag of the window (#1094).
+        /// Only over the run the strip takes clicks in (see hitTest).
+        override func resetCursorRects() {
+            let room = NSRect(x: reserved, y: 0,
+                              width: max(0, bounds.width - trailing - reserved),
+                              height: max(0, bounds.height - below))
+            guard room.width > 0, room.height > 0 else { return }
+            addCursorRect(room, cursor: .arrow)
+        }
+
+        private func aimCursor() { window?.invalidateCursorRects(for: self) }
+
         override func mouseDown(with event: NSEvent) {
             pressed = event
             moved = false
+            NSCursor.arrow.set()
         }
 
         /// Here the window is let go for the one drag, handed to the system's

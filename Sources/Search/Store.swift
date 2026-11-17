@@ -227,17 +227,30 @@ enum Disk {
     static func write(_ file: URL, now: Bool = false, _ encode: @escaping @Sendable () -> Data?) {
         let request = publish(file)
         let put: @Sendable () -> Void = {
-            guard let data = encode() else { return }
-            // An immediate write may run beside the background queue.
-            // Serialize commits of this file without blocking publication
-            // or an immediate save of any other file.
+            // Overtaken: something newer of this file was asked for since.
+            guard current(file, request.turn), let data = encode() else { return }
+            let folder = file.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            if let writer = request.writer {
+                // An immediate write may run beside the background queue.
+                // Serialize commits of this file without blocking publication
+                // or an immediate save of any other file.
+                request.mutation.lock()
+                defer { request.mutation.unlock() }
+                guard current(file, request.turn) else { return }
+                try? writer(data, file)
+                return
+            }
+            // Written beside it with no lock held, and only put in its place
+            // under the file's own lock: held for the whole write, a write at
+            // once on the main thread waited for whatever was being written
+            // in the background — the whole history, say.
+            let aside = folder.appendingPathComponent(".\(file.lastPathComponent).\(request.turn).writing")
+            guard (try? data.write(to: aside)) != nil else { return }
             request.mutation.lock()
             defer { request.mutation.unlock() }
-            // Overtaken: something newer of this file was asked for since.
-            guard current(file, request.turn) else { return }
-            try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if let writer = request.writer { try? writer(data, file) }
-            else { try? data.write(to: file, options: .atomic) }
+            if current(file, request.turn), rename(aside.path, file.path) == 0 { return }
+            try? FileManager.default.removeItem(at: aside)
         }
         if now { put() } else { queue.async(execute: put) }
     }

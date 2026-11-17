@@ -145,6 +145,8 @@ enum EngineSuggest {
         configuration.timeoutIntervalForRequest = patience
         configuration.timeoutIntervalForResource = patience
         configuration.httpMaximumConnectionsPerHost = 2
+        // What you type goes to the engine the way a page would, or a proxy
+        // would be given every word of every address bar question.
         return Proxy.makeSession(configuration: configuration, delegate: NoRedirects.shared, delegateQueue: nil)
     }
 

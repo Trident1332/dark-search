@@ -32,7 +32,7 @@ struct SplitStage: View {
         // left and the pages past the right edge, for good.
         PaneStageView(
             tabs: shown, split: split, focused: browser.activeID,
-            commit: { id, sizes in browser.setSplitFraction(id, fraction: sizes[0]) },
+            commit: { id, sizes in browser.setSplitSizes(id, sizes) },
             focus: { tab in browser.focusPane(tab) },
             frames: { frames = $0 },
             action: { action in
@@ -60,8 +60,21 @@ struct SplitStage: View {
                             .offset(x: frame.minX, y: frame.minY)
                     }
                 }
+                // Over a page it could split, before the hand is at an edge
+                // or has stopped: where letting go would split it. Gone once
+                // the split itself is shown.
+                if drag.preview == nil, let over = drag.over, over.browserID == ObjectIdentifier(browser),
+                   let frame = frames[over.targetID] {
+                    SplitDropHint(width: frame.width)
+                        .frame(width: frame.width, height: frame.height)
+                        .offset(x: frame.minX, y: frame.minY)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
                 if let preview = drag.preview, preview.browserID == ObjectIdentifier(browser) {
-                    SplitDropPreview(preview: preview, tabs: browser.tabs)
+                    SplitDropPreview(preview: preview, tabs: browser.tabs,
+                                     split: browser.tabs.first { $0.id == preview.targetID }.flatMap(browser.split(for:)))
                         .transition(.opacity)
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
@@ -70,6 +83,38 @@ struct SplitStage: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .animation(Motion.quick, value: drag.preview)
+        .animation(Motion.quick, value: drag.over)
+    }
+}
+
+/// A page's two edges while a tab is carried over it: the bands that split
+/// it, as wide as TabDrag reads them, faint, so the page shows through. Over
+/// the middle, letting go splits nothing; this says so before it happens.
+private struct SplitDropHint: View {
+    let width: CGFloat
+
+    private var band: CGFloat { min(width / 2, max(TabDrag.band, width * TabDrag.bandShare)) }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            edge
+            Spacer(minLength: 0)
+            edge
+        }
+    }
+
+    private var edge: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Palette.ground.opacity(0.35))
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Palette.ink.opacity(0.18), lineWidth: 1)
+            Image(systemName: "rectangle.split.2x1")
+                .font(.system(size: 15))
+                .foregroundStyle(Palette.ink.opacity(0.4))
+        }
+        .padding(6)
+        .frame(width: band)
     }
 }
 
@@ -120,9 +165,8 @@ private struct PaneLayers: View {
             // An empty page of a pair: the field, and the tabs already open,
             // to bring one in. Gone while something is typed, when the field's
             // own list is there.
-            if paired, tab.isBlank, browser.typed.isEmpty {
-                OpenTabs(browser: browser, blank: tab)
-                    .transition(.opacity)
+            if paired, tab.isBlank {
+                OpenTabsUntilTyped(typing: browser.typing, browser: browser, blank: tab)
             }
 
             // What this page asked, over this page alone.
@@ -161,6 +205,9 @@ private struct PaneLayers: View {
 private struct SplitDropPreview: View {
     let preview: TabDrag.Preview
     let tabs: [Tab]
+    /// The split the page under the hand is in, which the carried tab
+    /// joins: its pages are shown with the carried one among them.
+    var split: TabSplit? = nil
 
     private var target: Tab? { tabs.first { $0.id == preview.targetID } }
     private var carried: String {
@@ -168,10 +215,22 @@ private struct SplitDropPreview: View {
         return label.isEmpty ? "New Tab" : label
     }
 
+    /// Each page as it would stand, the carried one marked: of a page
+    /// alone, the two halves there always were.
+    private var places: [(id: String, title: String, proposed: Bool)] {
+        let label: (Tab.ID) -> String = { id in tabs.first { $0.id == id }?.label ?? "Page" }
+        var row = (split?.tabs ?? [preview.targetID]).filter { $0 != preview.sourceID }
+            .map { (id: $0.uuidString, title: label($0), proposed: false) }
+        let at = row.firstIndex { $0.id == preview.targetID.uuidString }.map { preview.side == .left ? $0 : $0 + 1 } ?? row.count
+        row.insert((id: "carried", title: carried, proposed: true), at: min(at, row.count))
+        return row
+    }
+
     var body: some View {
         HStack(spacing: 2) {
-            half(title: preview.side == .left ? carried : target?.label ?? "Page", proposed: preview.side == .left)
-            half(title: preview.side == .right ? carried : target?.label ?? "Page", proposed: preview.side == .right)
+            ForEach(places, id: \.id) { place in
+                half(title: place.title, proposed: place.proposed)
+            }
         }
         .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -191,6 +250,21 @@ private struct SplitDropPreview: View {
                 .padding(.horizontal, 20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// The tabs already open, on an empty page of a pair, until something is
+/// typed: watching the field itself, so the pane isn't drawn again per key.
+private struct OpenTabsUntilTyped: View {
+    @ObservedObject var typing: FieldState
+    let browser: Browser
+    let blank: Tab
+
+    var body: some View {
+        if typing.typed.isEmpty {
+            OpenTabs(browser: browser, blank: blank)
+                .transition(.opacity)
+        }
     }
 }
 

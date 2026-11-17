@@ -25,6 +25,9 @@ import Security
 //   page of an ordinary tab. A password is asked for once you pick its
 //   account, and macOS may ask for Touch ID then. It goes into the page's
 //   own fields and is not kept.
+// - Verification codes go the same way: which accounts have one is asked for
+//   when the caret is in a box for a code, the code once you pick its account,
+//   and macOS may ask for Touch ID then. Never kept.
 // - Never in a private tab, never over plain http, never in a frame (the
 //   form script is the main frame's only), and only for the site the page is
 //   on: an account the helper keeps for another site is not offered.
@@ -128,12 +131,17 @@ final class ApplePasswords: ObservableObject {
     private var client: SRPClient?
     private var numbers: (serverKey: [UInt8], salt: [UInt8])?
     private var key: SymmetricKey?
+    /// Counts the pairings dropped, so a code still being checked when its
+    /// pairing goes can tell, and leave the next one alone.
+    private var dropped = 0
     private var waiters: [Int: (id: Int, continuation: CheckedContinuation<[String: Any], Error>)] = [:]
     private var nextWaiter = 0
     private var busy = false
     private var queue: [CheckedContinuation<Void, Never>] = []
     private var tabNumbers: [UUID: Int] = [:]
     private var bag = Set<AnyCancellable>()
+    /// Whether this Mac's helper says it hands out verification codes.
+    private var fillsCodes = false
 
     struct Unavailable: LocalizedError {
         let errorDescription: String?
@@ -183,6 +191,7 @@ final class ApplePasswords: ObservableObject {
                 if let version = capabilities["secretSessionVersion"] as? Int, version != 1 {
                     throw Unavailable(errorDescription: "This Mac's Passwords helper is too old")
                 }
+                fillsCodes = capabilities["canFillOneTimeCodes"] as? Bool ?? false
                 let client = SRPClient(base64: capabilities["shouldUseBase64"] as? Bool ?? false)
                 let reply = try await request(AppleMessages.start(client), timeout: 15)
                 numbers = try AppleMessages.readStart(reply, client)
@@ -200,24 +209,30 @@ final class ApplePasswords: ObservableObject {
         guard state == .code, code.count == 6, let client, let numbers else { return }
         state = .checking
         trouble = nil
+        let pairing = dropped
         do {
             let proof = try await Task.detached(priority: .userInitiated) {
                 try client.prove(serverKey: numbers.serverKey, salt: numbers.salt, code: code)
             }.value
-            try await exclusive {
+            let sent = try await exclusive {
+                guard pairing == dropped else { return false }
                 let reply = try await request(AppleMessages.verify(client, proof: proof), timeout: 15)
                 try AppleMessages.readVerify(reply, client, proof: proof)
+                return true
             }
+            guard sent, pairing == dropped else { return }
             key = proof.key
             self.numbers = nil
             state = .paired
         } catch ApplePasswordsError.wrongCode {
+            guard pairing == dropped else { return }
             // The helper is done with that code: a new pairing shows a new one.
             self.numbers = nil
             self.client = nil
             state = .idle
             trouble = "That code didn't match. Connect again for a new one."
         } catch {
+            guard pairing == dropped else { return }
             fail(error, stop: true)
         }
     }
@@ -264,6 +279,39 @@ final class ApplePasswords: ObservableObject {
                     AppleMessages.password(user: user, host: host, tab: number(of: tab), client: client, key: key), timeout: 120)
                 return try AppleMessages.readPassword(AppleMessages.readSealed(reply, client, key: key), user: user)
                     .map { ($0.password, $0.sites) }
+            }
+        } catch {
+            dropIfSessionLost(error)
+            return nil
+        }
+    }
+
+    /// Whose verification codes the helper keeps for `host`: nothing secret.
+    func codes(for host: String, tab: UUID, wanted: @MainActor () -> Bool = { true }) async -> [AppleCode] {
+        guard state == .paired, fillsCodes else { return [] }
+        do {
+            return try await exclusive {
+                guard wanted(), let client, let key else { return [] }
+                let reply = try await request(
+                    AppleMessages.codes(host: host, tab: number(of: tab), client: client, key: key), timeout: 8)
+                return try AppleMessages.readCodes(AppleMessages.readSealed(reply, client, key: key))
+            }
+        } catch {
+            dropIfSessionLost(error)
+            return []
+        }
+    }
+
+    /// The code of the account picked, as it stands now. macOS may ask for
+    /// Touch ID first; that can take a while, so no short timeout.
+    func code(of wanted: AppleCode, host: String, tab: UUID) async -> String? {
+        guard state == .paired, fillsCodes else { return nil }
+        do {
+            return try await exclusive {
+                guard let client, let key else { return nil }
+                let reply = try await request(
+                    AppleMessages.code(host: host, tab: number(of: tab), client: client, key: key), timeout: 120)
+                return try AppleMessages.readCode(AppleMessages.readSealed(reply, client, key: key), for: wanted)
             }
         } catch {
             dropIfSessionLost(error)
@@ -331,6 +379,7 @@ final class ApplePasswords: ObservableObject {
     }
 
     private func reset() {
+        dropped += 1
         let pending = waiters.values
         waiters = [:]
         pending.forEach { $0.continuation.resume(throwing: ApplePasswordsError.gone) }
@@ -338,6 +387,7 @@ final class ApplePasswords: ObservableObject {
         client = nil
         numbers = nil
         key = nil
+        fillsCodes = false
         tabNumbers = [:]
     }
 
@@ -397,6 +447,15 @@ final class ApplePasswords: ObservableObject {
             let site = bare(Vault.host(of: site).isEmpty ? site : Vault.host(of: site))
             return site == bare(host) || (wide && registrable(site) == domain)
         }
+    }
+
+    /// The accounts kept for the host itself first, then the site's others
+    /// (admin.example.com's own before admin-qa's).
+    nonisolated static func exactFirst(_ logins: [AppleLogin], to host: String, wide: Bool = true,
+                                       registrable: (String) -> String = Vault.registrable) -> [AppleLogin] {
+        let site = logins.filter { belongs($0.sites, to: host, wide: wide, registrable: registrable) }
+        let own = site.filter { belongs($0.sites, to: host, wide: false, registrable: registrable) }
+        return own + site.filter { !own.contains($0) }
     }
 
     nonisolated private static func bare(_ host: String) -> String {

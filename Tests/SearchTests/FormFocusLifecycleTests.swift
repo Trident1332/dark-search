@@ -243,7 +243,7 @@ final class FormFocusLifecycleTests: XCTestCase {
         views.append(current)
         holding += [tab, current]
         var received = 0
-        tab.onField = { _, _, _, _, _ in received += 1 }
+        tab.onField = { _, _, _, _, _, _, _ in received += 1 }
         let relay = FormRelay()
         relay.tab = tab
         let old = try await page(handler: relay)

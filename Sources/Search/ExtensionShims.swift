@@ -44,7 +44,7 @@ enum ExtensionShims {
     nonisolated static let stamp = ".search-shim"
     /// Raised when `prepare` changes what it does to a package, so that
     /// extensions prepared before are prepared again.
-    nonisolated private static let preparation = "4"
+    nonisolated private static let preparation = "6"
     nonisolated static let version: String = {
         SHA256.hash(data: Data((script + ExtensionPortIsolation.script + PasskeyRelay.page + preparation).utf8)).prefix(8).map { String(format: "%02x", $0) }.joined() + (Store.testing ? "-test" : "")
     }()
@@ -128,14 +128,85 @@ enum ExtensionShims {
         // it: a password manager's there keeps a reference to
         // navigator.credentials as it finds it, and that has to be Search's,
         // not WebKit's (see Passkeys.swift).
+        //
+        // Entries that run in the same place at the same time share one copy
+        // rather than each carrying its own: WebKit parses a content script
+        // once per entry per frame, and the shim is 200 KB, so a manifest
+        // with three <all_urls> entries paid for it three times in every
+        // frame of a page. Only `matches` is pooled, and only between entries
+        // that agree on everything else, so the shared copy never reaches a
+        // page the extension's own scripts would not: Catppuccin's one entry
+        // names eight forges, and would otherwise have carried the shim
+        // everywhere.
+        //
+        // An entry with nothing to share keeps the copy inside it, as before.
+        // Lifting it out would leave two entries where the manifest had one,
+        // and an entry of its own costs a page a little even when it carries
+        // nothing new.
+        //
+        // The shared entries go first, which is what puts the shim before the
+        // scripts it is there for: WebKit runs a frame's entries in manifest
+        // order within a `run_at`, in the page's own world as in an isolated
+        // one.
         if let entries = manifest["content_scripts"] as? [[String: Any]] {
-            manifest["content_scripts"] = entries.map { entry -> [String: Any] in
-                var entry = entry
-                if var js = entry["js"] as? [String] {
-                    if !js.contains(file) { js.insert(file, at: 0) }
-                    if (entry["world"] as? String)?.uppercased() == "MAIN", !js.contains(passkeys) { js.insert(passkeys, at: 0) }
-                    entry["js"] = js
+            // What an earlier preparation left: its shared entries, and its
+            // copies inside the extension's own. Both come off first, so a
+            // newer shim takes an older one's place instead of stacking on
+            // it.
+            var own: [[String: Any]] = []
+            for var entry in entries {
+                guard var js = entry["js"] as? [String] else { own.append(entry); continue }
+                if entry["css"] == nil, js == [file] || js == [passkeys, file] { continue }
+                js.removeAll { $0 == file || $0 == passkeys }
+                if js.isEmpty, entry["css"] == nil { continue }
+                entry["js"] = js
+                own.append(entry)
+            }
+
+            // Grouped by everything that decides where and when an entry
+            // runs. An unknown key counts, so a manifest Search does not
+            // understand yet groups on its own rather than being pooled on a
+            // guess.
+            func place(_ entry: [String: Any]) -> String {
+                var place = entry
+                for key in ["matches", "js", "css"] { place.removeValue(forKey: key) }
+                guard let data = try? JSONSerialization.data(withJSONObject: place, options: [.sortedKeys]),
+                      let key = String(data: data, encoding: .utf8)
+                else { return UUID().uuidString }
+                return key
+            }
+
+            var order: [String] = []
+            var pools: [String: (place: [String: Any], matches: [String], count: Int)] = [:]
+            for entry in own where entry["js"] is [String] {
+                let key = place(entry)
+                if pools[key] == nil {
+                    order.append(key)
+                    var bare = entry
+                    for name in ["matches", "js", "css"] { bare.removeValue(forKey: name) }
+                    pools[key] = (bare, [], 0)
                 }
+                pools[key]?.count += 1
+                for match in entry["matches"] as? [String] ?? [] where !(pools[key]?.matches.contains(match) ?? true) {
+                    pools[key]?.matches.append(match)
+                }
+            }
+
+            let shared = Set(order.filter { (pools[$0]?.count ?? 0) > 1 })
+            var shimmed: [[String: Any]] = []
+            for key in order where shared.contains(key) {
+                guard let pool = pools[key] else { continue }
+                var entry = pool.place
+                entry["matches"] = pool.matches
+                entry["js"] = (pool.place["world"] as? String)?.uppercased() == "MAIN" ? [passkeys, file] : [file]
+                shimmed.append(entry)
+            }
+            manifest["content_scripts"] = shimmed + own.map { entry -> [String: Any] in
+                var entry = entry
+                guard var js = entry["js"] as? [String], !shared.contains(place(entry)) else { return entry }
+                js.insert(file, at: 0)
+                if (entry["world"] as? String)?.uppercased() == "MAIN" { js.insert(passkeys, at: 0) }
+                entry["js"] = js
                 return entry
             }
         }
@@ -202,9 +273,17 @@ enum ExtensionShims {
     /// didn't write, and nothing acts beyond what it named. A block or an
     /// allow of that shape is left as WebKit reads it, as before. The shim
     /// leaves out the same rules added while the extension runs (`misread`).
+    ///
+    /// A rule that hangs on a response's headers (`responseHeaders`,
+    /// `excludedResponseHeaders`), whatever it does. WebKit has no such
+    /// condition, drops it, and carries out the rest on every request it
+    /// matches: uBlock Origin Lite's block of a site's own `.bundle.js`
+    /// when the server answers with an anti-adblock header took every
+    /// webpack bundle GitLab serves, and its pages stayed empty.
     nonisolated static func misreadByWebKit(_ rule: [String: Any]) -> Bool {
-        guard let condition = rule["condition"] as? [String: Any],
-              condition["regexFilter"] is String, condition["requestDomains"] != nil,
+        guard let condition = rule["condition"] as? [String: Any] else { return false }
+        if condition["responseHeaders"] != nil || condition["excludedResponseHeaders"] != nil { return true }
+        guard condition["regexFilter"] is String, condition["requestDomains"] != nil,
               let type = (rule["action"] as? [String: Any])?["type"] as? String
         else { return false }
         return type == "redirect" || type == "modifyHeaders"
@@ -217,11 +296,12 @@ enum ExtensionShims {
         guard let dnr = manifest["declarative_net_request"] as? [String: Any],
               let resources = dnr["rule_resources"] as? [[String: Any]] else { return }
         for resource in resources {
-            // Only a file with both words in it is read as rules: a blocker
+            // Only a file with the words in it is read as rules: a blocker
             // ships tens of megabytes of them.
             guard let name = resource["path"] as? String, let url = inside(name, of: folder),
                   let data = try? Data(contentsOf: url),
-                  data.range(of: Data("regexFilter".utf8)) != nil, data.range(of: Data("requestDomains".utf8)) != nil,
+                  data.range(of: Data("ResponseHeaders".utf8)) != nil || data.range(of: Data("responseHeaders".utf8)) != nil
+                    || (data.range(of: Data("regexFilter".utf8)) != nil && data.range(of: Data("requestDomains".utf8)) != nil),
                   let rules = (try? JSONSerialization.jsonObject(with: data)) as? [Any]
             else { continue }
             let kept = rules.filter { !(($0 as? [String: Any]).map(misreadByWebKit) ?? false) }
@@ -464,7 +544,11 @@ enum ExtensionShims {
         // from WebKit too, and nothing would reach the extension again. A
         // replacement that still carries them is taken.
         const carries = (v) => { try { return !!(v && v.runtime && v.runtime.id); } catch (e) { return false; } };
-        try { Object.defineProperty(root, key, { configurable: false, enumerable: d.enumerable, get: () => value, set: (v) => { if (carries(v)) value = v; } }); } catch (e) {}
+        // `browser` stays configurable, as WebKit has it: a fixed global
+        // can't be shadowed, and a page whose script starts with its own
+        // `const browser` (Control Panel for YouTube's popup) threw before
+        // a line of it ran. `chrome` alone keeps WebKit's listeners.
+        try { Object.defineProperty(root, key, { configurable: key === "browser", enumerable: d.enumerable, get: () => value, set: (v) => { if (carries(v)) value = v; } }); } catch (e) {}
       }
       // On a web page this is a content script: only Chrome's behaviour is
       // mended there, no API that Chrome doesn't give content scripts either.
@@ -726,7 +810,7 @@ enum ExtensionShims {
         const decode = (text) => { const s = atob(text), bytes = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i); return bytes.buffer; };
         const states = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 };
         class WebSocket extends EventTarget {
-          #port; #state = 0; #queue = Promise.resolve(); #origin; #hello;
+          #port; #state = 0; #queue = Promise.resolve(); #origin; #hello; #closing;
           constructor(url, protocols) {
             super();
             let parsed;
@@ -784,7 +868,10 @@ enum ExtensionShims {
           }
           #take(m) {
             if (!m || this.#state === 3) return;
-            if ("opened" in m) { this.protocol = m.opened; this.#state = 1; this.#fire("open"); }
+            // Closed while connecting: the browser may have opened it anyway,
+            // if the close was lost or came before the opening. Say it again.
+            if ("opened" in m && this.#state === 2) { try { this.#port.postMessage(this.#closing); } catch (e) {} }
+            else if ("opened" in m) { this.protocol = m.opened; this.#state = 1; this.#fire("open"); }
             else if ("text" in m) this.#fire("message", { data: m.text, origin: this.#origin });
             else if ("binary" in m) {
               const buffer = decode(m.binary);
@@ -810,7 +897,7 @@ enum ExtensionShims {
             }
             if (this.#state >= 2) return;
             this.#state = 2;
-            const message = { close: code === undefined ? 1000 : code, reason: reason === undefined ? "" : String(reason) };
+            const message = this.#closing = { close: code === undefined ? 1000 : code, reason: reason === undefined ? "" : String(reason) };
             this.#queue = this.#queue.then(() => { try { this.#port.postMessage(message); } catch (e) {} });
           }
         }
@@ -834,14 +921,20 @@ enum ExtensionShims {
         const unreadLimit = 64 * 1024 * 1024;
         const fetch = function fetch(input, init) {
           const self = this, args = arguments;
-          // Read cheaply first: only credentials "include" is the browser's;
-          // any other fetch goes on untouched, its body unread.
+          // Read cheaply first: only credentials "include" is the browser's,
+          // and from a page "same-origin", the default, too: Chrome counts a
+          // granted host as the extension's own origin, so its cookies go
+          // with a plain fetch there. Save to Notion's popup asks Notion's
+          // API so and, given no session, said "Log in" while its tabs were
+          // signed in. Not yet from the worker, whose plain fetches are many
+          // (images, an app on the Mac polled with a short timeout).
+          // Any other fetch goes on untouched, its body unread.
           let credentials;
           try {
             credentials = init && init.credentials !== undefined ? String(init.credentials)
               : (input instanceof Request ? input.credentials : "same-origin");
           } catch (e) { return original.apply(self, args); }
-          if (credentials !== "include") return original.apply(self, args);
+          if (credentials !== "include" && (worker || credentials !== "same-origin")) return original.apply(self, args);
           // A copy to read, so the page's own Request keeps its body for
           // WebKit's fetch if the browser passes.
           let request, url;
@@ -1065,6 +1158,19 @@ enum ExtensionShims {
       }
       // The tab an extension's framed page is in, asked once (see __searchToFrame).
       let ownTab = null;
+      // The extension's own pages framed in websites' tabs, as its worker
+      // has heard from them: tab → frame → when. The worker hands a tab's
+      // message to those frames too (see alsoFramed), and finds them with
+      // webNavigation; an extension that didn't ask for it — Affinity
+      // Pathfinder — has them found this way instead. A framed page says it
+      // is there as it starts, and that it is going as it goes.
+      const framedPages = new Map();
+      let ownFrame = null;
+      if (embedded && runtime && typeof Object.getPrototypeOf(runtime).sendMessage === "function") {
+        const say = (here) => Promise.resolve(Object.getPrototypeOf(runtime).sendMessage.call(runtime, { __searchFramed: here }));
+        ownFrame = say(true).then((r) => r && typeof r.tabId === "number" && typeof r.frameId === "number" ? r : null, () => null);
+        try { root.addEventListener("pagehide", () => { say(false).catch(() => {}); }); } catch (e) {}
+      }
       // Who has something to say about a message, told between the
       // extension's worker and its own pages on a channel they share (one
       // origin): each says, as soon as its listeners have run, whether it
@@ -1182,6 +1288,21 @@ enum ExtensionShims {
         let attached = false;
         const dispatch = function (message, sender, respond, local = false) {
           if (internalMessages && portIsolation.isControl(message)) return portIsolation.handleControl(message, sender, respond);
+          // The worker notes each of the extension's pages framed in a
+          // website's tab that it hears from (see framedPages), and the
+          // page's word that it is there, or going.
+          if (internalMessages && !local && background && fromOwnPages(sender) && sender.tab
+            && typeof sender.tab.id === "number" && typeof sender.frameId === "number" && sender.frameId > 0) {
+            const tab = sender.tab.id, frames = framedPages.get(tab) || new Map();
+            if (message && message.__searchFramed === false) frames.delete(sender.frameId);
+            else frames.set(sender.frameId, Date.now());
+            if (frames.size) framedPages.set(tab, frames); else framedPages.delete(tab);
+          }
+          if (internalMessages && !local && message && typeof message.__searchFramed === "boolean" && sender && sender.id === runtime.id) {
+            if (!background) { setTimeout(() => respond(undefined), 10000); return true; }
+            respond(sender.tab && typeof sender.frameId === "number" ? { tabId: sender.tab.id, frameId: sender.frameId } : null);
+            return;
+          }
           if (!local && !background && !relaying && fromOwnPages(sender)) {
             const k = relayKey(message);
             if (k && pending(heardRelayed, k)) { count(heardRelayed, k, -1); return; }
@@ -1216,13 +1337,18 @@ enum ExtensionShims {
           // it pass without answering, as it would a message not for it.
           if (message && message.__searchToFrame) {
             const to = message.__searchToFrame;
-            if (!embedded || !(to.urls || []).includes(location.href)) {
+            const byAddress = embedded && (to.urls || []).includes(location.href);
+            const byFrame = embedded && !byAddress && Array.isArray(to.frames) && !!ownFrame;
+            if (!byAddress && !byFrame) {
               if (!background) setTimeout(() => sendResponse(undefined), 10000);
               return background ? undefined : true;
             }
             if (!ownTab) ownTab = Promise.resolve(runtime.sendMessage({ __searchCall: { space: "tabs", method: "getCurrent", args: [] } }))
               .then((reply) => reply && reply.value ? reply.value.id : null, () => null);
-            ownTab.then((id) => {
+            const mine = byFrame
+              ? ownFrame.then((own) => own && to.frames.includes(own.frameId) ? own.tabId : null)
+              : ownTab;
+            mine.then((id) => {
               if (id !== to.tabId) return setTimeout(() => sendResponse(undefined), 10000);
               let kept = false;
               for (const listener of [...listeners]) {
@@ -1368,17 +1494,21 @@ enum ExtensionShims {
         // it takes a single connection: its options page stayed blank and its
         // keys did nothing. A copy applied to no object (0, null, undefined)
         // is applied to runtime. Only through apply, which is how such code
-        // calls it.
-        const apply = Function.prototype.apply;
-        try {
-          Object.defineProperty(Function.prototype, "apply", {
-            value: ({ apply(that, args) {
-              if ((that === null || (typeof that !== "object" && typeof that !== "function"))
-                  && typeof this === "function" && this.name === "getPlatformInfo") that = runtime;
-              return Reflect.apply(apply, this, [that, args]);
-            } }).apply, configurable: true, writable: true, enumerable: false,
-          });
-        } catch (e) {}
+        // calls it. Never in a content script: there it made every apply on
+        // the page's side of the extension several times slower, for a call
+        // only the extension's own pages and worker make.
+        if (!inContent) {
+          const apply = Function.prototype.apply;
+          try {
+            Object.defineProperty(Function.prototype, "apply", {
+              value: ({ apply(that, args) {
+                if ((that === null || (typeof that !== "object" && typeof that !== "function"))
+                    && typeof this === "function" && this.name === "getPlatformInfo") that = runtime;
+                return Reflect.apply(apply, this, [that, args]);
+              } }).apply, configurable: true, writable: true, enumerable: false,
+            });
+          } catch (e) {}
+        }
       }
       /*__SEARCH_PORT_ISOLATION__*/
 
@@ -1732,14 +1862,22 @@ enum ExtensionShims {
       // from either wins.
       const alsoFramed = (answer, tabId, message, options) => {
         const nav = chrome.webNavigation;
-        if (!nav || typeof nav.getAllFrames !== "function" || typeof tabId !== "number") return answer;
+        if (typeof tabId !== "number") return answer;
         const own = runtime.getURL("");
         const wanted = options && typeof options.frameId === "number" ? options.frameId : null;
-        const framed = Promise.resolve(nav.getAllFrames({ tabId })).then((frames) => {
-          const urls = (frames || []).filter((f) => f.url && f.url.startsWith(own) && f.frameId !== 0 && (wanted === null || f.frameId === wanted)).map((f) => f.url);
-          if (!urls.length) return undefined;
-          return Object.getPrototypeOf(runtime).sendMessage.call(runtime, { __searchToFrame: { tabId, urls, message } });
-        }, () => undefined);
+        const hand = (envelope) => Object.getPrototypeOf(runtime).sendMessage.call(runtime, { __searchToFrame: { tabId, ...envelope, message } });
+        let framed;
+        if (nav && typeof nav.getAllFrames === "function") {
+          framed = Promise.resolve(nav.getAllFrames({ tabId })).then((frames) => {
+            const urls = (frames || []).filter((f) => f.url && f.url.startsWith(own) && f.frameId !== 0 && (wanted === null || f.frameId === wanted)).map((f) => f.url);
+            if (!urls.length) return undefined;
+            return hand({ urls });
+          }, () => undefined);
+        } else {
+          const ids = [...(framedPages.get(tabId) || new Map()).keys()].filter((id) => wanted === null || id === wanted);
+          if (!ids.length) return answer;
+          framed = Promise.resolve(hand({ frames: ids }));
+        }
         return new Promise((resolve, reject) => {
           let left = 2, failure = null;
           const none = () => { if (--left === 0) failure ? reject(failure) : resolve(undefined); };
@@ -1848,14 +1986,58 @@ enum ExtensionShims {
           // Read as the worker starts: Claude's lists its colours in a class.
           Color: { GREY: "grey", BLUE: "blue", RED: "red", YELLOW: "yellow", GREEN: "green",
             PINK: "pink", PURPLE: "purple", CYAN: "cyan", ORANGE: "orange" } });
+      // A port to the browser for as long as something here listens for an
+      // event WebKit lacks: the browser speaks on it when there is news
+      // (ExtensionWatch.swift), where this used to ask every few seconds.
+      // WebKit drops what a worker posts on a port only just opened, so the
+      // hello is said again until the browser answers it, and once more
+      // when the browser says the port has arrived ("ready"). `heard` is
+      // given what comes after: the answer to the hello, once — news may
+      // have come before it did — and then the news.
+      const watching = (name, hello, heard) => {
+        let port = null;
+        const start = () => {
+          if (port || !runtime || typeof runtime.connectNative !== "function") return;
+          let mine;
+          try { mine = runtime.connectNative(name); } catch (e) { return; }
+          port = mine;
+          let answered = false, tries = 0;
+          const greet = () => { try { mine.postMessage(hello()); } catch (e) {} };
+          const again = () => {
+            if (answered || port !== mine || tries++ >= 20) return;
+            greet();
+            setTimeout(again, 100 * Math.min(tries, 5));
+          };
+          mine.onMessage.addListener((m) => {
+            // Its own hello, sent back: what a worker posts in a port's first
+            // moments can come to its own listeners instead of the browser
+            // (see the note on ports to an app), and is no answer.
+            if (port !== mine || !m || typeof m !== "object" || m.listen) return;
+            if (m.ready) { if (!answered) greet(); return; }
+            if (m.listening && answered) return;
+            answered = true;
+            heard(m);
+          });
+          mine.onDisconnect.addListener(() => { if (port === mine) port = null; });
+          again();
+        };
+        const stop = () => {
+          const old = port;
+          port = null;
+          if (old) try { old.disconnect(); } catch (e) {}
+        };
+        // Said again to a port already open (the interval changed).
+        const update = () => { if (port) try { port.postMessage(hello()); } catch (e) {} };
+        return { start, stop, update, isOpen: () => !!port };
+      };
       // Groups change in Search's hands, where no event reaches the
-      // extension: while it listens, they are asked for every few seconds
+      // extension: while it listens, the browser says when they have changed
       // and what changed is told as Chrome tells it — and at once after the
       // extension changes one itself.
       let groupsChanged = () => {};
       if (chrome.tabGroups && chrome.tabGroups.onCreated && chrome.tabGroups.onCreated.listeners) {
         const groups = chrome.tabGroups, told = ["onCreated", "onRemoved", "onUpdated"];
-        let known = null, timer = null;
+        let known = null;
         // What an update changes; the order of the keys is the browser's.
         const shape = (g) => JSON.stringify([g.title, g.collapsed, g.color]);
         const tell = (name, group) => {
@@ -1875,13 +2057,23 @@ enum ExtensionShims {
             known = next;
           }, () => {});
         };
+        // Whatever the browser says, its answer to the hello included, is
+        // a reason to look: the groups are asked for and compared as before.
+        const line = watching("search.groups", () => ({ listen: true, worker }), () => groupsChanged());
         for (const name of told) {
-          const add = groups[name].addListener;
+          const { addListener: add, removeListener: remove } = groups[name];
           groups[name].addListener = (f) => {
             add(f);
-            if (timer) return;
+            if (line.isOpen()) return;
             groupsChanged();
-            timer = setInterval(groupsChanged, 3000);
+            line.start();
+          };
+          // Nobody left to tell: the port goes, and what was known with it.
+          groups[name].removeListener = (f) => {
+            remove(f);
+            if (told.some((n) => groups[n].listeners.size)) return;
+            line.stop();
+            known = null;
           };
         }
         put(groups, "update", (id, props, callback) => {
@@ -1931,21 +2123,30 @@ enum ExtensionShims {
       define("idle", ["queryState", "getAutoLockDelay"], [],
         { IdleState: { ACTIVE: "active", IDLE: "idle", LOCKED: "locked" } });
       if (chrome.idle && !chrome.idle.onStateChanged) {
-        // Asked every so often while anyone listens, the way Chrome
-        // notices on its own.
-        const changed = event(), add = changed.addListener;
-        let every = 60, state = "active", timer = null;
-        changed.addListener = (f) => {
-          add(f);
-          if (timer) return;
-          timer = setInterval(() => native("idle.queryState", [every]).then((now) => {
-            if (now === state) return;
-            state = now;
-            for (const g of changed.listeners) try { g(now); } catch (e) { setTimeout(() => { throw e; }); }
-          }).catch(() => {}), 15000);
+        // Told by the browser while anyone listens, the way Chrome notices
+        // on its own: when the Mac has been quiet for the detection
+        // interval, locks, or is used again (ExtensionWatch.swift).
+        const changed = event(), { addListener: add, removeListener: remove } = changed;
+        let every = 60, state = "active";
+        const line = watching("search.idle", () => ({ listen: true, worker, every }), (m) => {
+          if (typeof m.state !== "string" || m.state === state) return;
+          state = m.state;
+          for (const g of changed.listeners) try { g(m.state); } catch (e) { setTimeout(() => { throw e; }); }
+        });
+        changed.addListener = (f) => { add(f); line.start(); };
+        // The last one gone, the port goes with it, and the browser stops
+        // looking. A listener back starts from active, as the first did.
+        changed.removeListener = (f) => {
+          remove(f);
+          if (changed.listeners.size) return;
+          line.stop();
+          state = "active";
         };
         put(chrome.idle, "onStateChanged", changed);
-        put(chrome.idle, "setDetectionInterval", (seconds) => { every = Math.max(15, Number(seconds) || 60); });
+        put(chrome.idle, "setDetectionInterval", (seconds) => {
+          every = Math.max(15, Number(seconds) || 60);
+          line.update();
+        });
       }
       define("power", ["requestKeepAwake", "releaseKeepAwake", "reportActivity"]);
       define("browsingData",
@@ -2508,6 +2709,7 @@ enum ExtensionShims {
       const base = (() => { try { return runtime.getURL(""); } catch (e) { return ""; } })();
       const misread = (r) => {
         const c = r && r.condition, type = r && r.action && r.action.type;
+        if (c && (c.responseHeaders !== undefined || c.excludedResponseHeaders !== undefined)) return true;
         return !!(c && typeof c.regexFilter === "string" && c.requestDomains !== undefined
           && (type === "redirect" || type === "modifyHeaders"));
       };
@@ -2530,8 +2732,10 @@ enum ExtensionShims {
         // change of that shape is left out rather than carried out
         // everywhere: uBlock Origin Lite's strict blocking, `^https?://.*`
         // for thousands of named sites, sent every page to its warning (#709).
+        // So is a rule on a response's headers, which WebKit has no word for
+        // and would carry out on every request it otherwise matches.
         if (misread(r)) {
-          try { native("debug.error", ["declarativeNetRequest: " + r.action.type + " rule " + r.id + " left out — WebKit would take its pattern for every site, not the ones it names"]).catch(() => {}); } catch (x) {}
+          try { native("debug.error", ["declarativeNetRequest: " + (r.action && r.action.type) + " rule " + r.id + " left out — WebKit would carry it out beyond what it names"]).catch(() => {}); } catch (x) {}
           return null;
         }
         return r;
@@ -2890,7 +3094,11 @@ enum ExtensionShims {
         // the tabs it was made with are put first in the answer, their
         // indexes left true: an extension takes tabs[0] for the one it made
         // (Claude in Chrome groups it, and a pin can't be grouped, #872).
-        if (chrome.windows && typeof chrome.windows.create === "function") {
+        // Not in a website's frame: there windows.create goes through the
+        // worker (see `embedded`), and a stand-in built here on WebKit's own
+        // would take that one's place and call WebKit directly, which ends
+        // the website's process (Affinity Pathfinder's sign-in).
+        if (!embedded && chrome.windows && typeof chrome.windows.create === "function") {
           const ns = chrome.windows;
           const create = ns.create.bind(ns);
           const ours = (...args) => {
@@ -4012,10 +4220,17 @@ enum ExtensionShims {
     /// The groups an extension is shown: never one without a tab. The same
     /// with groups off in Settings, where they are kept without a heading
     /// in the column (see the tab groups cases in `run`).
+    static func listedGroups(_ browser: Browser) -> [TabGroup] {
+        browser.tabGroups.filter { !browser.tabs(in: $0.id).isEmpty }
+    }
+
+    /// Of those, the ones this extension may see: a group holding at least
+    /// one tab it is shown.
     private static func listedGroups(_ browser: Browser, context: WKWebExtensionContext, owner: Extensions) -> [TabGroup] {
         browser.tabGroups.filter { group in browser.tabs(in: group.id).contains { owner.seen($0, for: context) } }
     }
 
+    /// A group by its number in whichever window has it.
     private static func listedGroup(_ number: Any?, context: WKWebExtensionContext, owner: Extensions) throws -> (group: TabGroup, browser: Browser) {
         for browser in Browsers.all {
             if let group = try? listedGroup(number, in: browser, context: context, owner: owner) { return (group, browser) }
@@ -4080,6 +4295,13 @@ enum ExtensionShims {
             throw Unsupported(what: "\(name) must be an integer between \(minimum) and \(Int32.max)")
         }
         return result
+    }
+
+    /// The family a call belongs to, as `gates` names it: `system.*` are
+    /// each their own permission in Chrome, so they keep two parts.
+    static func family(of api: String) -> String {
+        let parts = api.split(separator: ".")
+        return parts.prefix(parts.first == "system" ? 2 : 1).joined(separator: ".")
     }
 
     /// What this extension asked for: the names in its manifest and any
@@ -4168,8 +4390,7 @@ enum ExtensionShims {
         }
         // System APIs have separate permissions for each namespace; a CPU
         // grant must not authorize display or memory enumeration.
-        if let needed = gates.first(where: { api.hasPrefix($0.key + ".") })?.value,
-           !allowed(id, context: context).contains(needed) {
+        if let needed = gates[family(of: api)], !allowed(id, context: context).contains(needed) {
             throw Unsupported(what: "The extension never asked for \u{201C}\(needed)\u{201D}")
         }
 
@@ -4805,11 +5026,7 @@ enum ExtensionShims {
 
         // MARK: idle
         case "idle.queryState":
-            let threshold = (first as? Double) ?? 60
-            if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
-               session["CGSSessionScreenIsLocked"] as? Bool == true { return "locked" }
-            let quiet = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
-            return quiet >= threshold ? "idle" : "active"
+            return ExtensionWatch.idleState(threshold: (first as? Double) ?? 60)
         case "idle.getAutoLockDelay":
             return 0
 
@@ -4933,6 +5150,9 @@ enum ExtensionShims {
                       let home = owner.browser(of: tab), let group = home.group(of: tab) else { return -1 }
                 return TabGroup.number(group)
             }
+        // A group's number is the extension's in every window, as in
+        // Chrome: one made in a window it opened is found from the window in
+        // front too (#872).
         case "tabGroups.query":
             let spec = first as? [String: Any] ?? [:]
             return Browsers.all.flatMap { listedGroups($0, context: context, owner: owner) }.filter { group in

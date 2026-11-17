@@ -22,6 +22,9 @@ enum WhatsNew {
         let since: String
         let get: @MainActor (Preferences) -> Bool
         let set: @MainActor (Preferences, Bool) -> Void
+        /// Whether it can do anything now: a switch that needs another one
+        /// on stays off the card until it is.
+        var shown: @MainActor (Preferences) -> Bool = { _ in true }
     }
 
     /// A version that has a card.
@@ -35,6 +38,16 @@ enum WhatsNew {
         Toggle(title: "AI on pages", detail: "Summarize a page or ask about it. Choose where it runs in Settings › AI.",
                since: "1.0.5", get: { $0.ai }, set: { $0.ai = $1 }),
     ] : []) + [
+        Toggle(title: "Send links to a space", detail: "Links to the sites you choose open in their space, with its sign-ins, as in Arc.",
+               since: "1.0.11", get: { $0.sendsLinksToSpaces }, set: { $0.sendsLinksToSpaces = $1 },
+               shown: { $0.usesSpaces }),
+
+        Toggle(title: "Profiles in one window", detail: "A space of another profile opens in the same window, with that profile's sign-ins, as in Arc.",
+               since: "1.0.9", get: { $0.profilesInOneWindow }, set: { $0.profilesInOneWindow = $1 }),
+
+        Toggle(title: "Close goes back", detail: "Closing the tab you're on takes you to the one you were on before it, as ⌃Tab would.",
+               since: "1.0.8", get: { $0.closeGoesBack }, set: { $0.closeGoesBack = $1 }),
+
         Toggle(title: "Your Apple passwords", detail: "Accounts from Apple's Passwords app under the sign-in field, with a code from your Mac.",
                since: "1.0.7", get: { $0.applePasswords }, set: { $0.applePasswords = $1 }),
         Toggle(title: "Ask before quitting", detail: "⌘Q asks first, so a slip doesn't close every window.",
@@ -92,6 +105,11 @@ enum WhatsNew {
     ]
 
     static let releases: [Release] = [
+        Release(version: "1.0.12"),
+        Release(version: "1.0.11"),
+        Release(version: "1.0.10"),
+        Release(version: "1.0.9"),
+        Release(version: "1.0.8"),
         Release(version: "1.0.7"),
         Release(version: "1.0.6"),
         Release(version: "1.0.5"),
@@ -156,6 +174,121 @@ enum WhatsNew {
             ],
             fixed: [
                 "The browser menu uses a single outline at its rounded corners.",
+            ]
+        ),
+        Notes(
+            version: "1.0.12", date: "9 November 2026",
+            headline: "Your contact details in forms, a tab dragged across the top again, and your fixes.",
+            new: [
+                "Your card in Contacts under a box for your name, email, phone or address, as in Safari. Turn it on in Settings › Passwords.",
+                "Open All in New Tabs at the foot of each folder in the Bookmarks menu.",
+            ],
+            better: [
+                "A tab carried off its row or column goes with the pointer.",
+                "Pages with many frames load quicker with extensions such as 1Password.",
+            ],
+            fixed: [
+                "A tab across the top that couldn't be dragged, moving the window instead, with Tabs give when pressed on.",
+            ]
+        ),
+        Notes(
+            version: "1.0.11", date: "9 November 2026",
+            headline: "Send links to a space, a proxy for the whole browser, a quicker window with many tabs, and your fixes.",
+            new: [
+                "Send links to a space, as in Arc: the sites you choose open in their space, in Settings › Spaces & Pins or a tab's right-click menu.",
+                "An HTTP or SOCKS5 proxy for the whole browser, in Settings › Proxy.",
+                "Bring Things Over can bring the tabs Helium, Chrome or another Chromium browser has open, with their groups.",
+                "⌥-click a tab to put it beside the page in Split View.",
+                "Replace a pin's page with the one it shows, from the pin's right-click menu.",
+            ],
+            better: [
+                "Typing in the address field and swiping between spaces stay quick with many tabs open.",
+                "Your site shortcuts are offered as you type, like the built-in sites.",
+                "The tab column has no scroll bar, as the tabs across the top.",
+                "Show how far you've read is off unless you turn it on.",
+                "Passkeys and saved passwords are handled more carefully, and the sites you sign in to stay out of the Mac's log.",
+            ],
+            fixed: [
+                "⌘-click opening a link in the same tab on some shops.",
+                "The floating video flickering as it pops out of the page.",
+                "Closing a window right after using it taking away its space's pins.",
+                "And more, from your messages and pull requests.",
+            ]
+        ),
+        Notes(
+            version: "1.0.10", date: "8 November 2026",
+            headline: "Site permissions in the site card, Claude in Chrome can act in Dark Search, ⇧⌘T brings tabs back as they were, and your fixes.",
+            new: [
+                "Site Permissions in the site card: camera, microphone, location and notifications, each Ask, Allow or Block.",
+                "Codes from Apple's Passwords app under the box that asks for one.",
+                "Choose the language pages are translated into, in Settings › Browsing.",
+                "Shift-Return searches with a second engine, if you pick one in Settings › Browsing.",
+                "Copy Address in a download's right-click menu.",
+                "With a site put in the address field with Tab, what you searched there before, read from this Mac only.",
+            ],
+            better: [
+                "The address field says where Return goes, and the key that raised it puts it away.",
+                "⇧⌘T brings a tab back with its Back and Forward, and brings back Settings, History and the other pages of Dark Search.",
+                "Turning the blocker off for one site is a switch in the site's card.",
+                "With Tabs show: Letters, a tab's letter is beside its title.",
+                "⌘S slides the column at once, and keeping a bookmark no longer stalls a window with many tabs.",
+                "Dragging one of several selected tabs carries them all.",
+                "A space's downloads folder is one Downloads submenu in its menu.",
+            ],
+            fixed: [
+                "Claude in Chrome's actions, which all failed with \"No tabs to group\".",
+                "Discord signing you out when reloaded with the column out.",
+                "A video on a TV or second display floating out when you work in another app on this screen.",
+                "A tab carried past another or a Split View pair drifting away from the pointer.",
+                "A closed tab's video or music playing on in the background.",
+                "uBlock Origin Lite leaving GitLab and similar pages half-drawn.",
+                "A waking tab shown zoomed in, and a window stuck after a video's full screen.",
+                "And many more, most from your messages and pull requests.",
+            ]
+        ),
+        Notes(
+            version: "1.0.9", date: "4 November 2026",
+            headline: "Claude in the side panel, profiles in one window, and your fixes.",
+            new: [
+                "Profiles in one window, as in Arc, if you turn it on in Settings › Spaces & Pins.",
+                "Downloads can open floating by its button, or in the side panel.",
+                "Delete in a pin's right-click menu.",
+            ],
+            better: [
+                "Claude in Chrome's side panel is signed in when your tabs are.",
+                "Address suggestions match words anywhere in a page's title and forgive typos.",
+                "⌘R reloads the page in a peek, and a link's menu starts with Open Link in New Tab.",
+                "A video floats when you switch spaces, if automatic floating is on.",
+            ],
+            fixed: [
+                "Copy Image copies at once, where a big picture took up to a minute.",
+                "Google Docs and Sheets are sharp on macOS 26.3 and earlier.",
+                "A pin no longer stays stuck mid-drag, and a page no longer stays shifted after a swipe back.",
+                "A page that keeps crashing stops reloading itself and says so.",
+                "And many more, most from your messages and pull requests.",
+            ]
+        ),
+        Notes(
+            version: "1.0.8", date: "2 November 2026",
+            headline: "Your fixes, by the dozen, and a few small things.",
+            new: [
+                "Open Link in Split View, in a link's right-click menu.",
+                "Close Tabs Below, beside Close Other Tabs.",
+                "File › Save Page As… keeps a page as one web archive.",
+                "Closing a tab can take you back to the one you were on before, if you turn it on.",
+            ],
+            better: [
+                "Bookmarks in the address field as you type, by name or address.",
+                "Links opened behind a page go after it in the order you clicked them.",
+                "⌘W closes every tab picked in the column; a tab in a group is put away rather than closed.",
+                "Closing the last window lets its pages sleep, as Safari and Chrome do.",
+            ],
+            fixed: [
+                "Typing in a new tab no longer stops with a beep after the first letters.",
+                "The page under a peek no longer reacts to the pointer.",
+                "1Password no longer quits Dark Search on macOS 15; Claude's and ChatGPT's side panels and Vimium C work again.",
+                "Picture in picture's button takes you back to the video, and a paused full-screen video takes clicks.",
+                "And many more, most from your messages and pull requests.",
             ]
         ),
         Notes(
@@ -378,7 +511,7 @@ struct WhatsNewCard: View {
     /// list rather than vanishing under the hand.
     @State private var earlier: [WhatsNew.Toggle]?
 
-    private var fresh: [WhatsNew.Toggle] { WhatsNew.toggles.filter { $0.since == release.version } }
+    private var fresh: [WhatsNew.Toggle] { WhatsNew.toggles.filter { $0.since == release.version && $0.shown(prefs) } }
 
     var body: some View {
         Plate("New in Dark Search \(release.version)", width: 460, close: close) {
@@ -408,7 +541,7 @@ struct WhatsNewCard: View {
         }
         .onAppear {
             if earlier == nil {
-                earlier = WhatsNew.toggles.filter { WhatsNew.older($0.since, than: release.version) && !$0.get(prefs) }
+                earlier = WhatsNew.toggles.filter { WhatsNew.older($0.since, than: release.version) && !$0.get(prefs) && $0.shown(prefs) }
             }
         }
     }

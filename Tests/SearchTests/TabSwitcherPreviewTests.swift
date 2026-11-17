@@ -205,7 +205,7 @@ final class TabSwitcherPreviewTests: XCTestCase {
 
     private func makeSwitcher(_ driver: PreviewDriver) -> TabSwitcher {
         TabSwitcher(previewProvider: { tab, width, done in driver.capture(tab, width: width, done: done) },
-                    previewNow: { driver.now })
+                    previewNow: { driver.now }, previewDelay: 0)
     }
 
     private func tab(_ name: String) -> Tab {

@@ -5,8 +5,9 @@ import SwiftUI
 /// page; one line per account, the name in ink and the site under it in
 /// grey; a click puts both into the form. The Mac's passkeys for a page
 /// waiting for one come first, as in Safari; a click on one brings up the
-/// Mac's sheet for it. It follows the box when the page scrolls, and goes
-/// when the caret does.
+/// Mac's sheet for it. Under a box for your name, email, phone or address,
+/// your card in Contacts, and a click fills the form. It follows the box
+/// when the page scrolls, and goes when the caret does.
 struct AccountList: View {
     @ObservedObject var browser: Browser
     let asked: Browser.Suggesting
@@ -20,16 +21,25 @@ struct AccountList: View {
                 Row(mark: .symbol("person.badge.key"), name: passkey.name,
                     detail: "Passkey" + (passkey.provider.map { " · \($0)" } ?? "")) { browser.choose(passkey) }
             }
-            ForEach(asked.logins) { login in
-                Row(mark: .letter(login.user.first.map { String($0).uppercased() } ?? "•"),
-                    name: login.user.isEmpty ? "No name" : login.user, detail: login.host) { browser.choose(login) }
-                    .help("Fill from Dark Search Passwords with Touch ID")
+            // The page's own host first, from both places; the rest of its
+            // site under a line, so a login saved for example.com is still
+            // there on admin.example.com without passing for admin's.
+            ForEach(ownLogins) { loginRow($0) }
+            ForEach(ownApple) { appleRow($0) }
+            if !(ownLogins.isEmpty && ownApple.isEmpty) && !(siteLogins.isEmpty && siteApple.isEmpty) {
+                Text("Other accounts on \(Vault.registrable(asked.host))")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Palette.faint)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .overlay(alignment: .top) { Rectangle().fill(Palette.hairline).frame(height: 1) }
             }
-            // The Mac's Passwords app, when turned on (ApplePasswords.swift):
-            // after Search's own, marked as Apple's.
-            ForEach(asked.apple) { login in
-                Row(mark: .letter(login.user.first.map { String($0).uppercased() } ?? "•"),
-                    name: login.user.isEmpty ? "No name" : login.user, detail: "Apple Passwords") { browser.choose(login) }
+            ForEach(siteLogins) { loginRow($0) }
+            ForEach(siteApple) { appleRow($0) }
+            ForEach(asked.codes) { code in
+                Row(mark: .symbol("number"), name: code.user.isEmpty ? "Verification code" : code.user,
+                    detail: code.user.isEmpty ? "Apple Passwords" : "Verification code · Apple Passwords") { browser.choose(code) }
             }
             if asked.appleConnect {
                 Row(mark: .symbol("key.icloud"), name: "Connect Apple Passwords",
@@ -38,9 +48,16 @@ struct AccountList: View {
             if asked.appleOffer != nil {
                 OfferRow(use: browser.useApplePasswords, never: browser.neverOfferApplePasswords)
             }
+            // A click fills the form; a shift-click, the box alone.
+            ForEach(asked.contacts) { contact in
+                Row(mark: .symbol("person.crop.circle"), name: contact.title, detail: contact.detail) {
+                    browser.choose(contact, alone: NSEvent.modifierFlags.contains(.shift))
+                }
+                .help("Fills the form. Shift-click fills only this box.")
+            }
             if !offerOnly {
             HStack(spacing: 6) {
-                Image(systemName: asked.logins.isEmpty ? "key" : "touchid")
+                Image(systemName: contactsOnly ? "person.crop.rectangle" : (asked.logins.isEmpty ? "key" : "touchid"))
                     .font(.system(size: 9, weight: .medium))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(footer)
@@ -73,13 +90,43 @@ struct AccountList: View {
         .offset(x: asked.spot.minX, y: asked.spot.maxY + 6)
     }
 
+    private var ownLogins: [Kept] { asked.logins.filter { Vault.belongs($0.host, to: asked.host, wide: false) } }
+    private var siteLogins: [Kept] { asked.logins.filter { !Vault.belongs($0.host, to: asked.host, wide: false) } }
+    private var ownApple: [AppleLogin] { asked.apple.filter { owns($0) } }
+    private var siteApple: [AppleLogin] { asked.apple.filter { !owns($0) } }
+
+    private func owns(_ login: AppleLogin) -> Bool {
+        asked.appleHost.map { ApplePasswords.belongs(login.sites, to: $0, wide: false) } ?? false
+    }
+
+    private func loginRow(_ login: Kept) -> some View {
+        Row(mark: .letter(login.user.first.map { String($0).uppercased() } ?? "•"),
+            name: login.user.isEmpty ? "No name" : login.user, detail: login.host) { browser.choose(login) }
+            .help("Fill from Dark Search Passwords with Touch ID")
+    }
+
+    /// The Mac's Passwords app, when turned on (ApplePasswords.swift):
+    /// marked as Apple's.
+    private func appleRow(_ login: AppleLogin) -> some View {
+        Row(mark: .letter(login.user.first.map { String($0).uppercased() } ?? "•"),
+            name: login.user.isEmpty ? "No name" : login.user, detail: "Apple Passwords") { browser.choose(login) }
+    }
+
     /// Nothing but the offer: no footer under it, the row says it all.
     private var offerOnly: Bool {
-        asked.appleOffer != nil && asked.logins.isEmpty && asked.passkeys.isEmpty && asked.apple.isEmpty && !asked.appleConnect
+        asked.appleOffer != nil && asked.logins.isEmpty && asked.passkeys.isEmpty && asked.apple.isEmpty && asked.codes.isEmpty && !asked.appleConnect
+            && asked.contacts.isEmpty
+    }
+
+    /// Nothing but your card's rows.
+    private var contactsOnly: Bool {
+        !asked.contacts.isEmpty && asked.logins.isEmpty && asked.passkeys.isEmpty && asked.apple.isEmpty && asked.codes.isEmpty
+            && !asked.appleConnect
     }
 
     private var footer: String {
-        if asked.logins.isEmpty && asked.apple.isEmpty && !asked.appleConnect { return "Passkeys on this Mac" }
+        if contactsOnly { return "From your card in Contacts" }
+        if asked.logins.isEmpty && asked.apple.isEmpty && asked.codes.isEmpty && !asked.appleConnect { return "Passkeys on this Mac" }
         if asked.logins.isEmpty { return "Apple Passwords" }
         return asked.apple.isEmpty ? "Dark Search Passwords" : "Dark Search Passwords + Apple Passwords"
     }
