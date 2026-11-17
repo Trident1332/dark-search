@@ -428,6 +428,62 @@ final class Tab: ObservableObject, Identifiable {
         failure = nil
     }
     @Published private(set) var loading = false
+    /// WebKit still calls the page loading, and it has stopped getting
+    /// anywhere: the document is in and nothing more has arrived for a
+    /// while. A page loaded out of sight — a tab opened behind, a window
+    /// covered or on another desktop — leaves its autoplaying videos half
+    /// loaded, and WebKit holds the page's load event for them for good:
+    /// `isLoading` stayed true, and the tab's wheel turned for as long as
+    /// the tab lived. Until the next page, or this one finishing after all.
+    private var settled = false
+    private var settling: DispatchWorkItem?
+    /// How long with the document in and nothing new before it is settled.
+    static var settlesAfter: TimeInterval = 8
+
+    private func loadingChanged() {
+        guard built?.isLoading == true else {
+            settling?.cancel()
+            settling = nil
+            settled = false
+            loading = false
+            return
+        }
+        guard !settled else { return }
+        loading = true
+        settleLater()
+    }
+
+    /// More of the page arrived, or (`back`) another page was started
+    /// while this one was still loading.
+    private func progressed(back: Bool) {
+        guard built?.isLoading == true else { return }
+        if back { settled = false }
+        guard !settled else { return }
+        loading = true
+        settleLater()
+    }
+
+    private func settleLater() {
+        settling?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let view = self.built, view.isLoading else { return }
+            let before = view.estimatedProgress
+            view.evaluateJavaScript("document.readyState") { [weak self, weak view] state, _ in
+                MainActor.assumeIsolated {
+                    guard let self, let view, self.built === view, view.isLoading, !self.settled else { return }
+                    // The document itself still arriving, or more of the
+                    // page since it was asked: not stuck, asked again later.
+                    guard let state = state as? String, state != "loading", view.estimatedProgress == before else {
+                        return self.settleLater()
+                    }
+                    self.settled = true
+                    self.loading = false
+                }
+            }
+        }
+        settling = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Tab.settlesAfter, execute: work)
+    }
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
     /// Set when the page never arrived — no host, no network, a refused
@@ -1123,7 +1179,12 @@ final class Tab: ObservableObject, Identifiable {
                 }
             },
             web.observe(\.isLoading, options: [.new]) { [weak self] _, _ in
-                MainActor.assumeIsolated { self?.loading = self?.built?.isLoading ?? false }
+                MainActor.assumeIsolated { self?.loadingChanged() }
+            },
+            web.observe(\.estimatedProgress, options: [.old, .new]) { [weak self] _, change in
+                MainActor.assumeIsolated {
+                    self?.progressed(back: (change.newValue ?? 0) < (change.oldValue ?? 0))
+                }
             },
             web.observe(\.canGoBack, options: [.new]) { [weak self] _, _ in
                 MainActor.assumeIsolated { self?.steps() }
@@ -2415,6 +2476,9 @@ final class Tab: ObservableObject, Identifiable {
         if !blockedPopups.isEmpty { blockedPopups = [] }
         translationGone(sleeping: true)
         watch = []
+        settling?.cancel()
+        settling = nil
+        settled = false
         ears.stop()
         noisy = false
         quiet?.invalidate()

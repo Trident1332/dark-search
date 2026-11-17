@@ -46,6 +46,7 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Fixed
 
+- A tab's loading wheel no longer turns for ever on a page that loaded out of sight — a tab opened behind, a window covered or on another desktop. WebKit holds such a page's load for autoplaying videos it leaves half loaded (Discord's front page among them) and went on calling it loading; the tab now counts it as loaded once the document is in and nothing more has arrived for eight seconds, which also lets it sleep and fetch its icon.
 - Copy Image reads network chunks with the existing 50 MB bound, cookie-free sessions, authenticated proxy routing and Tor isolation, avoiding byte-by-byte accumulation.
 - Repeated page-process crashes stop after two automatic recoveries per minute and show a fresh Try again action; deferred recovery respects the failure barrier.
 - Web pages and website panels receive their owning window geometry, including background tabs, for older WebKit Google Docs/Sheets rendering.
