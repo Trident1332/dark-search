@@ -1,6 +1,6 @@
 # Security
 
-Dark Search is maintained by Caroline. It handles your passwords, your
+Dark Search is maintained by Carter Doesn't Sleep. It handles your passwords, your
 history and every page you open, so a hole in it matters more than most
 bugs. Please keep vulnerability details private while arranging a report.
 
@@ -9,7 +9,7 @@ bugs. Please keep vulnerability details private while arranging a report.
 Check this fork's [Security tab](https://github.com/Trident1332/dark-search/security)
 for reporting options. Private vulnerability reporting is currently disabled
 for this repository. Open an [issue](https://github.com/Trident1332/dark-search/issues/new)
-asking Caroline for a private reporting channel, without describing the
+asking Carter Doesn't Sleep for a private reporting channel, without describing the
 vulnerability or including sensitive data.
 
 Once a private channel is agreed, say what you found, where in the code,

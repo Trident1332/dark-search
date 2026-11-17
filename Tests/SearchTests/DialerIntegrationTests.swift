@@ -431,14 +431,14 @@ final class DialerIntegrationTests: XCTestCase {
         await new Promise(resolve => setTimeout(resolve, 220));
         var menu = document.getElementById('providerMenu'), rect = menu.getBoundingClientRect();
         return { hidden: menu.hidden, left: rect.left, right: rect.right, viewport: innerWidth,
-                 us: document.getElementById('numeroUS').textContent,
-                 ca: document.getElementById('numeroCA').textContent,
-                 uk: document.getElementById('telicallUK').textContent };
+                 us: document.getElementById('numeroUS').getAttribute('aria-label'),
+                 ca: document.getElementById('numeroCA').getAttribute('aria-label'),
+                 uk: document.getElementById('telicallUK').getAttribute('aria-label') };
         """, in: page.web) as? [String: Any]
         XCTAssertEqual(menu?["hidden"] as? Bool, false)
-        XCTAssertEqual(menu?["us"] as? String, "Numero US · +12025550123")
-        XCTAssertEqual(menu?["ca"] as? String, "Numero Canada · +18775550123")
-        XCTAssertEqual(menu?["uk"] as? String, "Telicall UK · +442079460958")
+        XCTAssertEqual(menu?["us"] as? String, "Numero US · +1 202 555 0123")
+        XCTAssertEqual(menu?["ca"] as? String, "Numero Canada · +1 877 555 0123")
+        XCTAssertEqual(menu?["uk"] as? String, "Telicall UK · +44 20 7946 0958")
         let left = try XCTUnwrap(menu?["left"] as? Double)
         let right = try XCTUnwrap(menu?["right"] as? Double)
         let viewport = try XCTUnwrap(menu?["viewport"] as? Double)
@@ -453,17 +453,17 @@ final class DialerIntegrationTests: XCTestCase {
         prefs.dialerNumeroUS = "+14155550123"
         prefs.dialerNumeroCA = "+16045550123"
         try await until {
-            (try? await page.web.evaluateJavaScript("document.getElementById('provider').title")) as? String == "Numero Canada · +16045550123"
+            (try? await page.web.evaluateJavaScript("document.getElementById('provider').title")) as? String == "Numero Canada · +1 604 555 0123"
         }
         let updated = try await pageScript("""
         return { instance: window.__numeroIntegrationInstance, status: window.__searchDialer.state().status,
-                 us: document.getElementById('numeroUS').textContent,
-                 ca: document.getElementById('numeroCA').textContent };
+                 us: document.getElementById('numeroUS').getAttribute('aria-label'),
+                 ca: document.getElementById('numeroCA').getAttribute('aria-label') };
         """, in: page.web) as? [String: Any]
         XCTAssertEqual(updated?["instance"] as? String, "same-page", "Owned-line edits do not reload the dialer")
         XCTAssertEqual(updated?["status"] as? String, "Not configured")
-        XCTAssertEqual(updated?["us"] as? String, "Numero US · +14155550123")
-        XCTAssertEqual(updated?["ca"] as? String, "Numero Canada · +16045550123")
+        XCTAssertEqual(updated?["us"] as? String, "Numero US · +1 415 555 0123")
+        XCTAssertEqual(updated?["ca"] as? String, "Numero Canada · +1 604 555 0123")
         XCTAssertTrue(page.ready)
         XCTAssertTrue(browser.dialerPage === page)
         _ = try await pageScript("document.getElementById('provider').click(); document.getElementById('telicallUK').click(); return true;", in: page.web)
@@ -472,7 +472,7 @@ final class DialerIntegrationTests: XCTestCase {
         XCTAssertEqual(ukSelected, "UK")
         prefs.dialerTelicallUK = "+447700900123"
         try await until {
-            (try? await page.web.evaluateJavaScript("document.getElementById('provider').title")) as? String == "Telicall UK · +447700900123"
+            (try? await page.web.evaluateJavaScript("document.getElementById('provider').title")) as? String == "Telicall UK · +44 7700 900123"
         }
         XCTAssertTrue(page.ready)
     }

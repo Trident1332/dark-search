@@ -146,7 +146,7 @@ enum WhatsNew {
     static let notes: [Notes] = [
         Notes(
             version: "1.1.0", date: "30 October 2026",
-            headline: "Dark Search, by Caroline.",
+            headline: "Dark Search, by Carter Doesn't Sleep.",
             new: [
                 "A new D-shaped search lens for the app icon and About page.",
                 "Dark Search branding across the browser, installer and releases.",

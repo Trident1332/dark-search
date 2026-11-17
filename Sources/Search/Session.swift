@@ -36,6 +36,11 @@ enum Session {
         /// Silenced by hand from the tab's speaker or menu. False in sessions
         /// written before tabs could keep it.
         var muted: Bool = false
+        /// A closed window's tab's own history, held while ⇧⌘T can still
+        /// bring the window back (Windows.closed). Never written: it can
+        /// hold what was typed into the page, and is left out of the keys.
+        var keepsake: Browser.Keepsake? = nil
+
         /// Keep a Tor tab on Tor even after it followed a clearnet redirect.
         var tor: Bool = false
     }

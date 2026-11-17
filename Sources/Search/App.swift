@@ -355,7 +355,7 @@ struct SearchApp: App {
                 Divider()
                 Button("Show History") { browser.recalling = true }
                     .shortcut("history.show")
-                Button("Downloads") { browser.hoarding = true }
+                Button("Downloads") { browser.showDownloads() }
                     .shortcut("history.downloads")
                 Divider()
                 Button("Clear Browsing Data") { browser.clearBrowsingData() }
@@ -1663,7 +1663,7 @@ struct ContentView: View {
         case "y" where !shifted:
             browser.recalling = true
         case "j" where shifted:
-            browser.hoarding = true
+            browser.showDownloads()
         case "v" where shifted:
             // In a text field this key is paste without formatting — a Google
             // Doc, a form, the address field. It only means Paste and Go when
@@ -1691,12 +1691,8 @@ struct ContentView: View {
             browser.toggleFloat()
         case "k" where !shifted:
             // Held down, ⌘K walks the list a step at a time; letting go of ⌘
-            // takes wherever it stopped.
-            if browser.editing, !browser.offers.isEmpty {
-                browser.stepSummon()
-            } else {
-                browser.summon()
-            }
+            // takes wherever it stopped. Pressed afresh, it puts it away.
+            browser.searchTabsKey()
         case "s" where shifted:
             browser.toggleSidebar()
         case "s" where !shifted:

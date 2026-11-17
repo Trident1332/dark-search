@@ -8,7 +8,7 @@ import AppKit
 typealias OSINTImageResolver = @MainActor () async -> Data?
 
 enum OSINTKind: String, Codable, CaseIterable, Identifiable {
-    case auto, person, username, website, company, domain, ip, phone, social, image
+    case auto, person, username, website, company, domain, ip, asn, phone, email, social, image
     var id: String { rawValue }
     var title: String { switch self {
     case .auto: return "Automatic"
@@ -18,7 +18,9 @@ enum OSINTKind: String, Codable, CaseIterable, Identifiable {
     case .company: return "Company"
     case .domain: return "Domain"
     case .ip: return "IP address"
+    case .asn: return "Autonomous system"
     case .phone: return "Phone number"
+    case .email: return "Email address"
     case .social: return "Social profile"
     case .image: return "Image"
     } }
@@ -27,14 +29,20 @@ enum OSINTKind: String, Codable, CaseIterable, Identifiable {
     case .person: return "person"
     case .company: return "building.2"
     case .domain, .website: return "globe"
-    case .ip: return "network"
+    case .ip,.asn: return "network"
     case .phone: return "phone"
+    case .email: return "envelope"
     case .image: return "photo"
     case .auto: return "magnifyingglass"
     } }
     static func detect(_ input: String) -> Self {
         let s = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        if IPv4Address(s) != nil || IPv6Address(s) != nil { return .ip }
+        if OSINTIdentity.email(s) != nil { return .email }
+        if s.range(of:#"(?i)^AS[0-9]{1,10}$"#,options:.regularExpression) != nil { return .asn }
+        // Network accepts an integer as a legacy IPv4 address. A national
+        // phone number must not accidentally take the IP lookup path.
+        if (s.split(separator:".",omittingEmptySubsequences:false).count == 4 && IPv4Address(s) != nil)
+            || (s.contains(":") && IPv6Address(s) != nil) { return .ip }
         if s.hasPrefix("@"), !s.contains(" ") { return .username }
         let digits = s.filter(\.isNumber)
         if digits.count >= 7, s.allSatisfy({ $0.isNumber || "+()- .".contains($0) }) { return .phone }
@@ -69,6 +77,17 @@ struct OSINTFinding: Codable, Identifiable, Equatable {
     var pivots: [String] = []
     var collected = Date()
     var saved = false
+    var facts: [String:String]? = nil
+    var evidenceSHA256: String? = nil
+    var evidenceTruncated: Bool? = nil
+    var isSearchLink: Bool { category == "More sources" }
+    var isSubstantive: Bool {
+        guard state == .found || state == .possible else { return false }
+        guard category != "Web results" && category != "More sources" else { return false }
+        let scaffolding:Set<String>=["Page title","Canonical URL","Match basis","Match meaning","Linked from","Discovery query","Entity type"]
+        return !(facts ?? [:]).filter { !scaffolding.contains($0.key) }.isEmpty || category == "Images" || category == "Phone numbering"
+    }
+    var sourceHost: String { URL(string:source)?.host ?? source }
     var icon: String { switch category {
     case "Public profiles": return "person.crop.circle"
     case "Images": return "photo"
@@ -122,10 +141,31 @@ enum OSINTPhone {
                 "meaning":"Numbering-plan metadata, not proof of an assigned number, current carrier, subscriber identity or current location.",
                 "metadataSource":"google/libphonenumber · 2026-10-31"]
     }
+    static func searchTerms(_ raw: String, region: String = "") -> [String] {
+        let info=describe(raw,region:region)
+        var terms: [String]=[]
+        if let national=info["nationalNumber"] as? String {
+            if national.count==10 {
+                let a=String(national.prefix(3)),b=String(national.dropFirst(3).prefix(3)),c=String(national.suffix(4))
+                terms.append("\(a)-\(b)-\(c)")
+            }
+        }
+        if let international=info["international"] as? String { terms += [international,international.filter(\.isNumber)] }
+        if let national=info["nationalNumber"] as? String {
+            terms.append(national)
+            if national.count==10 { terms.append("(\(national.prefix(3))) \(national.dropFirst(3).prefix(3))-\(national.suffix(4))") }
+        }
+        terms.append(raw)
+        var seen=Set<String>()
+        return terms.filter { !$0.isEmpty && seen.insert($0).inserted }.map { "\""+$0.replacingOccurrences(of:"\"",with:"")+"\"" }
+    }
+    static func searchQuery(_ raw: String, region: String = "") -> String {
+        searchTerms(raw,region:region).joined(separator:" OR ")
+    }
 }
 
 enum OSINTImage {
-    struct Result { var metadata: String; var text: String; var pivots: [String]; var summary: String }
+    struct Result { var metadata: String; var text: String; var pivots: [String]; var summary: String; var facts: [String:String] }
     static func analyse(_ data: Data) throws -> Result {
         guard let source = CGImageSourceCreateWithData(data as CFData,nil), CGImageSourceGetCount(source)>0,
               let properties = CGImageSourceCopyPropertiesAtIndex(source,0,nil) as? [String:Any] else {
@@ -153,8 +193,16 @@ enum OSINTImage {
         }
         let width = properties[kCGImagePropertyPixelWidth as String] ?? "?"
         let height = properties[kCGImagePropertyPixelHeight as String] ?? "?"
+        let tiff=properties[kCGImagePropertyTIFFDictionary as String] as? [String:Any] ?? [:]
+        let exif=properties[kCGImagePropertyExifDictionary as String] as? [String:Any] ?? [:]
+        var facts=OSINTFacts.compact(["Dimensions":"\(width) × \(height)","Original bytes":String(data.count),"Camera":OSINTFacts.text(tiff[kCGImagePropertyTIFFMake as String])+" "+OSINTFacts.text(tiff[kCGImagePropertyTIFFModel as String]),"SHA-256":metadata["SHA-256"] as? String ?? "","EXIF capture time":OSINTFacts.text(exif[kCGImagePropertyExifDateTimeOriginal as String]),"OCR":"\(text.count) recognised characters"])
+        if let gps=metadata["GPS decimal"] as? [String:Double] { facts["Embedded coordinates"]="\(gps["latitude"] ?? 0), \(gps["longitude"] ?? 0)" }
+        let recognised=OSINTService.matches(#"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b"#,text,group:0)
+        pivots+=Array(Set(recognised)).sorted().prefix(10)
+        if !recognised.isEmpty { facts["OCR email candidates"]=Array(Set(recognised)).sorted().joined(separator:"\n") }
+        facts=OSINTFacts.compact(facts)
         return Result(metadata:OSINTJSON.text(metadata),text:text,pivots:pivots,
-                      summary:"\(width) × \(height) · \(gps == nil ? "No GPS metadata" : "GPS metadata present") · \(text.isEmpty ? "No text recognised" : "Text recognised")")
+                      summary:OSINTFacts.summary(facts,fallback:"Image metadata",limit:6)+"\n"+(gps == nil ? "No GPS metadata" : "GPS metadata present"),facts:facts.merging(["Metadata location":gps == nil ? "No GPS metadata" : "GPS metadata present"]) { _,new in new })
     }
 }
 

@@ -40,6 +40,7 @@ final class AskAIContextTests: XCTestCase {
         browser.prefs.splitView = true
         _ = AIKeys.save("synthetic-context-test-key", for: .openAI)
         Store.settings.removeObject(forKey: "ai.told.openAI")
+        Store.settings.removeObject(forKey: "ai.told.openAI.tools-v1")
         try await super.setUp()
     }
 
@@ -52,6 +53,8 @@ final class AskAIContextTests: XCTestCase {
             browser.prefs.setAIModel(savedModel, for: .openAI)
             browser.prefs.splitView = savedSplit
         }
+        Store.settings.removeObject(forKey: "ai.told.openAI")
+        Store.settings.removeObject(forKey: "ai.told.openAI.tools-v1")
         AIKeys.forget(.openAI)
         browser = nil
         for view in views { view.stopLoading() }
@@ -171,6 +174,7 @@ final class AskAIContextTests: XCTestCase {
         try await until { !assistant.reading }
         assistant.draft = "Explain this quote"
         assistant.submit()
+        try await until { !assistant.reading }
         XCTAssertNotNil(assistant.notice)
         XCTAssertTrue(assistant.turns.isEmpty, "No provider request starts before consent")
         XCTAssertEqual(assistant.context?.text, "The captured quote")
@@ -241,6 +245,185 @@ final class AskAIContextTests: XCTestCase {
         XCTAssertEqual(second.context?.title, "Changed page")
         XCTAssertEqual(second.context?.url?.path, "/changed")
         XCTAssertTrue(second.turns.isEmpty)
+    }
+
+    func testToolsOnlyConversationSurvivesNavigationAndReadsNewDocument() async throws {
+        let source = try await browserPage(title: "Source page", path: "source")
+        browser.showRow([source], active: source.id)
+        browser.askAboutPage()
+        let assistant = try XCTUnwrap(browser.assisting)
+        try await until { !assistant.reading }
+        assistant.tools.setEnabled(true)
+        XCTAssertFalse(assistant.inspectEnabled)
+        source.onExplicitNavigation?(source)
+        XCTAssertTrue(browser.assisting === assistant)
+        let destination = URL(string: "https://ask-ai.invalid/tool-destination")!
+        source.setAddressOptimistically(destination)
+        source.web.loadHTMLString(html(title: "Verified destination"), baseURL: destination)
+        try await until {
+            guard !source.web.isLoading else { return false }
+            return (try? await source.web.evaluateJavaScript("document.title") as? String) == "Verified destination"
+        }
+        browser.assistantFollowsActiveTab()
+        XCTAssertTrue(browser.assisting === assistant)
+        let catalog = await assistant.tools.catalog()
+        let snapshot = await assistant.tools.call("browser_snapshot", arguments: [:], generation: catalog.generation)
+        XCTAssertTrue(snapshot.contains("Verified destination"))
+        browser.askAboutPage()
+        XCTAssertTrue(browser.assisting === assistant)
+    }
+
+    func testChangingCapabilitiesWhileConsentIsPendingReasksBeforeSending() async throws {
+        Store.settings.removeObject(forKey: "ai.told.openAI.tools-v1")
+        defer { Store.settings.removeObject(forKey: "ai.told.openAI.tools-v1") }
+        let source = try await browserPage(title: "Consent fixture", path: "consent")
+        browser.showRow([source], active: source.id)
+        browser.askAboutPage()
+        let assistant = try XCTUnwrap(browser.assisting)
+        try await until { !assistant.reading }
+        assistant.draft = "Review this fixture"
+        assistant.submit()
+        try await until { !assistant.reading }
+        XCTAssertNotNil(assistant.notice)
+        assistant.tools.setEnabled(false)
+        assistant.agree()
+        XCTAssertTrue(assistant.turns.isEmpty)
+        XCTAssertTrue(assistant.notice?.contains("selected local files") == true)
+        XCTAssertFalse(Store.settings.bool(forKey: "ai.told.openAI.tools-v1"))
+    }
+
+
+    func testQuestionsAutomaticallyEnableAvailableToolsBeforeCloudConsent() async throws {
+        // Ordinary page consent must not bypass the broader tools notice.
+        Store.settings.set(true, forKey: "ai.told.openAI")
+        let source = try await browserPage(title: "Automatic tools", path: "automatic")
+        browser.showRow([source], active: source.id)
+        browser.askAboutPage()
+        let assistant = try XCTUnwrap(browser.assisting)
+        try await until { !assistant.reading }
+        XCTAssertFalse(assistant.tools.enabled, "Opening Ask AI alone must not start or enable tools")
+        assistant.draft = "Check the current page"
+        assistant.submit()
+        try await until { !assistant.reading }
+        XCTAssertTrue(assistant.tools.enabled)
+        XCTAssertTrue(assistant.notice?.contains("selected local files") == true)
+        XCTAssertTrue(assistant.turns.isEmpty, "Automatic tools still require cloud consent")
+        XCTAssertNil(assistant.tools.workspace, "A question cannot grant access to the home or page folder")
+        let catalog = await assistant.tools.catalog()
+        XCTAssertTrue(catalog.functions.contains { $0["name"] as? String == "browser_snapshot" })
+    }
+
+    func testSummariesAutomaticallyUseToolsAndStillWaitForCloudConsent() async throws {
+        let source = try await browserPage(title: "Summary fixture", path: "summary")
+        browser.showRow([source], active: source.id)
+        browser.summarizePage()
+        let assistant = try XCTUnwrap(browser.assisting)
+        try await until { !assistant.reading }
+        XCTAssertTrue(assistant.tools.enabled)
+        XCTAssertNotNil(assistant.notice)
+        XCTAssertTrue(assistant.turns.isEmpty)
+        XCTAssertNil(assistant.tools.workspace)
+    }
+
+    func testHumanQuestionSelectsPublicRepositoryBeforeConsentWithoutASetupForm() async throws {
+        let source = try await browserPage(title: "Repository fixture", path: "repository")
+        browser.showRow([source], active: source.id)
+        browser.askAboutPage(from: source, selection: "Quoted page https://github.com/untrusted/page-source")
+        let assistant = try XCTUnwrap(browser.assisting)
+        try await until { !assistant.reading }
+        assistant.draft = "Review https://github.com/example/requested-project"
+        assistant.submit()
+        try await until { !assistant.reading }
+        XCTAssertEqual(assistant.tools.repositoryName, "example/requested-project")
+        XCTAssertNotNil(assistant.notice)
+        XCTAssertTrue(assistant.turns.isEmpty)
+        XCTAssertNil(assistant.tools.workspace)
+    }
+
+    func testPageQuotesCannotSelectRepositoriesAndExistingExplicitSourcesArePreserved() async throws {
+        let source = try await browserPage(title: "Quoted sources", path: "quoted-sources")
+        browser.showRow([source], active: source.id)
+        browser.askAboutPage(from: source, selection: "Quoted page https://github.com/untrusted/page-source")
+        var assistant = try XCTUnwrap(browser.assisting)
+        try await until { !assistant.reading }
+        assistant.draft = "Explain the quoted page"
+        assistant.submit()
+        try await until { !assistant.reading }
+        XCTAssertEqual(assistant.tools.repositoryName, "")
+        browser.closeAssistant()
+        browser.askAboutPage(from: source)
+        assistant = try XCTUnwrap(browser.assisting)
+        try await until { !assistant.reading }
+        assistant.tools.selectRepository("explicit/current-source")
+        assistant.draft = "Compare with https://github.com/example/other-project"
+        assistant.submit()
+        try await until { !assistant.reading }
+        XCTAssertEqual(assistant.tools.repositoryName, "explicit/current-source")
+        XCTAssertNotNil(assistant.notice)
+        XCTAssertTrue(assistant.turns.isEmpty)
+    }
+
+    func testRepositoryInferenceRejectsCredentialsOtherHostsQueriesAndAmbiguity() {
+        XCTAssertEqual(AIAssist.requestedRepository(in: "Review [source](https://github.com/example/project.git)")?.label, "example/project")
+        XCTAssertEqual(AIAssist.requestedRepository(in: "Use https://github.com/example/project/")?.label, "example/project")
+        for question in [
+            "http://github.com/example/project",
+            "https://github.com.evil.invalid/example/project",
+            "https://evil.invalid/https://github.com/example/project",
+            "https://person@github.com/example/project",
+            "https://github.com:443/example/project",
+            "https://github.com/example/project?token=fixture",
+            "https://github.com/example/project#readme",
+            "https://github.com/example/project/tree/main",
+            "https://github.com/example/%70roject",
+            "https://github.com/example/one and https://github.com/example/two"
+        ] {
+            XCTAssertNil(AIAssist.requestedRepository(in: question), question)
+        }
+    }
+
+    func testPendingCloudConsentCannotSendAfterTheTabLeavesSupportedPages() async throws {
+        let source = try await browserPage(title: "Consent navigation", path: "consent-navigation")
+        browser.showRow([source], active: source.id)
+        browser.askAboutPage()
+        let assistant = try XCTUnwrap(browser.assisting)
+        try await until { !assistant.reading }
+        assistant.draft = "Review this page"
+        assistant.submit()
+        try await until { !assistant.reading }
+        XCTAssertNotNil(assistant.notice)
+        source.setAddressOptimistically(URL(fileURLWithPath: "/private/tmp/unrelated-source"))
+        assistant.agree()
+        XCTAssertNil(assistant.notice)
+        XCTAssertNotNil(assistant.trouble)
+        XCTAssertTrue(assistant.turns.isEmpty)
+        XCTAssertFalse(Store.settings.bool(forKey: "ai.told.openAI.tools-v1"))
+    }
+
+    func testAutomaticToolsRespectProviderSupportAndPrivateTabPolicy() async throws {
+        let source = try await browserPage(title: "Provider policy", path: "provider-policy")
+        let bundled = Assistant(tab: source, provider: .thisMac, model: "fixture", summary: false, standalone: true)
+        bundled.prepareRequestTools(for: .question("Review https://github.com/example/project"))
+        XCTAssertFalse(bundled.tools.enabled, "The bundled text engine has no tool-calling support")
+        XCTAssertEqual(bundled.tools.repositoryName, "")
+        bundled.stop()
+
+        let privateSource = Tab(shy: true)
+        privateSource.setAddressOptimistically(URL(string: "https://ask-ai.invalid/private-policy")!)
+        let cloud = Assistant(tab: privateSource, provider: .openAI, model: "fixture", summary: false, standalone: true)
+        cloud.prepareRequestTools(for: .question("Review https://github.com/example/project"))
+        XCTAssertFalse(cloud.tools.enabled)
+        XCTAssertEqual(cloud.tools.repositoryName, "")
+        let denied = await cloud.tools.catalog()
+        XCTAssertTrue(denied.functions.isEmpty)
+        cloud.stop()
+
+        let local = Assistant(tab: privateSource, provider: .ollama, model: "fixture", summary: false, standalone: true)
+        local.prepareRequestTools(for: .question("Review https://github.com/example/project"))
+        XCTAssertTrue(local.tools.enabled, "Tool-capable local providers can stay inside private sessions")
+        XCTAssertEqual(local.tools.repositoryName, "example/project")
+        XCTAssertNil(local.tools.workspace)
+        local.stop()
     }
 
     private func browserPage(title: String, path: String) async throws -> Tab {

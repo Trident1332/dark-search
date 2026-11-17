@@ -36,9 +36,12 @@ enum Swipe {
     /// No rubber-banding. Pulling past the top of a page showed a band of
     /// blank ground above it, and nobody who came from Chrome read that as
     /// anything but a fault. WebKit lets a view turn off the bounce along
-    /// chosen edges natively through `_setRubberBandingEnabled:`. We keep
-    /// horizontal rubber-banding for two-finger swipe navigation gestures,
-    /// while turning off top and bottom bounce.
+    /// chosen edges natively through `_setRubberBandingEnabled:`. Top and
+    /// bottom never bounce. The sides bounce only on a page pinched in, where
+    /// panning on to its edge needs them; at its own size a swipe back is a
+    /// pull past the left edge, and the stretch it left behind kept the page
+    /// shifted 60 to 120 points to the side (#810, #815). Asked again as each
+    /// gesture starts, since a pinch changes the answer (PageView.scrollWheel).
     ///
     /// Turning this off via CSS `overscroll-behavior-y: none` on `html, body`
     /// broke mouse-wheel scrolling entirely on any page that had a non-passive
@@ -49,9 +52,10 @@ enum Swipe {
         guard web.responds(to: set) else { return }
         typealias Setter = @convention(c) (AnyObject, Selector, UInt) -> Void
         // _WKRectEdge: one bit per CGRectEdge (_WKRectEdge.h) — the edges
-        // that keep their bounce. Left and right only.
+        // that keep their bounce. Left and right, and only pinched in.
         let left: UInt = 1 << 0, right: UInt = 1 << 2   // CGRectMinXEdge, CGRectMaxXEdge
-        unsafeBitCast(web.method(for: set), to: Setter.self)(web, set, left | right)
+        let sides: UInt = web.magnification > 1 ? left | right : 0
+        unsafeBitCast(web.method(for: set), to: Setter.self)(web, set, sides)
     }
 
     /// Whether a sideways swipe here would scroll something. Said once per
@@ -119,6 +123,22 @@ enum Swipe {
         // handler has run, and this one runs first.
         setTimeout(function () { say(e.defaultPrevented); }, 0);
       }, { passive: true, capture: true });
+    })();
+    """
+
+    /// Read before a pinched page receives the gesture's first movement.
+    /// Its wheel listener can run after WebKit has already panned to an edge,
+    /// so that later position cannot say whether the gesture began there.
+    static let zoomRoom = """
+    (function () {
+      var vv = window.visualViewport;
+      if (!vv || vv.scale <= 1.01) return null;
+      var root = document.documentElement;
+      var html = getComputedStyle(root).overflowX;
+      var body = document.body ? getComputedStyle(document.body).overflowX : 'visible';
+      var effective = html === 'visible' ? body : html;
+      var width = effective === 'hidden' || effective === 'clip' ? root.clientWidth : root.scrollWidth;
+      return [Math.max(0, vv.pageLeft), Math.max(0, width - vv.width - vv.pageLeft)];
     })();
     """
 }

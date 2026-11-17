@@ -119,17 +119,17 @@ private actor FindingCollector {
         for _ in 0..<800 where session.running { try await Task.sleep(for:.milliseconds(50)) }
         XCTAssertFalse(session.running)
         let id=try XCTUnwrap(session.report?.findings.first?.id)
-        session.toggleSaved(id,profile:profile)
+        await session.toggleSaved(id,profile:profile)
         XCTAssertNil(session.problem)
-        let other=OSINTSession();other.loadSaved(profile)
+        let other=OSINTSession();await other.loadSaved(profile)
         XCTAssertEqual(other.savedReports.count,1)
-        other.loadSaved(UUID());XCTAssertTrue(other.savedReports.isEmpty)
-        other.loadSaved(profile);other.restore(try XCTUnwrap(other.savedReports.first))
+        await other.loadSaved(UUID());XCTAssertTrue(other.savedReports.isEmpty)
+        await other.loadSaved(profile);await other.restore(try XCTUnwrap(other.savedReports.first))
         XCTAssertNotNil(other.imageData)
         let folder=OSINTSession.savedFolder(profile)
         let permission=try FileManager.default.attributesOfItem(atPath:folder.path)[.posixPermissions] as? NSNumber
         XCTAssertEqual(permission?.intValue,0o700)
-        other.toggleSaved(id,profile:profile)
+        await other.toggleSaved(id,profile:profile)
         XCTAssertTrue(other.savedReports.isEmpty)
     }
     func testClearingDuringBrowserImageFetchDoesNotRestoreAnOldReport() async throws {

@@ -72,25 +72,25 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
 
     /// Whether sites are offered passkeys here (Settings › Passwords).
     ///
-    /// A build without Apple's browser entitlement can't do them: WebKit then
-    /// answers isUserVerifyingPlatformAuthenticatorAvailable() with false,
-    /// yet the API object exists, so sites offer the passkey path and strand
-    /// you there. Taken away, they go straight to the password. Signed with
-    /// the entitlement, as releases are, this is on, and Search carries out
-    /// the sites' requests itself (see Passkeys.swift).
+    /// A build without Apple's browser entitlement can't do them. Keep the
+    /// native API available for capability checks, reporting false while off;
+    /// hiding the constructor breaks sites that probe it without a type check.
+    /// With the entitlement this can be on, and Search carries out the sites'
+    /// requests itself (see Passkeys.swift).
     static var passkeysOffered: Bool {
         get { Store.settings.bool(forKey: "passkeys") }
         set { Store.settings.set(newValue, forKey: "passkeys") }
     }
 
-    /// Only the passkey object goes. navigator.credentials itself stays: sites
-    /// use it for stored passwords too, and that half still works.
+    /// Passkey capabilities report unavailable, while the native constructor
+    /// and password credential operations stay available. Public-key get and
+    /// create requests are refused; a capability probe must not break login.
     ///
     /// Unless an extension answers passkey requests itself — a password
     /// manager with your passkeys in it, as 1Password is. It puts its own get
     /// and create on navigator.credentials, and reaches for the passkey object
-    /// from its own script as it does; from then on sites see the object, and
-    /// the extension is the one they ask. Whatever it leaves to the browser is
+    /// from its own script as it does; its capability checks then reach the
+    /// original methods. Whatever it leaves to the browser is
     /// refused at once, as if you had said no, where WebKit would try and fail.
     static let withoutPasskeys = """
     (function () {
@@ -105,16 +105,34 @@ final class FormRelay: NSObject, WKScriptMessageHandler {
         } catch (e) {}
         return claimed;
       }
-      try {
-        Object.defineProperty(window, 'PublicKeyCredential', {
-          configurable: true,
-          get: function () { return answered() ? real : undefined; },
-          set: function (value) { real = value; }
-        });
-      } catch (e) {
-        try { delete window.PublicKeyCredential; } catch (ignored) {}
-        return;
+      function replace(name, unavailable) {
+        var native = real[name];
+        if (typeof native !== 'function') return;
+        try {
+          Object.defineProperty(real, name, {
+            configurable: true, writable: true,
+            value: function () {
+              return answered() ? native.apply(this, arguments) : unavailable();
+            }
+          });
+        } catch (e) {}
       }
+      ['isUserVerifyingPlatformAuthenticatorAvailable', 'isConditionalMediationAvailable'].forEach(function (name) {
+        replace(name, function () { return Promise.resolve(false); });
+      });
+      replace('getClientCapabilities', function () {
+        return Promise.resolve({
+          conditionalCreate: false, conditionalGet: false, conditionalMediation: false,
+          relatedOrigins: false, hybridTransport: false, passkeyPlatformAuthenticator: false,
+          userVerifyingPlatformAuthenticator: false, signalAllAcceptedCredentials: false,
+          signalCurrentUserDetails: false, signalUnknownCredential: false
+        });
+      });
+      // These methods can change an authenticator's credential metadata.
+      // Keeping the constructor visible must not enable them while off.
+      ['signalUnknownCredential', 'signalAllAcceptedCredentials', 'signalCurrentUserDetails'].forEach(function (name) {
+        replace(name, function () { return Promise.reject(new DOMException('Passkeys are unavailable.', 'NotAllowedError')); });
+      });
       var proto = CredentialsContainer.prototype;
       ['get', 'create'].forEach(function (name) {
         var native = proto[name];

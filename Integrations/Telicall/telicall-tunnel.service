@@ -1,0 +1,10 @@
+[Unit]
+Description=Telicall SIP TCP->TLS tunnel to getcontact
+After=network-online.target
+Wants=network-online.target
+[Service]
+ExecStart=/usr/bin/socat TCP4-LISTEN:5063,bind=127.0.0.1,reuseaddr,fork OPENSSL-CONNECT:sip-uk-2.getcontact.com:5061,verify=1,cafile=/etc/ssl/certs/ca-certificates.crt,snihost=sip-uk-2.getcontact.com,commonname=sip-uk-2.getcontact.com
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=multi-user.target

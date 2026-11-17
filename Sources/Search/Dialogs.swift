@@ -1,4 +1,5 @@
 import AppKit
+import os
 import Security
 import WebKit
 
@@ -462,19 +463,32 @@ extension Browser {
     /// those under memory pressure — background tabs first. Left alone, the
     /// tab shows white until somebody thinks to reload. Saying so, with the
     /// one thing worth offering, is what the failure view is for.
+    @objc(_webView:webContentProcessDidTerminateWithReason:)
+    func webView(_ webView: WKWebView, webContentProcessDidTerminateWithReason reason: Int) {
+        pageProcessEnded(webView, PageEnd(webKit: reason))
+    }
+
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        pageProcessEnded(webView, .unknown)
+    }
+
+    private static let pageLog = Logger(subsystem: "com.officecommun.search", category: "Pages")
+
+    private func pageProcessEnded(_ webView: WKWebView, _ end: PageEnd) {
         Dialogs.invalidateTrust(for: webView)
         cancelDisplay(for: webView)
         guard let tab = tab(for: webView) else { return }
         dropQuestions(for: tab.id)
         guard !tab.proxyPaused else { return }
-        // In front of you: straight back, a reload beats a white page with a
-        // button on it. Behind another tab: the moment you come back to it.
+        let outcome: String
         if tab.id == activeID, !tab.isBlank {
-            tab.recoverFromCrash()
+            outcome = tab.recoverFromCrash(end) ? "loaded again" : "kept dying, left for Try again"
         } else {
             tab.stale = true
+            outcome = "loaded again when shown"
         }
+        let host = tab.address?.host() ?? ""
+        Self.pageLog.error("A page's process ended (\(end.name, privacy: .public)) on \(host, privacy: .private): \(outcome, privacy: .public)")
     }
 }
 

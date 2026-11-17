@@ -87,8 +87,34 @@ def main():
             wheel(tab, 600)
             t.ok(f"{name}, pinched in: panning on to the left edge stays on the page",
                  where(tab) == name and (left(tab) or 0) <= 1, (where(tab), left(tab)))
+            before = where(tab)
             wheel(tab, 300)
-            t.ok(f"{name}, pinched in: at the left edge, a swipe goes back", where(tab) == "start", where(tab))
+            t.ok(f"{name}, pinched in: at the left edge, a swipe goes back",
+                 before == name and where(tab) == "start", (before, where(tab)))
+
+            # Mirror the boundary with a forward entry. Begin close enough to
+            # the right edge that the next gesture's first event crosses it.
+            tab = at(name, 1)
+            sv.cmd({"do": "go", "id": tab, "url": f"{BASE}/finish"})
+            sv.cmd({"do": "wait", "id": tab, "seconds": 5})
+            ev(tab, "history.back(); true")
+            until = time.monotonic() + 5
+            while where(tab) != name and time.monotonic() < until:
+                time.sleep(0.05)
+            if where(tab) != name:
+                raise RuntimeError("the forward-swipe fixture did not return to its page")
+            sv.cmd({"do": "magnify", "id": tab, "scale": 2.0})
+            wheel(tab, -150)
+            edge = ev(tab, "document.documentElement.clientWidth - visualViewport.width")
+            t.ok(f"{name}, pinched in: a pan towards the right edge stays inside the page",
+                 where(tab) == name and 0 < (left(tab) or 0) < edge, (where(tab), left(tab), edge))
+            wheel(tab, -600)
+            t.ok(f"{name}, pinched in: panning on to the right edge stays on the page",
+                 where(tab) == name and abs((left(tab) or 0) - edge) <= 1, (where(tab), left(tab), edge))
+            before = where(tab)
+            wheel(tab, -300)
+            t.ok(f"{name}, pinched in: at the right edge, a swipe goes forward",
+                 before == name and where(tab) == "finish", (before, where(tab)))
 
             tab = at(name, 1)
             wheel(tab, 300)

@@ -23,6 +23,7 @@ extension Browser {
                        configuration: Web.configuration(forNewTabFrom: tab, space: spaceID))
         prepare(page)
         page.go(to: url)
+        if #available(macOS 15.4, *) { Extensions.shared.openedAside(page) }
         withAnimation(Motion.settle) {
             peekTab = page
             peekFrom = tab.id
@@ -58,6 +59,7 @@ extension Browser {
         page.opener = tab.id
         page.setAddressOptimistically(url)
         if let host = url.host()?.lowercased() { tab.peeked = (Vault.registrable(host), Date()) }
+        if #available(macOS 15.4, *) { Extensions.shared.openedAside(page) }
         withAnimation(Motion.settle) {
             peekTab = page
             peekFrom = tab.id

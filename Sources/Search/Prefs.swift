@@ -69,6 +69,23 @@ enum NewTabPlace: String {
     case next, top, end
 }
 
+/// Where Downloads opens: a tab of its own, as it always has; the side
+/// panel's card floating by the downloads button; or the side panel,
+/// beside the page.
+enum DownloadsOpening: String, CaseIterable, Identifiable {
+    case tab, popover, panel
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .tab: return "In a tab"
+        case .popover: return "Floating by the button"
+        case .panel: return "In the side panel"
+        }
+    }
+}
+
 /// Which edge the tab column sits on when tabs are arranged in a sidebar.
 enum SidebarPosition: String, CaseIterable, Identifiable {
     case left, right
@@ -455,6 +472,11 @@ final class Preferences: ObservableObject {
     @Published var alwaysShowsDownloads: Bool {
         didSet { store.set(alwaysShowsDownloads, forKey: "downloads.button") }
     }
+    /// Where Downloads opens, from its button, ⇧⌘J or the menu (see
+    /// Browser.showDownloads). A tab unless asked for.
+    @Published var downloadsOpening: DownloadsOpening {
+        didSet { store.set(downloadsOpening.rawValue, forKey: "downloads.open") }
+    }
     /// The bookmarks bar above the page (see BookmarksBar.swift). Off
     /// unless asked for.
     @Published var bookmarksBar: Bool {
@@ -551,6 +573,15 @@ final class Preferences: ObservableObject {
     @Published var usesSpaces: Bool {
         didSet { store.set(usesSpaces, forKey: "spaces") }
     }
+    /// Profiles in one window (see OneWindow.swift): a space of another
+    /// profile, chosen, brings that profile's window into this one's place.
+    /// Off unless asked for; turned off, the windows tucked away come out.
+    @Published var profilesInOneWindow: Bool {
+        didSet {
+            store.set(profilesInOneWindow, forKey: "profiles.oneWindow")
+            if oldValue, !profilesInOneWindow { Browsers.unmerge() }
+        }
+    }
     /// Named, collapsible sections in the sidebar.
     /// Always on since the Settings rework (Drice, 24 Oct 2026): it only
     /// adds a command, so there is no switch. Still a property, for the
@@ -639,7 +670,8 @@ final class Preferences: ObservableObject {
     @Published var switcherKeys = true
     /// "settings", "new tab" and the like, typed alone in the address field,
     /// reach that part of the app instead of asking a search engine for the
-    /// word (see AddressCommands.swift). Off unless asked for.
+    /// word; part of one is offered (see AddressCommands.swift). Off unless
+    /// asked for.
     @Published var commandBar: Bool {
         didSet { store.set(commandBar, forKey: "commandbar") }
     }
@@ -652,6 +684,11 @@ final class Preferences: ObservableObject {
     }
 
     // MARK: - Settings › Proxy (see Proxy.swift)
+
+    @Published private(set) var savedProxyLibrary = SavedProxyLibrary()
+    private var applyingSavedProxy = false
+    var savedProxies: [SavedProxy] { savedProxyLibrary.entries }
+    var selectedProxyID: UUID? { savedProxyLibrary.selected }
 
     /// Pages go through a proxy of your own rather than the Mac's settings.
     /// Off unless asked for.
@@ -773,7 +810,65 @@ final class Preferences: ObservableObject {
                    matchesTimeZone: proxyMatchesTimeZone)
     }
 
-    private func routeProxy() { Proxy.shared.take(proxySetup) }
+    private func persistSavedProxies() {
+        if let data=try? JSONEncoder().encode(savedProxyLibrary) { store.set(data,forKey:SavedProxyLibrary.key) }
+    }
+
+    /// Field edits update the selected connection. A selection change applies
+    /// all fields before handing one complete route to the networking layer.
+    private func routeProxy() {
+        guard !applyingSavedProxy else { return }
+        if let id=selectedProxyID,let i=savedProxies.firstIndex(where: { $0.id==id }) {
+            let name=savedProxies[i].name
+            savedProxyLibrary.entries[i]=SavedProxy(id:id,name:name,setup:proxySetup,port:proxyPort)
+            persistSavedProxies()
+        }
+        Proxy.shared.take(proxySetup)
+    }
+
+    @discardableResult func saveProxy(_ connection: SavedProxy) -> UUID {
+        if let i=savedProxies.firstIndex(where: { $0.id==connection.id }) { savedProxyLibrary.entries[i]=connection }
+        else { savedProxyLibrary.entries.append(connection) }
+        persistSavedProxies()
+        if selectedProxyID==connection.id { selectProxy(connection.id) }
+        return connection.id
+    }
+
+    func selectProxy(_ id: UUID, connect: Bool = false) {
+        guard let connection=savedProxies.first(where: { $0.id==id }) else { return }
+        applyingSavedProxy=true
+        savedProxyLibrary.selected=id
+        persistSavedProxies()
+        proxyKind=connection.kind; proxyHost=connection.host; proxyPort=connection.port
+        proxySignsIn=connection.signsIn; proxyUser=connection.user
+        if connect { proxyOn=true }
+        applyingSavedProxy=false
+        Proxy.shared.take(proxySetup)
+    }
+
+    func removeProxy(_ id: UUID) {
+        // Removing a saved entry leaves the currently configured route intact.
+        // It becomes Custom until another saved connection is selected.
+        savedProxyLibrary.entries.removeAll { $0.id==id }
+        if selectedProxyID==id { savedProxyLibrary.selected=nil }
+        persistSavedProxies()
+    }
+
+    /// Save the secret before publishing a complete route. A failed vault write
+    /// leaves the existing connection and its privacy settings untouched.
+    func applyProxyLine(_ line: ProxyLine) -> Bool {
+        let filled = line.filling(SavedProxy())
+        if let password = line.password, !ProxyPassword.save(password, for: filled.setup) { return false }
+        let before = proxySetup
+        applyingSavedProxy = true
+        proxyKind = filled.kind; proxyHost = filled.host; proxyPort = filled.port
+        proxySignsIn = filled.signsIn; proxyUser = filled.user
+        applyingSavedProxy = false
+        routeProxy()
+        if line.password != nil, before == proxySetup { Proxy.shared.passwordChanged() }
+        return true
+    }
+
 
     init() {
         navigationLeft = store.bool(forKey: "toolbar.left")
@@ -885,6 +980,7 @@ final class Preferences: ObservableObject {
         // existed; they are not asked to sit through it.
         welcomed = store.bool(forKey: "welcomed") || store.object(forKey: "glyph") != nil
         usesSpaces = store.bool(forKey: "spaces")
+        profilesInOneWindow = store.bool(forKey: "profiles.oneWindow")
         listsPins = store.bool(forKey: "pins.list")
         // "Pins keep their site" is one switch over two keys (see
         // SettingsIndex): on when either was on, on by default when neither
@@ -924,6 +1020,7 @@ final class Preferences: ObservableObject {
         littleLinks = store.bool(forKey: "links.little")
         bookmarksBar = store.bool(forKey: "bookmarks.bar")
         alwaysShowsDownloads = store.bool(forKey: "downloads.button")
+        downloadsOpening = store.string(forKey: "downloads.open").flatMap(DownloadsOpening.init(rawValue:)) ?? .tab
         let links = store.object(forKey: "links.show") as? Bool ?? true
         showsLinks = links
         HoveredLink.on = links
@@ -980,6 +1077,17 @@ final class Preferences: ObservableObject {
         dialerNumeroCA = store.string(forKey: "dialer.numero.ca") ?? ""
         dialerTelicallUK = store.string(forKey: "dialer.telicall.uk") ?? ""
         store.set(dialerSites, forKey: "dialer.sites")
+        let legacy=SavedProxy(name:"Current proxy",setup:proxySetup,port:proxyPort)
+        savedProxyLibrary=SavedProxyLibrary.load(store.data(forKey:SavedProxyLibrary.key),legacy:legacy)
+        if let id=selectedProxyID,let selected=savedProxies.first(where: { $0.id==id }) {
+            // The single document is authoritative, including after a crash
+            // halfway through updating the legacy individual settings keys.
+            applyingSavedProxy=true
+            proxyKind=selected.kind; proxyHost=selected.host; proxyPort=selected.port
+            proxySignsIn=selected.signsIn; proxyUser=selected.user
+            applyingSavedProxy=false
+        }
+        persistSavedProxies()
         // Before the first page is loaded: the shared store takes the route
         // now, and every other store as it is made (see Proxy.apply).
         Proxy.shared.take(proxySetup)

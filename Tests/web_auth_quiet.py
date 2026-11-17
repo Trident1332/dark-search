@@ -71,6 +71,7 @@ class Provider(BaseHTTPRequestHandler):
 (async () => {{
   const r = {{}};
   r.pk = typeof window.PublicKeyCredential;
+  r.platform = await window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
   try {{ await navigator.credentials.get({{publicKey: {{challenge: new Uint8Array(16)}}}}); r.webauthn = 'answered'; }}
   catch (e) {{ r.webauthn = e.name; }}
   const media = navigator.mediaDevices && navigator.mediaDevices.getUserMedia
@@ -189,7 +190,8 @@ def main():
             got = json.loads(parse_qs(urlparse(r["ok"]).query)["r"][0])
         except Exception:
             pass
-        t.ok("quiet: no passkey object for the page", got.get("pk") == "undefined", got)
+        t.ok("quiet: passkey capability probes remain readable but report unavailable",
+             got.get("pk") == "function" and got.get("platform") is False, got)
         t.ok("quiet: a passkey request is refused, not handed to WebKit", got.get("webauthn") == "NotAllowedError", got)
         t.ok("quiet: the microphone is refused (or never asked)", got.get("mic") in ("NotAllowedError", "held", "none"), got)
         t.ok("quiet: no sound plays", got.get("play") in ("NotAllowedError", "held"), got)

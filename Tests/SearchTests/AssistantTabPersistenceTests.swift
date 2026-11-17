@@ -43,6 +43,7 @@ final class AssistantTabPersistenceTests: XCTestCase {
         AIProvider.mock = server.url
         XCTAssertEqual(AIKeys.save("synthetic-held-stream-key", for: .openAI), .kept)
         Store.settings.set(true, forKey: "ai.told.openAI")
+        Store.settings.set(true, forKey: "ai.told.openAI.tools-v1")
         browser = Browser(record: WindowRecord())
         browser.closeAll()
         try await super.setUp()
@@ -53,6 +54,7 @@ final class AssistantTabPersistenceTests: XCTestCase {
         AIKeys.forget(.openAI)
         AIProvider.mock = savedMock
         Store.settings.removeObject(forKey: "ai.told.openAI")
+        Store.settings.removeObject(forKey: "ai.told.openAI.tools-v1")
         if let browser {
             browser.prefs.ai = savedAI
             browser.prefs.aiProvider = savedProvider
@@ -182,49 +184,55 @@ final class AssistantTabPersistenceTests: XCTestCase {
         XCTAssertEqual(two.turns.last?.answer, "Two survives")
     }
 
-    func testBackgroundNavigationCancelsOldContextAndCannotRestoreIt() async throws {
+    func testBackgroundNavigationPreservesAutomaticToolConversationAndReadsFreshPage() async throws {
         let first = try await page("first"), second = try await page("second")
         browser.showRow([first, second], active: first.id)
-        let (_, request) = try await answering(first, quote: "Old page context", prefix: "Old answer")
+        let (assistant, request) = try await answering(first, quote: "Original page context", prefix: "Original answer")
+        XCTAssertTrue(assistant.tools.enabled)
         browser.select(second, floatPrevious: false)
         let destination = server.url.appendingPathComponent("changed")
         first.go(to: destination)
         try await until { !first.web.isLoading && first.pageAddress == destination }
-        try await until { server.closed(request) }
+        XCTAssertFalse(server.closed(request), "Automatic browser tools keep this conversation bound to its original tab")
         browser.select(first, floatPrevious: false)
-        XCTAssertNil(browser.assisting, "A different document must not restore the previous page's conversation")
-        XCTAssertFalse(browser.sidePanelShown)
-        browser.askAboutPage(from: first, selection: "New page context")
-        let next = try XCTUnwrap(browser.assisting)
-        try await until { !next.reading }
-        XCTAssertEqual(next.context?.text, "New page context")
-        XCTAssertTrue(next.turns.isEmpty)
-        XCTAssertEqual(server.requestCount, 1, "Reopening only reads local context")
+        XCTAssertTrue(browser.assisting === assistant)
+        let catalog = await assistant.tools.catalog()
+        let snapshot = await assistant.tools.call("browser_snapshot", arguments: [:], generation: catalog.generation)
+        XCTAssertTrue(snapshot.contains("Local fixture"))
+        XCTAssertTrue(snapshot.contains("changed"))
+        XCTAssertEqual(server.requestCount, 1, "Navigation and local tools must not submit another model request")
+        server.emit(" continues", to: request)
+        server.finish(request)
+        try await until { assistant.turns.last?.done == true }
+        XCTAssertEqual(assistant.turns.last?.answer, "Original answer continues")
     }
 
-    func testWebsiteTriggeredSameURLReloadClearsBackgroundConversation() async throws {
+    func testWebsiteTriggeredSameURLReloadPreservesConversationWithFreshDocument() async throws {
         let first = try await page("reload-source", fromServer: true), second = try await page("second")
         browser.showRow([first, second], active: first.id)
         let address = try XCTUnwrap(first.pageAddress)
         _ = try await first.web.evaluateJavaScript("window.__assistantReloadFixture = 'original-document'; true")
-        let (_, request) = try await answering(first, quote: "Original document context", prefix: "Original answer")
+        let (assistant, request) = try await answering(first, quote: "Original document context", prefix: "Original answer")
         browser.select(second, floatPrevious: false)
-        XCTAssertFalse(server.closed(request), "Parking the tab must keep its stream alive until document replacement")
+        XCTAssertFalse(server.closed(request))
 
-        // Bypass Tab.reload and its explicit-navigation callback, as a
-        // website calling location.reload() does. Commit must retire the
-        // old context even though its URL has not changed at all.
+        // A website-triggered reload keeps the conversation, but its browser
+        // references and observable page state belong to the new document.
         XCTAssertNotNil(first.web.reload())
         try await until {
             guard !first.web.isLoading, first.pageAddress == address else { return false }
             return (try? await first.web.evaluateJavaScript("typeof window.__assistantReloadFixture === 'undefined' && document.title === 'Local fixture'") as? Bool) == true
         }
-        try await until { server.closed(request) }
-        XCTAssertEqual(first.pageAddress, address)
+        XCTAssertFalse(server.closed(request))
         browser.select(first, floatPrevious: false)
-        XCTAssertNil(browser.assisting)
-        XCTAssertFalse(browser.sidePanelShown)
-        XCTAssertEqual(server.requestCount, 1, "Reload must not resubmit the discarded conversation")
+        XCTAssertTrue(browser.assisting === assistant)
+        let catalog = await assistant.tools.catalog()
+        let snapshot = await assistant.tools.call("browser_snapshot", arguments: [:], generation: catalog.generation)
+        XCTAssertTrue(snapshot.contains("Local fixture"))
+        XCTAssertEqual(server.requestCount, 1, "Reload must not resubmit the conversation")
+        server.finish(request)
+        try await until { assistant.turns.last?.done == true }
+        XCTAssertEqual(assistant.turns.last?.answer, "Original answer")
     }
 
     func testClosingTheWindowCancelsEveryBackgroundStreamAndReleasesItsCache() async throws {
@@ -277,6 +285,33 @@ final class AssistantTabPersistenceTests: XCTestCase {
         try await until { assistant.turns.last?.done == true }
         XCTAssertEqual(assistant.turns.last?.answer, "Protected answer")
         XCTAssertEqual(server.requestCount, 1)
+    }
+
+    func testPrivateTabCannotReuseCloudHistoryOrReceiveItsPublicConversation() async throws {
+        let first = try await page("public-source")
+        let privateSource = Tab(shy: true)
+        privateSource.setAddressOptimistically(server.url.appendingPathComponent("private-source"))
+        browser.prepare(privateSource)
+        privateSource.web.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        privateSource.web.loadHTMLString("<!doctype html><title>Private fixture</title><p>private-fixture-never-sent</p>", baseURL: privateSource.pageAddress)
+        try await until { !privateSource.web.isLoading }
+        browser.showRow([first, privateSource], active: first.id)
+        let (assistant, request) = try await answering(first, quote: "Public source context", prefix: "Public answer")
+        browser.select(privateSource, floatPrevious: false)
+        XCTAssertNil(browser.assisting)
+        browser.askAboutPage(from: privateSource, selection: "private-fixture-never-sent")
+        XCTAssertNil(browser.assisting, "A cloud provider cannot open the private tab or inherit its source")
+        XCTAssertEqual(server.requestCount, 1)
+        let catalog = await assistant.tools.catalog()
+        let snapshot = await assistant.tools.call("browser_snapshot", arguments: [:], generation: catalog.generation)
+        XCTAssertTrue(snapshot.contains("public-source"))
+        XCTAssertFalse(snapshot.contains("private-fixture-never-sent"))
+        server.finish(request)
+        try await until { assistant.turns.last?.done == true }
+        XCTAssertEqual(server.requestCount, 1)
+        browser.select(first, floatPrevious: false)
+        XCTAssertTrue(browser.assisting === assistant)
+        XCTAssertEqual(assistant.context?.text, "Public source context")
     }
 
     private func page(_ name: String, fromServer: Bool = false) async throws -> Tab {

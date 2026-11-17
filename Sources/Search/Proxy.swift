@@ -23,7 +23,7 @@ import WebKit
 /// What kind of proxy it is. SOCKS5 carries every connection as it is; HTTP
 /// and HTTPS tunnel each connection through a CONNECT request, the second
 /// over TLS to the proxy itself.
-enum ProxyKind: String, CaseIterable, Identifiable {
+enum ProxyKind: String, Codable, CaseIterable, Identifiable {
     case http, https, socks5
 
     var id: String { rawValue }
@@ -594,10 +594,11 @@ final class Proxy: ObservableObject {
             check = .testing
             let id = UUID()
             let selected = setup
+            let startedInVault = ConnectionPasswords.usesVault
             let expectedRevision = revision
             let unlocking = Task { [weak self] in
                 let password = await Task.detached(priority: .userInitiated) {
-                    ProxyPassword.read(selected, allowCredentialPrompt: true)
+                    ProxyPassword.read(selected, allowCredentialPrompt: !startedInVault)
                 }.value
                 guard !Task.isCancelled, let self, self.credentialUnlock?.id == id,
                       self.revision == expectedRevision, self.setup == selected else { return }
@@ -1138,10 +1139,27 @@ enum ProxyPassword {
         return [setup, alternate]
     }
 
+    static func vaultIdentity(_ setup: ProxySetup) -> String {
+        ConnectionPasswords.identity(kind: "proxy", components: [label, setup.trimmedHost.lowercased(),
+            String(setup.portOrUsual), setup.kind.rawValue, setup.user])
+    }
+
     /// Background/startup reads never present Keychain UI. Only an explicit
     /// Poke may ask, once per identity for this launch, including a refusal.
     static func read(_ setup: ProxySetup, allowCredentialPrompt: Bool = false) -> String? {
         guard !setup.user.isEmpty, setup.complete else { return nil }
+        if ConnectionPasswords.usesVault {
+            for candidate in candidates(setup) {
+                do {
+                    if case .value(let password) = try ConnectionPasswords.read(vaultIdentity(candidate)) { return password }
+                } catch { return nil }
+            }
+            return nil
+        }
+        return readLegacy(setup, allowCredentialPrompt: allowCredentialPrompt)
+    }
+
+    private static func readLegacy(_ setup: ProxySetup, allowCredentialPrompt: Bool = false) -> String? {
         let scope: Scope = allowCredentialPrompt ? .interactive : .quiet
         for candidate in candidates(setup) {
             switch lookup(candidate, scope: scope) {
@@ -1214,6 +1232,7 @@ enum ProxyPassword {
     /// for an in-flight credential approval to finish.
     static func kept(_ setup: ProxySetup) -> Bool {
         guard !setup.user.isEmpty, setup.complete else { return false }
+        if ConnectionPasswords.usesVault { return read(setup) != nil }
         for candidate in candidates(setup) {
             switch lookup(candidate, scope: .presence) {
             case .present, .password: return true
@@ -1225,7 +1244,15 @@ enum ProxyPassword {
     }
 
     static func failureMessage(_ setup: ProxySetup) -> String {
-        locked {
+        if ConnectionPasswords.usesVault {
+            do {
+                for candidate in candidates(setup) { _ = try ConnectionPasswords.read(vaultIdentity(candidate)) }
+                return "Enter the proxy password or import it once from Keychain"
+            } catch {
+                return "The encrypted connection passwords couldn't be opened. Unlock your Mac and try again"
+            }
+        }
+        return locked {
             for candidate in candidates(setup) {
                 let item = key(candidate)
                 let interactive = answers[Lookup(identity: item, scope: .interactive)]
@@ -1246,6 +1273,39 @@ enum ProxyPassword {
             }
             return ProxyAuthentication.missing
         }
+    }
+
+    /// Only Settings' explicit import action may open the old Keychain item.
+    /// A forgotten vault record is a durable refusal to restore that old copy.
+    static func legacyImportAvailable(_ setup: ProxySetup) -> Bool {
+        guard ConnectionPasswords.usesVault, !setup.user.isEmpty, setup.complete else { return false }
+        for candidate in candidates(setup) {
+            guard (try? ConnectionPasswords.read(vaultIdentity(candidate))) == .missing else { continue }
+            switch lookup(candidate, scope: .presence) {
+            case .present, .password: return true
+            default: continue
+            }
+        }
+        return false
+    }
+
+    @discardableResult
+    static func importLegacy(_ setup: ProxySetup) -> Bool {
+        guard ConnectionPasswords.usesVault, !setup.user.isEmpty, setup.complete else { return false }
+        var imported = false
+        for candidate in candidates(setup) {
+            var refused = false
+            let saved = ConnectionPasswords.importLegacy(vaultIdentity(candidate)) {
+                switch lookup(candidate, scope: .interactive) {
+                case .password(let password): return password
+                case .missing: return nil
+                default: refused = true; return nil
+                }
+            }
+            imported = imported || saved
+            if refused { break }
+        }
+        return imported
     }
 
     private static func beginMutation(_ setup: ProxySetup) -> Mutation {
@@ -1285,8 +1345,11 @@ enum ProxyPassword {
         mutationLock.lock()
         defer { mutationLock.unlock() }
         let mutation = beginMutation(setup)
+        let vaultMode = ConnectionPasswords.usesVault
         let saved: Bool
-        if Store.testing {
+        if vaultMode {
+            saved = ConnectionPasswords.save(password, for: vaultIdentity(setup))
+        } else if Store.testing {
             locked { rehearsal[key(setup)] = password }
             saved = true
         } else {
@@ -1299,7 +1362,7 @@ enum ProxyPassword {
                 saved = KeychainAccess.add(fresh as CFDictionary, nil) == errSecSuccess
             } else { saved = false }
         }
-        let published = endMutation(mutation, password: saved ? (key(setup), password) : nil)
+        let published = endMutation(mutation, password: saved && !vaultMode ? (key(setup), password) : nil)
         return saved && published
     }
 
@@ -1308,13 +1371,18 @@ enum ProxyPassword {
         mutationLock.lock()
         defer { mutationLock.unlock() }
         let mutation = beginMutation(setup)
+        let vaultMode = ConnectionPasswords.usesVault
         var forgotten = true
         for candidate in candidates(setup) {
+            if vaultMode {
+                if !ConnectionPasswords.forget(vaultIdentity(candidate)) { forgotten = false }
+                continue
+            }
             if Store.testing { locked { rehearsal[key(candidate)] = nil }; continue }
             let status = KeychainAccess.delete(identity(candidate) as CFDictionary)
             if status != errSecSuccess && status != errSecItemNotFound { forgotten = false; break }
         }
-        let published = endMutation(mutation, forgotten: forgotten)
+        let published = endMutation(mutation, forgotten: forgotten && !vaultMode)
         return forgotten && published
     }
 }

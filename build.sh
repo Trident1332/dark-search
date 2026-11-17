@@ -121,6 +121,14 @@ BINARY="$(swift build "${SWIFTFLAGS[@]}" --show-bin-path)/Search"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/$EXECUTABLE"
+# Ask AI's native-analysis launcher is separate code, signed below before the
+# app. It spawns only an inherited-sandbox Hopper child and addresses that PID.
+mkdir -p "$APP/Contents/Helpers"
+xcrun swiftc -Osize -target "$ARCH-apple-macosx$MINIMUM" \
+  Integrations/AskAI/HopperOfflineLauncher.swift \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+  -Xlinker "$PWD/Integrations/AskAI/HopperHelperInfo.plist" \
+  -o "$APP/Contents/Helpers/search-hopper-offline-launcher"
 # The binary says which SDK it was built with, and AppKit draws the app the
 # way that SDK's macOS drew it: built with the macOS 27 SDK, a Mac on 27 gets
 # 27's window buttons and controls; said to be built with an older one, it
@@ -210,9 +218,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   $ICONNAME
   <key>LSMinimumSystemVersion</key><string>$MINIMUM</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
-  <key>NSHumanReadableCopyright</key><string>© Caroline</string>
+  <key>NSHumanReadableCopyright</key><string>© Carter Doesn't Sleep</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppleScriptEnabled</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>Ask AI uses your existing Hopper installation to analyze only the file you select. Analysis runs locally with network access blocked.</string>
   <key>OSAScriptingDefinition</key><string>Search.sdef</string>
   <!-- Owning http and https is what sends a link clicked in Mail here.
        Appearing in Desktop & Dock → Default web browser also needs the
@@ -326,6 +335,10 @@ python3 scripts/bundle-tor.py --arch "$ARCH" \
   --output "$APP/Contents/Resources/Tor" --identity "${IDENTITY:--}"
 if [ -n "$IDENTITY" ]; then
   codesign --force --timestamp --options runtime \
+    --identifier com.officecommun.search.hopper-helper \
+    --entitlements Integrations/AskAI/HopperHelper.entitlements \
+    --sign "$IDENTITY" "$APP/Contents/Helpers/search-hopper-offline-launcher"
+  codesign --force --timestamp --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$IDENTITY" "$APP"
   echo "signed as: $IDENTITY"
@@ -333,7 +346,10 @@ else
   # A build that cannot sign at all is not a build: `|| true` here let one
   # through as though it had finished, leaving a bundle that would not open.
   # set -e stops it now, with codesign's own words above.
-  codesign --force --sign - "$APP"
+  codesign --force --options runtime --identifier com.officecommun.search.hopper-helper \
+    --entitlements Integrations/AskAI/HopperHelper.entitlements \
+    --sign - "$APP/Contents/Helpers/search-hopper-offline-launcher"
+  codesign --force --entitlements "$ENTITLEMENTS" --sign - "$APP"
   [ "$STEP" != "app" ] && echo "no Developer ID certificate found — the DMG will only open on this Mac" >&2
 fi
 

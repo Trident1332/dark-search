@@ -160,6 +160,35 @@ class NumeroDialplanTests(unittest.TestCase):
             with self.assertRaises(GENERATOR.ConfigurationError):
                 GENERATOR.verify_gateway(xml, "numero")
 
+    def test_explicit_per_account_mode_only_runs_authorized_selector(self):
+        config = {**CONFIG, "line_gateways": {"us": "numero", "ca": "numero_ca"}}
+        xml = GENERATOR.generate(config)
+        for line in ("us", "ca"):
+            self.assertEqual(routed(xml, f"numero-{line}-12025550125")[1],
+                [("lua", f"numero_select.lua {line} 12025550125"), ("hangup", "NORMAL_CLEARING")])
+            self.assertEqual(routed(xml, f"numero-{line}-12025550125", seat="1002")[1],
+                [("hangup", "CALL_REJECTED")])
+        self.assertNotIn('application="bridge"', xml)
+        self.assertNotIn(CONFIG["lines"]["us"], xml)
+
+    def test_explicit_missing_ca_mapping_cannot_fall_back_to_us_gateway(self):
+        xml = GENERATOR.generate({**CONFIG, "line_gateways": {"us": "numero"}})
+        self.assertEqual(routed(xml, "numero-ca-12025550125")[1],
+            [("hangup", "NORMAL_TEMPORARY_FAILURE"), ("hangup", "NORMAL_CLEARING")])
+        self.assertEqual(routed(xml, "numero-us-12025550125")[1][0], ("lua", "numero_select.lua us 12025550125"))
+
+    def test_explicit_gateway_mapping_rejects_fallback_or_injected_values(self):
+        for mapping in ({"us": "numero", "ca": "numero"}, {"us": "numero_ca"}, {"ca": "numero_ca/evil"}, {"gb": "numero"}, None):
+            with self.assertRaises(GENERATOR.ConfigurationError):
+                GENERATOR.generate({**CONFIG, "line_gateways": mapping})
+
+    def test_selector_identity_uses_account_uri_instead_of_legacy_did_uri(self):
+        good = '<include><gateway name="numero_ca"><param name="caller-id-in-from" value="false"/></gateway></include>'
+        self.assertIsNone(GENERATOR.verify_gateway(good, "numero_ca", selector=True))
+        self.assertIsNone(GENERATOR.verify_gateway(good.replace('value="false"', 'value="true"'), "numero_ca", selector=True))
+        with self.assertRaises(GENERATOR.ConfigurationError):
+            GENERATOR.verify_gateway(good.replace('value="false"', 'value="unset"'), "numero_ca", selector=True)
+
     def test_json_duplicates_are_rejected_without_exposing_input(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "config.json"

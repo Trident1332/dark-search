@@ -21,6 +21,7 @@ final class AskAIAddressTests: XCTestCase {
         _ = AIKeys.save("synthetic-image-lookup-key", for: .openAI)
         defer { AIKeys.forget(.openAI) }
         Store.settings.removeObject(forKey: "ai.told.openAI")
+        Store.settings.removeObject(forKey: "ai.told.openAI.tools-v1")
         browser.typed = "Explain how a camera works"
         browser.askFromAddress()
         let assistant = try XCTUnwrap(browser.assisting)

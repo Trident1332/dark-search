@@ -37,6 +37,7 @@ final class AskAIDesignTests: XCTestCase {
         browser.prefs.setAIModel("synthetic-model", for: .openAI)
         _ = AIKeys.save("synthetic-design-test-key", for: .openAI)
         Store.settings.removeObject(forKey: "ai.told.openAI")
+        Store.settings.removeObject(forKey: "ai.told.openAI.tools-v1")
 
         source = Tab(configuration: Web.configuration(space: browser.spaceID))
         source.setAddressOptimistically(URL(string: "https://design-fixture.invalid/article")!)

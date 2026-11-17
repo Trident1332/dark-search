@@ -2,5 +2,5 @@
 /// stable so existing profiles, passwords and updates keep working.
 enum Brand {
     static let name = "Dark Search"
-    static let author = "Caroline"
+    static let author = "Carter Doesn't Sleep"
 }

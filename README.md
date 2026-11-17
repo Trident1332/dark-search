@@ -1,12 +1,12 @@
 # Dark Search
 
-A small, fast, quiet web browser for the Mac, by Caroline.
+A small, fast, quiet web browser for the Mac, by Carter Doesn't Sleep.
 
 ![Dark Search, with its tabs down the left and a page taking the rest of the window](.github/screenshot.png)
 
 **[Download Dark Search for macOS →](https://github.com/Trident1332/dark-search/releases/latest/download/Dark%20Search.dmg)** · macOS 14 or later · free
 
-Dark Search 1.1.0 is maintained by Caroline, based on the open-source Search browser by [Office Commun](https://officecommun.com).
+Dark Search 1.1.0 is maintained by Carter Doesn't Sleep, based on the open-source Search browser by [Office Commun](https://officecommun.com).
 
 ---
 
@@ -16,7 +16,7 @@ Dark Search is a browser with nothing in the way. A row of tabs — across the t
 
 It uses **WebKit**, the engine already inside every Mac (it is what Safari runs on). That is why the whole app is about 8 MB on disk and opens instantly: there is no second copy of Chromium to download, update and keep in memory.
 
-Caroline maintains this fork with its own identity and releases. The original browser was built by Office Commun; its upstream license and attribution remain included.
+Carter Doesn't Sleep maintains this fork with its own identity and releases. The original browser was built by Office Commun; its upstream license and attribution remain included.
 
 ## What it does
 
@@ -139,4 +139,4 @@ Issues and pull requests are genuinely welcome — see [CONTRIBUTING.md](CONTRIB
 
 ### License
 
-MIT — see [LICENSE](LICENSE). Dark Search is maintained by Caroline. The original Search code and upstream attribution remain credited to Office Commun; the original Search name and icon are not used for this fork's identity.
+MIT — see [LICENSE](LICENSE). Dark Search is maintained by Carter Doesn't Sleep. The original Search code and upstream attribution remain credited to Office Commun; the original Search name and icon are not used for this fork's identity.

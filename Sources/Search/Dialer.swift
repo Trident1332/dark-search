@@ -417,15 +417,38 @@ final class Dialer: ObservableObject {
 /// rehearsal does.
 enum DialerPassword {
     private static let service = Store.world.map { "Search Dialer (\($0))" } ?? "Search Dialer"
+    private static let lock = NSLock()
+    private static let mutationLock = NSLock()
+    private enum Scope: Hashable { case quiet, interactive }
+    private struct Lookup: Hashable { let account: String; let scope: Scope }
+    private enum Answer { case password(String), missing, unavailable }
+    private struct Ticket { let id: UUID; let epoch: Int; let backend: Int }
+    private struct Mutation { let account: String; let id: UUID; let backend: Int }
+
     nonisolated(unsafe) private static var rehearsal: [String: String] = [:]
-    /// What the keychain answered this launch, per seat: the password, or
-    /// nil for a refusal. Asked once. The keychain puts its question — its
-    /// sheet for the login password — for every build it doesn't know, and
-    /// a local signing certificate can produce a new partition hash after
-    /// each build. Asked on every read, it came with every reconnect, and a Deny only
-    /// had the page ask again, thousands of times (feedback, 29 Oct 2026).
-    /// Saving or forgetting the password starts afresh.
-    nonisolated(unsafe) private static var answered: [String: String?] = [:]
+    nonisolated(unsafe) private static var passwords: [String: String] = [:]
+    nonisolated(unsafe) private static var answers: [Lookup: Answer] = [:]
+    nonisolated(unsafe) private static var pending: [String: Ticket] = [:]
+    nonisolated(unsafe) private static var epochs: [String: Int] = [:]
+    nonisolated(unsafe) private static var mutating: [String: UUID] = [:]
+    nonisolated(unsafe) private static var backendRevision = 0
+    nonisolated(unsafe) private static var testingQuery: (([String: Any]) -> (OSStatus, Data?))?
+
+    /// Query-level tests exercise UI policy without accessing a real item.
+    static func useKeychainForTesting(_ query: (([String: Any]) -> (OSStatus, Data?))?) {
+        guard Store.testing else { return }
+        locked {
+            testingQuery = query
+            backendRevision += 1
+            passwords.removeAll(); answers.removeAll(); pending.removeAll(); mutating.removeAll()
+        }
+    }
+
+    private static func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
 
     private static func account(_ setup: DialerSetup) -> String { "\(setup.trimmedUser)@\(setup.trimmedDomain)" }
 
@@ -435,68 +458,196 @@ enum DialerPassword {
          kSecAttrAccount as String: account(setup)]
     }
 
-    static func read(_ setup: DialerSetup) -> String? {
+    static func vaultIdentity(_ setup: DialerSetup) -> String {
+        ConnectionPasswords.identity(kind: "dialer", components: [service, setup.trimmedUser, setup.trimmedDomain.lowercased()])
+    }
+
+    /// Startup, page configuration, and reconnects never ask for Keychain UI.
+    /// A future explicit import may ask once; a quiet miss cannot suppress it.
+    static func read(_ setup: DialerSetup, allowCredentialPrompt: Bool = false) -> String? {
         guard !setup.trimmedUser.isEmpty else { return nil }
-        if Store.testing { return rehearsal[account(setup)] }
-        if let known = answered[account(setup)] { return known }
+        if ConnectionPasswords.usesVault {
+            guard let entry = try? ConnectionPasswords.read(vaultIdentity(setup)), case .value(let password) = entry else { return nil }
+            return password
+        }
+        return readLegacy(setup, allowCredentialPrompt: allowCredentialPrompt)
+    }
+
+    private static func readLegacy(_ setup: DialerSetup, allowCredentialPrompt: Bool = false) -> String? {
+        let account = account(setup)
+        let scope: Scope = allowCredentialPrompt ? .interactive : .quiet
+        let lookup = Lookup(account: account, scope: scope)
+        var ticket: Ticket?
+        var backend: (([String: Any]) -> (OSStatus, Data?))?
+        let cached: Answer? = locked {
+            if mutating[account] != nil { return .unavailable }
+            if let password = passwords[account] { return .password(password) }
+            if let answer = answers[lookup] { return answer }
+            if pending[account] != nil { return .unavailable }
+            let made = Ticket(id: UUID(), epoch: epochs[account] ?? 0, backend: backendRevision)
+            pending[account] = made
+            ticket = made
+            backend = testingQuery
+            return nil
+        }
+        if let cached {
+            if case .password(let password) = cached { return password }
+            return nil
+        }
+        guard let ticket else { return nil }
         var asked = identity(setup)
         asked[kSecReturnData as String] = true
         asked[kSecMatchLimit as String] = kSecMatchLimitOne
-        var out: CFTypeRef?
-        let status = KeychainAccess.copyMatching(asked as CFDictionary, &out)
-        guard status == errSecSuccess,
-              let data = out as? Data, let password = String(data: data, encoding: .utf8), !password.isEmpty
-        else {
-            // A no from the person at the keychain's sheet is the answer
-            // for this launch. Nothing kept, or a keychain that couldn't be
-            // asked just now, is asked again next time.
-            if status == errSecAuthFailed || status == errSecUserCanceled { answered[account(setup)] = .some(nil) }
+        asked[kSecUseAuthenticationUI as String] = allowCredentialPrompt ? kSecUseAuthenticationUIAllow : kSecUseAuthenticationUIFail
+        let result: (OSStatus, Data?)
+        if Store.testing, let backend { result = backend(asked) }
+        else if Store.testing {
+            result = locked { () -> (OSStatus, Data?) in
+                if let password = rehearsal[account] { return (errSecSuccess, Data(password.utf8)) }
+                return (errSecItemNotFound, nil)
+            }
+        } else {
+            var out: CFTypeRef?
+            let status = KeychainAccess.copyMatching(asked as CFDictionary, &out)
+            result = (status, out as? Data)
+        }
+        let answer: Answer
+        if result.0 == errSecItemNotFound { answer = .missing }
+        else if result.0 == errSecSuccess, let data = result.1,
+           let password = String(data: data, encoding: .utf8), !password.isEmpty { answer = .password(password) }
+        else { answer = .unavailable }
+        return locked {
+            if pending[account]?.id == ticket.id { pending.removeValue(forKey: account) }
+            guard (epochs[account] ?? 0) == ticket.epoch, backendRevision == ticket.backend,
+                  mutating[account] == nil else { return nil }
+            answers[lookup] = answer
+            if scope == .interactive { answers[Lookup(account: account, scope: .quiet)] = answer }
+            if case .password(let password) = answer {
+                passwords[account] = password
+                return password
+            }
             return nil
         }
-        answered[account(setup)] = password
-        return password
     }
 
     static func kept(_ setup: DialerSetup) -> Bool {
         guard !setup.trimmedUser.isEmpty else { return false }
-        if Store.testing { return rehearsal[account(setup)] != nil }
+        if ConnectionPasswords.usesVault { return read(setup) != nil }
+        return keptLegacy(setup)
+    }
+
+    private static func keptLegacy(_ setup: DialerSetup) -> Bool {
+        let account = account(setup)
+        let known: Bool? = locked {
+            if mutating[account] != nil || pending[account] != nil { return false }
+            if passwords[account] != nil { return true }
+            if case .missing? = answers[Lookup(account: account, scope: .quiet)] { return false }
+            if Store.testing, testingQuery == nil { return rehearsal[account] != nil }
+            return nil
+        }
+        if let known { return known }
         // Settings redraws frequently, including while another page is open.
         // Checking presence must never read the protected value or show a dialog.
         var query = identity(setup)
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        if Store.testing {
+            if let backend = locked({ testingQuery }) { return backend(query).0 == errSecSuccess }
+            return locked { rehearsal[account] != nil }
+        }
         return KeychainAccess.copyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
+
+    static func legacyImportAvailable(_ setup: DialerSetup) -> Bool {
+        guard ConnectionPasswords.usesVault, !setup.trimmedUser.isEmpty,
+              (try? ConnectionPasswords.read(vaultIdentity(setup))) == .missing else { return false }
+        return keptLegacy(setup)
+    }
+
+    @discardableResult
+    static func importLegacy(_ setup: DialerSetup) -> Bool {
+        guard ConnectionPasswords.usesVault, !setup.trimmedUser.isEmpty else { return false }
+        return ConnectionPasswords.importLegacy(vaultIdentity(setup)) { readLegacy(setup, allowCredentialPrompt: true) }
+    }
+
+    private static func beginMutation(_ account: String) -> Mutation {
+        locked {
+            let mutation = Mutation(account: account, id: UUID(), backend: backendRevision)
+            epochs[account, default: 0] += 1
+            passwords.removeValue(forKey: account)
+            answers = answers.filter { $0.key.account != account }
+            mutating[account] = mutation.id
+            return mutation
+        }
+    }
+
+    private static func endMutation(_ mutation: Mutation, password: String? = nil, forgotten: Bool = false) -> Bool {
+        locked {
+            let account = mutation.account
+            guard mutating[account] == mutation.id, backendRevision == mutation.backend else { return false }
+            epochs[account, default: 0] += 1
+            mutating.removeValue(forKey: account)
+            passwords.removeValue(forKey: account)
+            answers = answers.filter { $0.key.account != account }
+            if let password { passwords[account] = password }
+            if forgotten {
+                for scope in [Scope.quiet, .interactive] { answers[Lookup(account: account, scope: scope)] = .missing }
+            }
+            return true
+        }
     }
 
     @discardableResult
     static func save(_ password: String, for setup: DialerSetup) -> Bool {
         guard !setup.trimmedUser.isEmpty, !password.isEmpty else { return false }
-        if Store.testing { rehearsal[account(setup)] = password; return true }
-        answered.removeValue(forKey: account(setup))
-        let data = Data(password.utf8)
-        let query = identity(setup)
-        let update: [String: Any] = [kSecValueData as String: data]
-        let status = KeychainAccess.update(query as CFDictionary, update as CFDictionary)
-        if status == errSecSuccess {
-            answered[account(setup)] = password
-            return true
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        let account = account(setup)
+        let mutation = beginMutation(account)
+        let vaultMode = ConnectionPasswords.usesVault
+        let saved: Bool
+        if vaultMode {
+            saved = ConnectionPasswords.save(password, for: vaultIdentity(setup))
+        } else if Store.testing {
+            locked { rehearsal[account] = password }
+            saved = true
+        } else {
+            let data = Data(password.utf8)
+            let query = identity(setup)
+            let update: [String: Any] = [kSecValueData as String: data]
+            let status = KeychainAccess.update(query as CFDictionary, update as CFDictionary)
+            if status == errSecSuccess { saved = true }
+            else if status == errSecItemNotFound {
+                var add = query
+                add[kSecValueData as String] = data
+                add[kSecAttrLabel as String] = service
+                add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+                saved = KeychainAccess.add(add as CFDictionary, nil) == errSecSuccess
+            } else { saved = false }
         }
-        guard status == errSecItemNotFound else { return false }
-        var add = query
-        add[kSecValueData as String] = data
-        add[kSecAttrLabel as String] = service
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard KeychainAccess.add(add as CFDictionary, nil) == errSecSuccess else { return false }
-        answered[account(setup)] = password
-        return true
+        let published = endMutation(mutation, password: saved && !vaultMode ? password : nil)
+        return saved && published
     }
 
     @discardableResult
     static func forget(_ setup: DialerSetup) -> Bool {
-        answered.removeValue(forKey: account(setup))
-        if Store.testing { rehearsal[account(setup)] = nil; return true }
-        let status = KeychainAccess.delete(identity(setup) as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        let account = account(setup)
+        let mutation = beginMutation(account)
+        let vaultMode = ConnectionPasswords.usesVault
+        let forgotten: Bool
+        if vaultMode {
+            forgotten = ConnectionPasswords.forget(vaultIdentity(setup))
+        } else if Store.testing {
+            locked { rehearsal[account] = nil }
+            forgotten = true
+        } else {
+            let status = KeychainAccess.delete(identity(setup) as CFDictionary)
+            forgotten = status == errSecSuccess || status == errSecItemNotFound
+        }
+        let published = endMutation(mutation, forgotten: forgotten && !vaultMode)
+        return forgotten && published
     }
 }
 
@@ -1301,6 +1452,9 @@ struct DialerSeatFields: View {
     @ObservedObject var prefs: Preferences
     @State private var password = ""
     @State private var kept = false
+    @State private var canImport = false
+    @State private var importing = false
+    @State private var message: String?
     @FocusState private var typing: Bool
 
     var body: some View {
@@ -1310,37 +1464,79 @@ struct DialerSeatFields: View {
                     .autocorrectionDisabled()
             }
             DialerField(label: "Password") {
-                SecureField(kept ? "••••••••  kept in your keychain" : "", text: $password)
+                SecureField(kept ? ConnectionPasswords.passwordPlaceholder : "", text: $password)
                     .focused($typing)
                     .onSubmit(save)
                 if kept, password.isEmpty {
                     Quick("Forget", tint: Palette.muted) { forget() }
-                        .help("Take the password out of your keychain")
+                        .help("Remove this saved password")
                         .transition(.opacity)
                 }
+            }
+            if canImport {
+                HStack {
+                    Quick(importing ? "Importing…" : "Import saved password", tint: Palette.muted) { importSaved() }
+                        .disabled(importing)
+                        .help("Move the old password to encrypted storage on this Mac. macOS may ask once for access to its old Keychain copy.")
+                    Spacer()
+                }
+            }
+            if let message {
+                Text(message).font(.system(size: 11)).foregroundStyle(Palette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(.leading, SettingsPanel.textInset)
         .padding(.trailing, 14)
         .padding(.bottom, 11)
-        .onAppear { kept = DialerPassword.kept(prefs.dialerSetup) }
-        .onChange(of: prefs.dialerUser) { _, _ in kept = DialerPassword.kept(prefs.dialerSetup) }
-        .onChange(of: prefs.dialerDomain) { _, _ in kept = DialerPassword.kept(prefs.dialerSetup) }
+        .onAppear(perform: refresh)
+        .onChange(of: prefs.dialerUser) { _, _ in refresh() }
+        .onChange(of: prefs.dialerDomain) { _, _ in refresh() }
         .onChange(of: typing) { _, now in if !now { save() } }
         .animation(Motion.quick, value: kept)
     }
 
     private func save() {
-        guard !password.isEmpty, DialerPassword.save(password, for: prefs.dialerSetup) else { return }
+        guard !password.isEmpty else { return }
+        guard DialerPassword.save(password, for: prefs.dialerSetup) else {
+            message = "The password couldn't be saved. Unlock your Mac and try again"
+            return
+        }
         password = ""
-        kept = true
+        message = nil
+        refresh()
         Dialer.shared.passwordChanged()
     }
 
     private func forget() {
-        guard DialerPassword.forget(prefs.dialerSetup) else { return }
-        kept = false
+        guard DialerPassword.forget(prefs.dialerSetup) else {
+            message = "The saved password couldn't be removed"
+            return
+        }
+        message = nil
+        refresh()
         Dialer.shared.passwordChanged()
+    }
+
+    private func refresh() {
+        kept = DialerPassword.kept(prefs.dialerSetup)
+        canImport = DialerPassword.legacyImportAvailable(prefs.dialerSetup)
+    }
+
+    private func importSaved() {
+        guard !importing else { return }
+        let setup = prefs.dialerSetup
+        importing = true
+        message = nil
+        NSApp.activate()
+        Task { @MainActor in
+            let imported = await Task.detached(priority: .userInitiated) { DialerPassword.importLegacy(setup) }.value
+            importing = false
+            guard prefs.dialerSetup == setup else { refresh(); return }
+            refresh()
+            if imported { Dialer.shared.passwordChanged() }
+            else if !kept { message = "Import wasn't completed. Enter the password to save it here instead" }
+        }
     }
 }
 

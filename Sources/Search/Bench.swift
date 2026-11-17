@@ -478,6 +478,21 @@ final class Bench {
             }
             unsafeBitCast(imp, to: Ask.self)(tab.web, ask, reply)
 
+        case "kept":
+            // A sleeping tab's picture, as kept for its waking, written to a
+            // file: its size in pixels, what NSImage makes of it, and the
+            // page's own size. Only on a SEARCH_PROBE run.
+            guard Store.testing else { answer(["error": "kept only works on a --test run"]); return }
+            guard let tab = find(request, in: browser) else { answer(missing(request)); return }
+            var out: [String: Any] = ["asleep": tab.asleep, "page": tab.built.map { NSStringFromSize($0.bounds.size) } ?? "none"]
+            if let data = tab.keptPicture {
+                if let path = request["path"] as? String { try? data.write(to: URL(fileURLWithPath: path)) }
+                if let rep = NSBitmapImageRep(data: data) { out["pixels"] = "\(rep.pixelsWide)x\(rep.pixelsHigh)" }
+                if let image = NSImage(data: data) { out["image"] = NSStringFromSize(image.size) }
+            }
+            if let cover = tab.cover { out["cover"] = NSStringFromSize(cover.size) }
+            answer(out)
+
         case "eval":
             guard let tab = find(request, in: browser) else { answer(missing(request)); return }
             guard let js = request["js"] as? String else { answer(["error": "eval needs js"]); return }
@@ -585,12 +600,13 @@ final class Bench {
         case "news":
             // The card after an update (see WhatsNew.swift), drawn off screen
             // to a PNG — the newest release's, whatever this build's version —
-            // or every version's notes; "on" shows the card in the window.
+            // or every version's notes; "on" shows the card in the window, and
+            // false puts it away.
             guard Store.testing else { answer(["error": "news only works on a --test run"]); return }
             guard let release = WhatsNew.releases.first else { answer(["error": "no release has a card"]); return }
-            if request["on"] as? Bool == true {
-                browser.newsShowing = true
-                answer(["showing": true])
+            if let on = request["on"] as? Bool {
+                browser.newsShowing = on
+                answer(["showing": on])
                 return
             }
             guard let path = request["path"] as? String else { answer(["error": "news needs a path"]); return }
@@ -685,6 +701,11 @@ final class Bench {
                         "stores": b.tabs.map { $0.store.identifier?.uuidString ?? "default" },
                         "pins": b.tabs.filter { $0.pin != nil }.map { $0.pin ?? "" },
                         "frame": b.window.map { NSStringFromRect($0.frame) } ?? "",
+                        // Profiles in one window (OneWindow.swift): tucked
+                        // behind another profile's, and in the Window menu or not.
+                        "tucked": b.tucked, "merge": b.mergeID?.uuidString ?? "",
+                        "inWindowMenu": !(b.window?.isExcludedFromWindowsMenu ?? true),
+                        "folded": b.folded, "open": b.isOpen, "shut": b.shut,
                     ]
                 }, "closedWindows": Browsers.lastClosedAt != nil, "keptAway": Browsers.keptAway,
                    "littles": LittleWindow.all.map { $0.tab.address?.absoluteString ?? "" }])
@@ -802,6 +823,12 @@ final class Bench {
             } else {
                 out["responderIsAddress"] = false
             }
+            // What the address field shows, typed and offered ending alike.
+            out["fieldText"] = Bench.addressField(in: (browser.window ?? Links.window)?.contentView)?.stringValue ?? ""
+            // What the empty field asks for, and its name for VoiceOver.
+            let shown = Bench.addressField(in: (browser.window ?? Links.window)?.contentView)
+            out["placeholder"] = shown?.placeholderAttributedString?.string ?? shown?.placeholderString ?? ""
+            out["fieldName"] = shown?.accessibilityLabel() ?? ""
             out["windows"] = NSApp.windows.map { window -> [String: Any] in
                 [
                     "kind": "\(type(of: window))",
@@ -1276,6 +1303,7 @@ final class Bench {
             func kind(_ offer: Suggestion) -> String {
                 switch offer.kind {
                 case .suggested: "suggested"
+                case .searched: "searched"
                 case .search: "search"
                 case .open: "open"
                 case .visited: "visited"
@@ -1290,6 +1318,8 @@ final class Bench {
                     "offers": browser.offers.map { [$0.key, kind($0), $0.url.absoluteString] },
                     // The grey rest of an address the field would finish to.
                     "ending": browser.ending ?? "",
+                    // ⌘K's line when it has no page to offer.
+                    "note": browser.switcherNote ?? "",
                     "asked": browser.suggester.asked, "cancelled": browser.suggester.cancelled,
                     "tooSlow": browser.suggester.tooSlow,
                     "on": browser.prefs.engineSuggests, "shy": browser.active?.shy ?? false,
@@ -1710,6 +1740,29 @@ final class Bench {
                 }
             }
 
+        case "proxyProfiles":
+            guard Store.testing else { answer(["error":"Saved-proxy probes require a test world"]); return }
+            let prefs=browser.prefs
+            switch request["action"] as? String {
+            case "save":
+                let id=(request["id"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
+                let connection=SavedProxy(id:id,name:request["name"] as? String ?? "",
+                    kind:(request["kind"] as? String).flatMap(ProxyKind.init(rawValue:)) ?? .http,
+                    host:request["host"] as? String ?? "",port:request["port"] as? String ?? "",
+                    signsIn:request["signsIn"] as? Bool ?? false,user:request["user"] as? String ?? "")
+                guard connection.valid else { answer(["error":"Invalid proxy endpoint"]); return }
+                prefs.saveProxy(connection)
+            case "select":
+                if let id=(request["id"] as? String).flatMap(UUID.init(uuidString:)) { prefs.selectProxy(id,connect:request["connect"] as? Bool ?? false) }
+            case "remove":
+                if let id=(request["id"] as? String).flatMap(UUID.init(uuidString:)) { prefs.removeProxy(id) }
+            case "off": prefs.proxyOn=false
+            default: break
+            }
+            answer(["selected":prefs.selectedProxyID?.uuidString ?? "","on":prefs.proxyOn,
+                "host":prefs.proxyHost,"port":prefs.proxyPort,"user":prefs.proxyUser,"revision":Proxy.shared.revision,
+                "saved":prefs.savedProxies.map { ["id":$0.id.uuidString,"name":$0.title,"host":$0.host,"port":$0.port,"kind":$0.kind.rawValue] }])
+
         case "screenshot":
             guard Store.testing else { answer(["error":"Screenshot probes require a test world"]);return }
             let capture=browser.screenshot
@@ -2037,10 +2090,17 @@ final class Bench {
         case "osint":
             guard Store.testing else { answer(["error":"OSINT probes require a test world"]); return }
             let session=browser.osint
+            func osintState() -> [String: Any] {
+                var state: [String:Any]=["shown":browser.sidePanel == .osint,"running":session.running,"retrieved":session.visible.count,"searchLinks":session.searchLinks.count,"checked":session.checked,"unavailable":session.unavailable,"problem":session.problem ?? "","saved":session.savedReports.count,"draft":browser.assisting?.draft ?? ""]
+                if let report=session.report,let data=try? JSONEncoder().encode(report),let json=try? JSONSerialization.jsonObject(with:data) { state["report"]=json }
+                state["connections"]=session.connections.count;state["timeline"]=session.timeline.count
+                return state
+            }
             switch request["action"] as? String {
             case "open":
                 if let endpoint=request["searx"] as? String { session.searx=endpoint }
                 if let all=request["all"] as? Bool { session.allSites=all }
+                if let region=request["region"] as? String { session.phoneRegion=region }
                 browser.showOSINT(OSINTContext(text:request["query"] as? String ?? "",label:"Probe input",kind:(request["kind"] as? String).flatMap(OSINTKind.init(rawValue:)) ?? .auto))
             case "image":
                 guard let path=request["path"] as? String else { answer(["error":"Missing image path"]); return }
@@ -2049,10 +2109,17 @@ final class Bench {
             case "stop": session.stop()
             case "clear": session.clear()
             case "save":
-                if let id=(request["id"] as? String).flatMap(UUID.init(uuidString:)) ?? session.visible.first?.id { session.toggleSaved(id,profile:browser.profileID) }
+                let id=(request["id"] as? String).flatMap(UUID.init(uuidString:)) ?? session.visible.first?.id
+                Task {
+                    if let id { await session.toggleSaved(id,profile:browser.profileID) }
+                    answer(osintState())
+                }; return
             case "restore":
-                session.loadSaved(browser.profileID)
-                if let saved=session.savedReports.first { session.restore(saved) }
+                Task {
+                    await session.loadSaved(browser.profileID)
+                    if let saved=session.savedReports.first { await session.restore(saved) }
+                    answer(osintState())
+                }; return
             case "askAI": browser.osintToAI()
             case "picture":
                 guard let path=request["path"] as? String else { answer(["error":"Missing path"]); return }
@@ -2069,9 +2136,7 @@ final class Bench {
                 }; return
             default: break
             }
-            var state: [String:Any]=["shown":browser.sidePanel == .osint,"running":session.running,"checked":session.checked,"unavailable":session.unavailable,"problem":session.problem ?? "","saved":session.savedReports.count,"draft":browser.assisting?.draft ?? ""]
-            if let report=session.report,let data=try? JSONEncoder().encode(report),let json=try? JSONSerialization.jsonObject(with:data) { state["report"]=json }
-            answer(state)
+            answer(osintState())
 
         case "aiInspect":
             guard Store.testing, let tab = find(request, in: browser) ?? browser.active else { answer(["error":"Inspection probe requires a tab"]); return }
@@ -2110,6 +2175,51 @@ final class Bench {
             default: break
             }
             answer(state())
+
+        case "imageLookup":
+            guard Store.testing else { answer(["error": "Only available in a probe"]); return }
+            let lookup = browser.imageLookup
+            switch request["action"] as? String {
+            case "file":
+                if let path = request["path"] as? String { lookup.file(URL(fileURLWithPath: path)) }
+            case "url": lookup.clear(); lookup.link = request["url"] as? String ?? ""
+            case "clear": lookup.clear()
+            case "askAI": browser.askFromAddress()
+            case "search":
+                let endpoint = (request["endpoint"] as? String).flatMap(URL.init(string:)) ?? ImageLookupRequest.endpoint
+                guard endpoint == ImageLookupRequest.endpoint || ["127.0.0.1", "localhost", "::1"].contains(endpoint.host() ?? "") else {
+                    answer(["error": "Fixture endpoint must be loopback"]); return
+                }
+                answer(["sent": lookup.search(in: browser, endpoint: endpoint)]); return
+            case "picture":
+                guard let path = request["path"] as? String else { answer(["error": "Missing path"]); return }
+                let dark = (request["appearance"] as? String ?? "dark") == "dark"
+                let previous = NSApp.appearance
+                NSApp.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                defer { NSApp.appearance = previous }
+                let host = NSHostingView(rootView: ImageLookupPanel(browser: browser, lookup: lookup, close: {}, drawn: true)
+                    .environment(\.colorScheme, dark ? .dark : .light))
+                host.frame = NSRect(origin: .zero, size: host.fittingSize)
+                let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                window.contentView = host
+                host.layoutSubtreeIfNeeded()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+                        answer(["error": "Nothing drawn"]); return
+                    }
+                    host.cacheDisplay(in: host.bounds, to: bitmap)
+                    do {
+                        try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                        answer(["saved": path])
+                    } catch { answer(["error": error.localizedDescription]) }
+                    window.contentView = nil
+                }
+                return
+            default: break
+            }
+            answer(["ready": lookup.canSearch, "loading": lookup.loading, "image": lookup.picture != nil,
+                    "url": lookup.link, "problem": lookup.problem ?? "", "assistant": browser.assisting != nil])
 
         case "ai":
             // The AI add-on's requests against a stand-in on this Mac: "mock"
@@ -2212,9 +2322,15 @@ final class Bench {
                     "open": true, "reading": assistant.reading, "notice": assistant.notice ?? "", "trouble": assistant.trouble ?? "",
                     "addressed": assistant.addressed,
                     "place": assistant.place,
-                    "model": assistant.model, "context": assistant.context?.text ?? "", "selection": assistant.selection ?? "",
+                    "model": assistant.model, "context": assistant.context?.text ?? "", "selection": assistant.selection ?? "", "draft": assistant.draft,
                     "turns": assistant.turns.map { ["question": $0.question ?? "", "answer": $0.answer, "done": $0.done,
-                                                     "failed": $0.failed ?? "", "strays": $0.strays] as [String: Any] },
+                                                     "failed": $0.failed ?? "", "strays": $0.strays,
+                                                     "activityPhase": $0.activity.phase.rawValue,
+                                                     "activityStatus": $0.activity.status(at: Date()),
+                                                     "activitySteps": $0.activity.steps.map { ["title": $0.title, "returned": $0.returned,
+                                                         "number": $0.number, "summary": $0.input.summary,
+                                                         "input": $0.input.command.text, "result": $0.output?.result.text ?? "",
+                                                         "issue": $0.issue] as [String: Any] }] as [String: Any] },
                 ])
             case "picture":
                 // The panel as it stands, and Settings › AI, drawn off screen
@@ -3596,9 +3712,22 @@ final class Bench {
                 SpaceSwipe.shared.ended()
             case "move":
                 if let index = request["index"] as? Int { browser.moveSpace(browser.spaceID, to: index - 1) }
+            case "menu":
+                // A space chosen from the space's menu, by its title, as a click would.
+                let menu = SpaceMenu.menu(for: browser)
+                guard let at = menu.items.firstIndex(where: { $0.title == request["title"] as? String && $0.action != nil }) else {
+                    answer(["error": "no such space in the menu"]); return
+                }
+                menu.performActionForItem(at: at)
             default: break
             }
             let out: [String: Any] = [
+                // The space's menu as it would open: section headers and spaces,
+                // with their ⌃ keys and the one ticked.
+                "menu": SpaceMenu.menu(for: browser).items.map { item -> [String: Any] in
+                    ["title": item.title, "header": item.isSectionHeader, "key": item.keyEquivalent, "on": item.state == .on]
+                },
+                "every": browser.everySpace.map(\.name),
                 "on": browser.prefs.usesSpaces,
                 "current": browser.space.name,
                 "spaces": browser.spaces.map { ["name": $0.name, "id": $0.id.uuidString, "downloads": $0.downloads ?? "", "shared": $0.sharesSignIns == true] },
@@ -3741,6 +3870,7 @@ final class Bench {
                                                        "inspectable": web.map { if #available(macOS 13.3, *) { return $0.isInspectable } else { return false } } ?? false,
                                                        "developerExtras": web.flatMap { $0.configuration.preferences.value(forKey: "developerExtrasEnabled") as? Bool } ?? false]
                 .merging(SidePanelPages.shared.siteReport(in: browser)) { a, _ in a }
+            case .downloads: content = ["kind": "downloads"]
             case nil: break
             }
             // Where the panel's page and every page sit in the window, from
@@ -3863,7 +3993,7 @@ final class Bench {
                 answer(["error": "popups state|open|allow|remove|sites"])
             }
 
-        case "extensions", "ext-add", "ext-folder", "ext-press", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-menu", "ext-pin", "ext-shot", "ext-answer", "ext-enable", "ext-private", "capture", "capture-stop":
+        case "extensions", "ext-add", "ext-crx", "ext-fetches", "ext-folder", "ext-press", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-menu", "ext-pin", "ext-shot", "ext-answer", "ext-enable", "ext-private", "capture", "capture-stop":
             guard #available(macOS 15.4, *) else {
                 answer(["error": "extensions need macOS 15.4"])
                 return
@@ -4221,6 +4351,10 @@ final class Bench {
             // The tab menu's Open 2 Tabs in Split View, right-clicked on id.
             browser.pairPickedTabs(focus: tab())
             reply()
+        case "closePicked":
+            // The tab menu's Close Tabs, right-clicked among the picked.
+            browser.closePickedTabs()
+            reply()
         case "fill":
             guard let blank = tab(), let page = tab("with") else { answer(["error": "split fill needs id and with"]); return }
             browser.fill(blank, with: page)
@@ -4358,6 +4492,20 @@ final class Bench {
             guard let text = request["id"] as? String else { answer(["error": "ext-add needs an id or link"]); return }
             extensions.install(from: text, confirm: !skip)
             answer(["started": true])
+        case "ext-crx":
+            // Test runs only: a store package on disk, verified against its id.
+            guard Store.testing else { answer(["error": "ext-crx only works on a --test run"]); return }
+            guard let path = request["path"] as? String, let id = request["id"] as? String,
+                  let data = FileManager.default.contents(atPath: path)
+            else { answer(["error": "ext-crx needs a path and an id"]); return }
+            Task { await extensions.installForTests(crx: data, id: id) }
+            answer(["started": true])
+        case "ext-fetches":
+            // Test runs only: what went through ExtensionFetch — addresses,
+            // statuses, cookie names, never a value.
+            guard Store.testing else { answer(["error": "ext-fetches only works on a --test run"]); return }
+            answer(["trace": ExtensionFetch.trace, "on": ExtensionFetch.on])
+            if request["clear"] as? Bool == true { ExtensionFetch.trace.removeAll() }
         case "ext-folder":
             guard let path = request["path"] as? String else { answer(["error": "ext-folder needs a path"]); return }
             extensions.installFolder(at: URL(fileURLWithPath: path), confirm: !skip)

@@ -43,17 +43,36 @@ final class ImageRelay: NSObject, WKScriptMessageHandler {
         if (!e.isTrusted) return;
         var el = e.target;
         while (el && el.tagName !== 'IMG') el = el.parentElement;
-        if (!el || !el.currentSrc || el.naturalWidth < 2) return;
-        // Only an address this menu will act on takes WebKit's own menu
-        // away; any other scheme keeps it, rather than getting nothing.
-        if (!/^(https?|data|blob):/i.test(el.currentSrc)) return;
+        if (!el) return;
         // WebKit's own menu only steps aside when there is a way to ask for
         // this one — otherwise a right-click shows nothing at all.
         var relay = window.webkit && webkit.messageHandlers && webkit.messageHandlers.officeImages;
         if (!relay) return;
-        e.preventDefault();
-        relay.postMessage({ src: el.currentSrc });
+        // Only an address this menu will act on takes WebKit's own menu
+        // away; any other scheme keeps it, rather than getting nothing.
+        var src = el.currentSrc && el.naturalWidth >= 2 && /^(https?|data|blob):/i.test(el.currentSrc) ? el.currentSrc : '';
+        // A picture that is also a link keeps WebKit's own menu, which has
+        // the link's items as well as the picture's: a grid of posts is all
+        // pictures, and every one of them a link to open in a new tab. Its
+        // Copy Image and Download Image are told which picture they are for,
+        // to be this app's (PageView), or that there is none.
+        if (src && !linked(e)) {
+          e.preventDefault();
+          relay.postMessage({ src: src });
+        } else {
+          relay.postMessage({ src: src, kept: true });
+        }
       }, true);
+      // As the middle button finds a link (MiddleRelay): on the path, so one
+      // in a shadow root counts, and an <area> or an SVG <a> too.
+      function linked(e) {
+        var path = e.composedPath();
+        for (var i = 0; i < path.length; i++) {
+          var tag = path[i].tagName ? path[i].tagName.toLowerCase() : '';
+          if ((tag === 'a' || tag === 'area') && path[i].hasAttribute('href')) return true;
+        }
+        return false;
+      }
     })();
     """
 
@@ -61,6 +80,19 @@ final class ImageRelay: NSObject, WKScriptMessageHandler {
         _ controller: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
+        // WebKit's own menu, over a picture it keeps it for (see watch): the
+        // picture its Copy Image and Download Image are to act on, or none.
+        if let body = message.body as? [String: Any], body["kept"] as? Bool == true {
+            let url = (body["src"] as? String).flatMap(URL.init(string:)).flatMap {
+                ["http", "https", "data", "blob"].contains($0.scheme?.lowercased() ?? "") ? $0 : nil
+            }
+            MainActor.assumeIsolated { [weak self] in
+                guard let self, let tab else { return }
+                frame = message.frameInfo
+                tab.built?.keptImage = url
+            }
+            return
+        }
         guard let body = message.body as? [String: Any],
               let src = body["src"] as? String,
               let url = URL(string: src),
@@ -107,7 +139,16 @@ extension Browser {
     /// asked for this one happened a moment ago, in JavaScript, with no
     /// native event left to hang an NSMenu off of.
     func showImageMenu(for tab: Tab, at url: URL) {
-        guard let webView = tab.built else { return }
+        guard let webView = tab.built, let menu = imageMenu(for: tab, at: url) else { return }
+        let screen = NSEvent.mouseLocation
+        guard let window = webView.window else { return }
+        let atWindow = window.convertPoint(fromScreen: screen)
+        let atView = webView.convert(atWindow, from: nil)
+        menu.popUp(positioning: nil, at: atView, in: webView)
+    }
+
+    func imageMenu(for tab: Tab, at url: URL) -> NSMenu? {
+        guard let webView = tab.built else { return nil }
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.addItem(ImageMenuItem("Open Image in New Tab") { [weak self] in
@@ -120,17 +161,16 @@ extension Browser {
         menu.addItem(ImageMenuItem("Download Image") { [weak self] in
             self?.downloadImage(at: url, from: webView)
         })
+        menu.addItem(ImageMenuItem("Save Image As…") { [weak self] in
+            self?.downloadImage(at: url, from: webView, askWhere: true)
+        })
         menu.addItem(.separator())
         menu.addItem(ImageMenuItem("Copy Image Address") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(url.absoluteString, forType: .string)
         })
 
-        let screen = NSEvent.mouseLocation
-        guard let window = webView.window else { return }
-        let atWindow = window.convertPoint(fromScreen: screen)
-        let atView = webView.convert(atWindow, from: nil)
-        menu.popUp(positioning: nil, at: atView, in: webView)
+        return menu
     }
 
     /// Fetched once, written as an actual image rather than a reference to
@@ -165,19 +205,7 @@ extension Browser {
                 session = Browser.fetcher
             }
             defer { if throughTor { session.invalidateAndCancel() } }
-            // Read as it comes, and let go past the limit.
-            guard let (bytes, response) = try? await session.proxyBytes(from: url),
-                  (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true,
-                  response.expectedContentLength <= Int64(Browser.largestImage)
-            else { return nil }
-            var data = Data()
-            do {
-                for try await byte in bytes {
-                    data.append(byte)
-                    if data.count > Browser.largestImage { return nil }
-                }
-            } catch { return nil }
-            return data
+            return await ImageFetch(url, limit: Browser.largestImage).data(over: session)
         }
         guard let web = tab.built else { return nil }
         let read = """
@@ -214,9 +242,11 @@ extension Browser {
     /// The same WKDownload this app already knows how to finish — asked for
     /// directly, since a context menu's "Download Image" never reaches
     /// WKNavigationDelegate to ask for one on its own.
-    func downloadImage(at url: URL, from webView: WKWebView) {
+    func downloadImage(at url: URL, from webView: WKWebView, askWhere: Bool = false) {
         webView.startDownload(using: URLRequest(url: url)) { [weak self] download in
-            self?.keep(download)
+            guard let self else { download.cancel { _ in }; return }
+            if askWhere { imageSaveAsDownloads.insert(ObjectIdentifier(download)) }
+            keep(download, from: webView)
         }
     }
 }
@@ -236,4 +266,67 @@ private final class ImageMenuItem: NSMenuItem {
     required init(coder: NSCoder) { fatalError() }
 
     @objc private func run() { act() }
+}
+
+/// One picture's bytes, read as they come in and let go of past the limit.
+/// Taken in the pieces the network hands over: reading them a byte at a time
+/// (URLSession's `bytes`) took twenty seconds for a 3 MB picture, which is
+/// what Copy Image waited on.
+final class ImageFetch: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let url: URL
+    private let limit: Int
+    private var received = Data()
+    private var done: CheckedContinuation<Data?, Never>?
+
+    init(_ url: URL, limit: Int) {
+        self.url = url
+        self.limit = limit
+    }
+
+    func data(over session: URLSession) async -> Data? {
+        await withCheckedContinuation { continuation in
+            done = continuation
+            let task = session.dataTask(with: url)
+            task.delegate = self
+            task.resume()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        let fine = (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? true
+        completionHandler(fine && response.expectedContentLength <= Int64(limit) ? .allow : .cancel)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if data.count > limit - received.count {
+            received = Data()
+            dataTask.cancel()
+        } else { received.append(data) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if let tor = session.delegate as? OnionRedirects {
+            tor.urlSession(session, task: task, didReceive: challenge, completionHandler: completionHandler)
+        } else if !Proxy.authenticate(challenge, in: session, completionHandler: completionHandler) {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        if let tor = session.delegate as? OnionRedirects {
+            tor.urlSession(session, task: task, willPerformHTTPRedirection: response,
+                           newRequest: request, completionHandler: completionHandler)
+        } else { completionHandler(request) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error { Proxy.authenticationError(error, in: session) }
+        done?.resume(returning: error == nil && !received.isEmpty ? received : nil)
+        done = nil
+    }
 }

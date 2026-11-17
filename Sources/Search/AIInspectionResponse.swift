@@ -7,6 +7,26 @@ extension AIClient {
         let visible = !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let limited = AIError.unreachable("The provider reached its response limit before finishing. The recorded actions are still available; you can ask it to continue.")
         let blocked = AIError.unreachable("The provider stopped this answer because of its content filter. The recorded actions are still available.")
+        if calls > 0 {
+            // A well-formed call is not authority to execute a response that
+            // explicitly stopped for refusal, filtering, limits or failure.
+            // Minimal compatible JSON gateways may omit terminal metadata.
+            let reason: String?
+            let successful: Set<String>
+            switch wire {
+            case .responses: reason = result["status"] as? String; successful = ["completed"]
+            case .openAI:
+                reason = (result["choices"] as? [[String: Any]])?.first?["finish_reason"] as? String
+                successful = ["stop", "tool_calls", "function_call"]
+            case .anthropic: reason = result["stop_reason"] as? String; successful = ["tool_use"]
+            case .gemini:
+                reason = (result["candidates"] as? [[String: Any]])?.first?["finishReason"] as? String
+                successful = ["STOP"]
+            }
+            if let reason, !successful.contains(reason) {
+                return .unreachable("The provider stopped without completing its tool request. No requested tools were run.")
+            }
+        }
         switch wire {
         case .responses:
             switch result["status"] as? String {

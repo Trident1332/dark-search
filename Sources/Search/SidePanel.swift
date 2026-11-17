@@ -31,6 +31,9 @@ enum SidePanelContent: Equatable {
     case page(extensionID: String, url: URL, tab: Tab.ID?)
     /// A website, in the space the window was in when it opened.
     case site(url: URL, space: UUID)
+    /// Downloads, for whoever chose it in Settings › Downloads › Open
+    /// Downloads: the same list as its tab, beside every page.
+    case downloads
     /// The dialer (Dialer.swift): the window's own page, kept with it.
     case dialer
     /// A conversation about the explicitly captured page or selected quote.
@@ -152,6 +155,21 @@ extension Browser {
     /// doesn't list. Never another profile's, whatever Spaces.current is.
     func panelStore(_ space: UUID) -> WKWebsiteDataStore {
         spaces.contains(where: { $0.id == space }) ? Spaces.store(for: space) : Profiles.store(profileID)
+    }
+
+    /// Downloads in the side panel; again, and it goes. Whatever page was
+    /// there is let go, as another site replacing it would be. A popup
+    /// window has no panel, so there it opens as a tab.
+    func toggleDownloadsPanel(closes: Bool = true) {
+        if sidePanelShown, sidePanel == .downloads {
+            if closes { closeSidePanel() }
+            return
+        }
+        guard !isPopup else { hoarding = true; return }
+        if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
+        SidePanelPages.shared.drop(in: self)
+        sidePanel = .downloads
+        sidePanelShown = true
     }
 
     /// The tab's page into the side panel, from the tab's menu. Not a
@@ -296,7 +314,7 @@ final class SidePanelPages: NSObject {
                 if #available(macOS 15.4, *), let context = Extensions.shared.contexts[id] {
                     _ = load(url, from: context, in: browser)
                 }
-            case .dialer, .assistant, .osint:
+            case .dialer, .assistant, .osint, .downloads:
                 // Its page takes no route of the proxy's: nothing to make again.
                 break
             }
@@ -423,6 +441,11 @@ private final class SitePanelDelegate: NSObject, ObservableObject, WKNavigationD
     weak var browser: Browser?
     init(browser: Browser) { self.browser = browser }
 
+    @objc(_webView:getWindowFrameWithCompletionHandler:)
+    func webView(_ webView: WKWebView, getWindowFrameWithCompletionHandler done: @escaping (CGRect) -> Void) {
+        done(browser?.windowFrame(for: webView) ?? webView.window?.frame ?? .zero)
+    }
+
     func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
                  completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         if !Proxy.authenticate(challenge, completionHandler: completionHandler) { completionHandler(.performDefaultHandling, nil) }
@@ -463,7 +486,7 @@ private final class SitePanelDelegate: NSObject, ObservableObject, WKNavigationD
 
     /// Crashes in a row: the page is made again twice a minute at most, then
     /// left as it is (the panel's line still closes it or opens it in a tab).
-    private var crashes: [Date] = []
+    private var crashes = CrashCount()
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -505,16 +528,14 @@ private final class SitePanelDelegate: NSObject, ObservableObject, WKNavigationD
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         guard !Proxy.shared.waiting, !Proxy.shared.changingContent else { return }
-        let now = Date()
-        crashes = crashes.filter { now.timeIntervalSince($0) < 60 } + [now]
-        guard crashes.count <= 2 else { return }
+        guard crashes.another() else { return }
         reloads += 1
         webView.reload()
     }
 
     /// How many times the page was made again, for the bench.
     private(set) var reloads = 0
-    var gaveUp: Bool { crashes.count > 2 }
+    var gaveUp: Bool { crashes.gaveUp }
 }
 
 /// The panel page's own delegate: a link it opens elsewhere goes to a tab,
@@ -678,6 +699,11 @@ struct SidePanelView: View {
             if let assistant = browser.assisting {
                 AssistantPanel(browser: browser, assistant: assistant).id(assistant.id)
             }
+        case .downloads:
+            // As tall as the panel, as its list is in a tab.
+            DownloadsPanel(browser: browser, loot: browser.loot, compact: true,
+                           close: { browser.closeSidePanel() })
+                .environment(\.asTab, true)
         case nil:
             Color.clear
         }

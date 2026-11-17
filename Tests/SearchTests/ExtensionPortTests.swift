@@ -15,6 +15,9 @@ final class ExtensionPortTests: XCTestCase {
             const inContent = \#(content), own = "webkit-extension://test/";
             const put = (target, key, value) => { target[key] = value; };
             const untabbed = (sender) => sender;
+            // This fixture exercises the legacy native-port codec. Managed
+            // logical ports are covered by the whole-shim isolation fixture.
+            const portIsolation = { owns: () => false };
             const makeEvent = () => {
               const listeners = new Set();
               return { addListener: f => listeners.add(f), removeListener: f => listeners.delete(f),

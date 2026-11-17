@@ -19,19 +19,21 @@ struct ProxySign: View {
     var colour: Color = Palette.muted
     @ObservedObject private var proxy = Proxy.shared
     @ObservedObject private var onion = Onion.shared
+    @ObservedObject private var prefs = Shared.prefs
     @State private var hovering = false
 
     private var shown: Bool {
         tab.id == browser.activeID && !tab.isBlank
-            && (tab.usesTor || (proxy.setup.shows && proxy.routes(for: Spaces.profile(of: browser.spaceID))))
+            && (tab.usesTor || (proxy.setup.shows && (proxy.routes(for: Spaces.profile(of: browser.spaceID)) || (!proxy.setup.on && !prefs.savedProxies.isEmpty))))
     }
 
     private var trouble: Bool {
-        tab.usesTor ? !onion.ready : (!proxy.setup.complete || proxy.dropped || proxy.refused || proxy.credentialIssue != nil)
+        tab.usesTor ? !onion.ready : proxy.setup.on && (!proxy.setup.complete || proxy.dropped || proxy.refused || proxy.credentialIssue != nil)
     }
 
     private var words: String {
         if tab.usesTor { return "Tor · \(onion.status)" }
+        if !proxy.setup.on { return "Proxy off · Choose a saved connection" }
         if !proxy.setup.complete { return "Enter a proxy address in Settings › Proxy" }
         if let issue = proxy.credentialIssue { return issue }
         if proxy.refused { return "The proxy didn't accept the name or password" }
@@ -41,11 +43,22 @@ struct ProxySign: View {
     }
 
     /// Reached, and nothing has gone wrong since.
-    private var connected: Bool { !trouble && proxy.place != nil }
+    private var connected: Bool { proxy.setup.on && !trouble && proxy.place != nil }
 
     var body: some View {
         if shown {
-            Button { _ = browser.show(InternalPage(.settings, SettingsPanel.Page.proxy.rawValue)) } label: {
+            Menu {
+                ForEach(prefs.savedProxies) { connection in
+                    Button { prefs.selectProxy(connection.id,connect:true) } label: {
+                        if proxy.setup.on,prefs.selectedProxyID==connection.id { Label(connection.title,systemImage:"checkmark") }
+                        else { Text(connection.title) }
+                    }
+                }
+                if !prefs.savedProxies.isEmpty { Divider() }
+                Button("Turn off proxy") { prefs.proxyOn=false }.disabled(!prefs.proxyOn)
+                Divider()
+                Button("Proxy settings…") { _ = browser.show(InternalPage(.settings, SettingsPanel.Page.proxy.rawValue)) }
+            } label: {
                 Group {
                     if tab.usesTor {
                         Text("Tor").font(.system(size: 9, weight: .medium))
@@ -66,7 +79,7 @@ struct ProxySign: View {
                                 in: RoundedRectangle(cornerRadius: 4, style: .continuous))
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
             .onHover { hovering = $0 }
             .help(words)
             .accessibilityLabel(words)
@@ -124,20 +137,60 @@ struct ProxyServerFields: View {
     @ObservedObject var prefs: Preferences
 
     var body: some View {
-        HStack(spacing: 8) {
-            ProxyField(label: "Address") {
-                TextField("proxy.example.com", text: $prefs.proxyHost)
-                    .autocorrectionDisabled()
+        VStack(spacing: 8) {
+            ProxyLineEntry(kind: prefs.proxyKind) { line in
+                prefs.applyProxyLine(line) ? nil : "The password couldn't be saved. Unlock your Mac and try again."
             }
-            ProxyField(label: "Port") {
-                TextField(String(prefs.proxyKind.usualPort), text: $prefs.proxyPort)
-                    .frame(width: 52)
+            HStack(spacing: 8) {
+                ProxyField(label: "Address") {
+                    TextField("proxy.example.com", text: $prefs.proxyHost)
+                        .autocorrectionDisabled()
+                }
+                ProxyField(label: "Port") {
+                    TextField(String(prefs.proxyKind.usualPort), text: $prefs.proxyPort)
+                        .frame(width: 52)
+                }
+                .fixedSize()
             }
-            .fixedSize()
         }
         .padding(.leading, SettingsPanel.textInset)
         .padding(.trailing, 14)
         .padding(.bottom, 11)
+    }
+}
+
+/// Pasted credentials stay masked and are discarded once the fields are filled.
+struct ProxyLineEntry: View {
+    let kind: ProxyKind
+    let apply: (ProxyLine) -> String?
+    @State private var draft = ""
+    @State private var message: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                ProxyField(label: "One line") {
+                    SecureField("host:port:username:password", text: $draft)
+                        .autocorrectionDisabled()
+                        .accessibilityLabel("One-line proxy")
+                        .onSubmit(fill)
+                }
+                Pill("Fill fields", action: fill).disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            Text(message ?? "Paste host:port:username:password. Uses \(kind.title) unless a scheme is included.")
+                .font(.system(size: 11)).foregroundStyle(message == nil ? Palette.muted : Palette.failed)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onChange(of: draft) { _, _ in message = nil }
+        .onDisappear { draft = "" }
+    }
+
+    private func fill() {
+        do {
+            let line = try ProxyLine.parse(draft, kind: kind)
+            if let error = apply(line) { message = error; return }
+            draft = ""; message = nil
+        } catch { message = error.localizedDescription }
     }
 }
 
@@ -148,6 +201,9 @@ struct ProxySignInFields: View {
     @ObservedObject var prefs: Preferences
     @State private var password = ""
     @State private var kept = false
+    @State private var canImport = false
+    @State private var importing = false
+    @State private var message: String?
     @FocusState private var typing: Bool
 
     var body: some View {
@@ -157,24 +213,37 @@ struct ProxySignInFields: View {
                     .autocorrectionDisabled()
             }
             ProxyField(label: "Password") {
-                SecureField(kept ? "••••••••  kept in your keychain" : "", text: $password)
+                SecureField(kept ? ConnectionPasswords.passwordPlaceholder : "", text: $password)
                     .focused($typing)
                     .onSubmit(save)
                 if kept, password.isEmpty {
                     Quick("Forget", tint: Palette.muted) { forget() }
-                        .help("Take the password out of your keychain")
+                        .help("Remove this saved password")
                         .transition(.opacity)
                 }
+            }
+            if canImport {
+                HStack {
+                    Quick(importing ? "Importing…" : "Import saved password", tint: Palette.muted) { importSaved() }
+                        .disabled(importing)
+                        .help("Move the old password to encrypted storage on this Mac. macOS may ask once for access to its old Keychain copy.")
+                    Spacer()
+                }
+            }
+            if let message {
+                Text(message).font(.system(size: 11)).foregroundStyle(Palette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(.leading, SettingsPanel.textInset)
         .padding(.trailing, 14)
         .padding(.bottom, 11)
-        .onAppear { kept = ProxyPassword.kept(prefs.proxySetup) }
-        .onChange(of: prefs.proxyUser) { _, _ in kept = ProxyPassword.kept(prefs.proxySetup) }
-        .onChange(of: prefs.proxyHost) { _, _ in kept = ProxyPassword.kept(prefs.proxySetup) }
-        .onChange(of: prefs.proxyKind) { _, _ in kept = ProxyPassword.kept(prefs.proxySetup) }
-        .onChange(of: prefs.proxyPort) { _, _ in kept = ProxyPassword.kept(prefs.proxySetup) }
+        .onAppear(perform: refresh)
+        .onChange(of: prefs.proxyUser) { _, _ in refresh() }
+        .onChange(of: prefs.proxyHost) { _, _ in refresh() }
+        .onChange(of: prefs.proxyKind) { _, _ in refresh() }
+        .onChange(of: prefs.proxyPort) { _, _ in refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: Proxy.routeChanged)) { _ in refresh() }
         .onChange(of: typing) { _, now in if !now { save() } }
         .animation(Motion.quick, value: kept)
     }
@@ -183,17 +252,46 @@ struct ProxySignInFields: View {
     /// field is emptied so it holds the password no longer than that.
     private func save() {
         guard !password.isEmpty else { return }
-        guard ProxyPassword.save(password, for: prefs.proxySetup) else { return }
+        guard ProxyPassword.save(password, for: prefs.proxySetup) else {
+            message = "The password couldn't be saved. Unlock your Mac and try again"
+            return
+        }
         password = ""
-        kept = true
+        message = nil
+        refresh()
         Proxy.shared.passwordChanged()
     }
 
     /// Out of the keychain; the route goes on without it.
     private func forget() {
-        guard ProxyPassword.forget(prefs.proxySetup) else { return }
-        kept = false
+        guard ProxyPassword.forget(prefs.proxySetup) else {
+            message = "The saved password couldn't be removed"
+            return
+        }
+        message = nil
+        refresh()
         Proxy.shared.passwordChanged()
+    }
+
+    private func refresh() {
+        kept = ProxyPassword.kept(prefs.proxySetup)
+        canImport = ProxyPassword.legacyImportAvailable(prefs.proxySetup)
+    }
+
+    private func importSaved() {
+        guard !importing else { return }
+        let setup = prefs.proxySetup
+        importing = true
+        message = nil
+        NSApp.activate()
+        Task { @MainActor in
+            let imported = await Task.detached(priority: .userInitiated) { ProxyPassword.importLegacy(setup) }.value
+            importing = false
+            guard prefs.proxySetup == setup else { refresh(); return }
+            refresh()
+            if imported { Proxy.shared.passwordChanged() }
+            else if !kept { message = "Import wasn't completed. Enter the password to save it here instead" }
+        }
     }
 }
 
@@ -290,5 +388,103 @@ struct ProxyBypassList: View {
         guard !site.isEmpty else { return }
         if !prefs.proxyBypass.contains(site) { prefs.proxyBypass.append(site) }
         draft = nil
+    }
+}
+
+// MARK: - saved connections
+
+struct SavedProxySettings: View {
+    @ObservedObject var prefs: Preferences
+    @State private var editing: SavedProxy?
+
+    var body: some View {
+        VStack(alignment:.leading,spacing:10) {
+            HStack(spacing:8) {
+                Picker("Connection",selection:Binding<UUID?>(get:{ prefs.selectedProxyID },set:{ id in if let id { prefs.selectProxy(id) } })) {
+                    if prefs.selectedProxyID==nil { Text("Custom configuration").tag(nil as UUID?) }
+                    ForEach(prefs.savedProxies) { connection in Text(connection.title).tag(Optional(connection.id)) }
+                }.labelsHidden().frame(maxWidth:.infinity,alignment:.leading)
+                Pill("Add") { editing=SavedProxy() }
+                if let selected=prefs.savedProxies.first(where:{ $0.id==prefs.selectedProxyID }) {
+                    Pill("Edit") { editing=selected }
+                    Pill("Remove") { prefs.removeProxy(selected.id) }
+                        .help("Remove this saved entry. The current connection stays configured")
+                } else if prefs.proxySetup.complete {
+                    Pill("Save current") { editing=SavedProxy(name:"",setup:prefs.proxySetup,port:prefs.proxyPort) }
+                }
+            }
+            if let selected=prefs.savedProxies.first(where:{ $0.id==prefs.selectedProxyID }) {
+                Text("\(selected.kind.title) · \(selected.setup.name)").font(.system(size:11)).foregroundStyle(Palette.muted)
+            } else if prefs.savedProxies.isEmpty {
+                Text("Save connections here, then switch from the proxy icon beside the address.")
+                    .font(.system(size:11)).foregroundStyle(Palette.muted)
+            }
+        }
+        .padding(.leading,SettingsPanel.textInset).padding(.trailing,14).padding(.bottom,12)
+        .sheet(item:$editing) { connection in SavedProxyEditor(prefs:prefs,connection:connection) }
+    }
+}
+
+private struct SavedProxyEditor: View {
+    @ObservedObject var prefs: Preferences
+    @Environment(\.dismiss) private var dismiss
+    @State private var connection: SavedProxy
+    @State private var password = ""
+    @State private var message: String?
+
+    init(prefs: Preferences, connection: SavedProxy) {
+        self.prefs=prefs; _connection=State(initialValue:connection)
+    }
+    private var exists: Bool { prefs.savedProxies.contains { $0.id==connection.id } }
+    var body: some View {
+        VStack(alignment:.leading,spacing:14) {
+            Text(exists ? "Edit proxy" : "Add proxy").font(.system(size:20,weight:.semibold))
+            ProxyField(label:"Name") { TextField("Work, home, another location…",text:$connection.name) }
+            ProxyLineEntry(kind: connection.kind) { line in
+                connection = line.filling(connection)
+                password = line.password ?? ""
+                message = nil
+                return nil
+            }
+            Picker("Type",selection:$connection.kind) {
+                ForEach(ProxyKind.allCases) { Text($0.title).tag($0) }
+            }.pickerStyle(.segmented)
+            ProxyField(label:"Address") { TextField("proxy.example.com",text:$connection.host).autocorrectionDisabled() }
+            ProxyField(label:"Port") { TextField(String(connection.kind.usualPort),text:$connection.port) }
+            Toggle("Requires a username and password",isOn:$connection.signsIn).font(.system(size:12))
+            if connection.signsIn {
+                ProxyField(label:"Username") { TextField("",text:$connection.user).autocorrectionDisabled() }
+                ProxyField(label:"Password") {
+                    SecureField(ProxyPassword.kept(connection.setup) ? ConnectionPasswords.passwordPlaceholder : "",text:$password)
+                }
+                Text(ConnectionPasswords.storageHint).font(.system(size:11)).foregroundStyle(Palette.muted)
+            }
+            if let message { Text(message).font(.system(size:11)).foregroundStyle(Palette.failed) }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Save",action:save).keyboardShortcut(.defaultAction).disabled(!connection.valid)
+            }.padding(.top,6)
+        }.padding(24).frame(width:400).background(Palette.ground).foregroundStyle(Palette.ink)
+    }
+    private func save() {
+        var saved=connection
+        saved.name=saved.name.trimmingCharacters(in:.whitespacesAndNewlines)
+        saved.host=saved.host.trimmingCharacters(in:.whitespacesAndNewlines)
+        saved.port=saved.port.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard saved.valid else { return }
+        let before=prefs.proxySetup
+        let hasPassword=saved.signsIn && !password.isEmpty
+        if hasPassword,!ProxyPassword.save(password,for:saved.setup) {
+            message="The password couldn't be saved. Unlock your Mac and try again."
+            return
+        }
+        let id=prefs.saveProxy(saved)
+        if prefs.selectedProxyID==nil,prefs.savedProxies.count==1,!before.complete { prefs.selectProxy(id) }
+        if hasPassword,prefs.proxyOn,prefs.proxySignsIn,
+           ProxyPassword.vaultIdentity(saved.setup)==ProxyPassword.vaultIdentity(prefs.proxySetup),prefs.proxySetup==before {
+            Proxy.shared.passwordChanged()
+        }
+        password=""; dismiss()
     }
 }

@@ -1,6 +1,6 @@
 # Contributing
 
-Dark Search is a fork maintained by Caroline, based on [Search by Office Commun](https://github.com/driceroland/Search). Contributions to this fork are welcome, but a few things make one land faster.
+Dark Search is a fork maintained by Carter Doesn't Sleep, based on [Search by Office Commun](https://github.com/driceroland/Search). Contributions to this fork are welcome, but a few things make one land faster.
 
 ## Before writing code
 
@@ -38,7 +38,7 @@ Fixes and things every browser is expected to do (Tab moving between a form's fi
 
 ## Review
 
-Caroline maintains this fork and reviews its [pull requests](https://github.com/Trident1332/dark-search/pulls). Keep the description focused on what changes, why, and how it was checked. Pinging a stale PR after a couple of weeks is completely fine.
+Carter Doesn't Sleep maintains this fork and reviews its [pull requests](https://github.com/Trident1332/dark-search/pulls). Keep the description focused on what changes, why, and how it was checked. Pinging a stale PR after a couple of weeks is completely fine.
 
 ## Reporting a bug
 

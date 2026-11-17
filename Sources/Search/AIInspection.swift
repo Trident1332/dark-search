@@ -130,18 +130,24 @@ final class AIInspection: ObservableObject {
     }
 
     func snapshot() async throws -> AIInspectionSnapshot {
+        try Task.checkCancellation()
         guard recording, let frontend, let page else { throw AIError.unreachable("Start Inspect page first.") }
         let token = generation
         let captured: Any?
         do { captured = try await frontend.callAsyncJavaScript("return await window.__searchAIInspection.snapshot()", arguments: [:], in: nil, contentWorld: .page) }
         catch { throw AIError.unreachable(Self.describe(error, in: "network capture")) }
+        try Task.checkCancellation()
+        guard recording, token == generation else { throw AIError.unreachable("Inspection stopped while capturing. Start it again.") }
         let dom: Any?
         do { dom = try await page.evaluateJavaScript(Self.pageSnapshot, in: nil, contentWorld: Web.world) }
         catch { throw AIError.unreachable(Self.describe(error, in: "page snapshot")) }
         guard recording, token == generation else { throw AIError.unreachable("Inspection stopped while capturing. Start it again.") }
         guard let json = captured as? String else { throw AIError.unreachable("WebKit did not return a network snapshot (\(type(of: captured))).") }
         guard let pageJSON = dom as? String else { throw AIError.unreachable("WebKit did not return a page snapshot (\(type(of: dom))).") }
-        return try AIInspectionSnapshot(networkJSON: json, pageJSON: pageJSON)
+        let snapshot = try await AIInspectionSnapshot.decode(networkJSON: json, pageJSON: pageJSON)
+        try Task.checkCancellation()
+        guard recording, token == generation else { throw AIError.unreachable("Inspection stopped while capturing. Start it again.") }
+        return snapshot
     }
 
     func tool(_ name: String, arguments: [String: Any]) async -> String {
@@ -166,8 +172,8 @@ final class AIInspection: ObservableObject {
                 if part == "dom" || part == "state" {
                     guard let page else { throw AIError.unreadable }
                     let captured = try await page.evaluateJavaScript(Self.pageSnapshot, in:nil,contentWorld:Web.world) as? String ?? "{}"
-                    let snapshot = try AIInspectionSnapshot(networkJSON:"{\"records\":[]}",pageJSON:captured)
-                    return snapshot.read(part:part,offset:offset,count:count)
+                    let snapshot = try await AIInspectionSnapshot.decode(networkJSON:"{\"records\":[]}",pageJSON:captured)
+                    return try await snapshot.chunk(part:part,offset:offset,count:count)
                 }
                 return try await frontend.callAsyncJavaScript("return await window.__searchAIInspection.read(part,id,offset,count)",arguments:["part":part,"id":arguments["id"] as? String ?? "","offset":offset,"count":count],in:nil,contentWorld:.page) as? String ?? "{}"
             default: return AIInspectionSnapshot.json(["error":"Unknown inspector tool"])
@@ -209,19 +215,47 @@ final class AIInspection: ObservableObject {
       if(window.__searchAIInspection)return true;
       const records=new Map(), consoleMessages=[], socketEvents=[];
       const previous=InspectorBackend.dispatch;
-      let serial=0, bytes=0, stopped=false, problem=null;
+      let serial=0, bytes=0, dropped=0, full=false, stopped=false, problem=null;
       const budget=128*1024*1024, startedAt=new Date().toISOString();
+      // Charge every retained payload, not just response bodies. Counting
+      // strings directly avoids building a second, potentially huge JSON
+      // string just to find out whether a socket frame fits. Overhead and
+      // repeated references are charged conservatively; replaced values do
+      // not replenish this capture's budget.
+      function reserve(value) {
+        if(stopped)return false;
+        let size=0;
+        const left=budget-bytes, seen=new Set();
+        function visit(v,depth=0) {
+          if(size>left)return;
+          if(typeof v==='string'){size+=32+v.length*2;return}
+          if(v===null||typeof v!=='object'){size+=16;return}
+          if(depth>32||seen.has(v)){size=left+1;return}
+          seen.add(v);size+=64;
+          for(const key of Object.keys(v)){
+            size+=32+key.length*2;visit(v[key],depth+1);if(size>left)break;
+          }
+          seen.delete(v);
+        }
+        if(!full)visit(value);
+        if(full||size>left){full=true;dropped++;problem='128 MB capture limit reached. Later data was not retained; clear capture to continue.';return false}
+        bytes+=size;return true;
+      }
+      function assign(item,key,value){if(value!==undefined&&item[key]!==value&&reserve(value))item[key]=value}
       function register(resource, key, raw={}) {
         if(records.has(key))return records.get(key);
-        if(records.size>=5000){problem='5000 request capture limit reached. Clear capture to continue.';throw new Error(problem)}
-        const item={id:String(++serial),key,url:resource?.url||raw.request?.url||'',resource,
+        if(records.size>=5000){dropped++;problem='5000 request capture limit reached. Clear capture to continue.';return null}
+        const item={id:String(++serial),key,url:resource?.url||raw.request?.url||'',
           target:resource?.target?.identifier,request:raw.request||{url:resource?.url,method:resource?.requestMethod,headers:resource?.requestHeaders,postData:resource?.requestData},
           response:resource?{url:resource.url,status:resource.statusCode,headers:resource.responseHeaders,mimeType:resource.mimeType,source:resource.responseSource}:null,
-          body:null,base64Encoded:false,bodyState:'pending',events:[],pending:null};
+          body:null,base64Encoded:false,bodyState:'pending',events:[]};
+        if(!reserve(item))return null;
+        item.resource=resource;item.pending=null;
         records.set(key,item);return item;
       }
       function getBody(item) {
         if(item.pending||item.bodyState==='available'||stopped)return;
+        if(full){item.bodyState='unavailable';item.bodyError='Capture memory limit reached';return}
         const resource=item.resource;
         if(!resource&&!item.requestID){item.bodyState='unavailable';item.bodyError='WebKit did not expose this resource';return}
         item.pending=(async()=>{
@@ -234,9 +268,9 @@ final class AIInspection: ObservableObject {
             if(stopped)return;
             const body=value.body??value.content;
             if(typeof body!=='string')throw new Error('WebKit returned no body');
-            if(bytes+body.length*2>budget){item.bodyState='unavailable';item.bodyError='Capture memory limit reached';problem='128 MB capture limit reached. Some bodies are unavailable; clear capture to continue.';return}
-            item.body=body;item.base64Encoded=!!value.base64Encoded;item.bodyState='available';bytes+=body.length*2;
-          }catch(e){if(!stopped){item.bodyState='unavailable';item.bodyError=String(e)}}
+            if(!reserve(body)){item.bodyState='unavailable';item.bodyError='Capture memory limit reached';return}
+            item.body=body;item.base64Encoded=!!value.base64Encoded;item.bodyState='available';
+          }catch(e){if(!stopped){item.bodyState='unavailable';item.bodyError='Response body unavailable';assign(item,'bodyError',String(e))}}
         })();
       }
       function message(value,target='main') {
@@ -246,10 +280,10 @@ final class AIInspection: ObservableObject {
         if(name==='Target.dispatchMessageFromTarget'||name==='Worker.dispatchMessageFromWorker'){
           message(p.message,p.targetId||p.workerId||target);return;
         }
-        if(name==='Console.messageAdded'){if(consoleMessages.length<500)consoleMessages.push(p.message);else problem='Console capture limit reached; later messages were not retained';return}
+        if(name==='Console.messageAdded'){if(consoleMessages.length<500){if(reserve(p.message))consoleMessages.push(p.message)}else problem='Console capture limit reached; later messages were not retained';return}
         if(!name?.startsWith('Network.'))return;
         if(name.includes('webSocket')||name.includes('WebSocket')||name.includes('eventSource')){
-          if(socketEvents.length<2000)socketEvents.push({method:name,params:p,target});else problem='Socket event capture limit reached; later frames were not retained';return;
+          if(socketEvents.length<2000){const entry={method:name,params:p,target};if(reserve(entry))socketEvents.push(entry)}else problem='Socket event capture limit reached; later frames were not retained';return;
         }
         const requestId=p.requestId;
         if(!requestId)return;
@@ -258,17 +292,19 @@ final class AIInspection: ObservableObject {
         let item=records.get(key);
         if(name==='Network.requestWillBeSent'){
           // Redirect responses and the final response have separate bodies/availability.
-          if(item&&p.redirectResponse){item.response=p.redirectResponse;item.bodyState='unavailable';item.bodyError='Redirect body is not retained by WebKit';records.set(key+':redirect:'+serial,item);records.delete(key);item=null}
-          item=item||register(resource,key,p);item.request=p.request;item.url=p.request.url;
+          if(item&&p.redirectResponse){assign(item,'response',p.redirectResponse);item.bodyState='unavailable';item.bodyError='Redirect body is not retained by WebKit';records.set(key+':redirect:'+serial,item);records.delete(key);item=null}
+          item=item||register(resource,key,p);if(!item)return;
+          assign(item,'request',p.request);assign(item,'url',p.request?.url);
         }
         item=item||register(resource,key,p);
+        if(!item)return;
         if(resource)item.resource=resource;
-        item.wireTarget=target;item.requestID=requestId;
-        if(p.resource){item.url=p.resource.url;item.response=p.resource.response;item.cacheEvent=true}
-        if(name!=='Network.dataReceived')item.events.push({method:name,params:p});
-        if(p.response)item.response=p.response;
-        if(p.metrics)item.metrics=p.metrics;
-        if(name==='Network.loadingFailed'){item.bodyState='unavailable';item.bodyError=p.errorText||'Request failed'}
+        assign(item,'wireTarget',target);assign(item,'requestID',requestId);
+        if(p.resource){assign(item,'url',p.resource.url);assign(item,'response',p.resource.response);item.cacheEvent=true}
+        if(name!=='Network.dataReceived'){const event={method:name,params:p};if(reserve(event))item.events.push(event)}
+        if(p.response)assign(item,'response',p.response);
+        if(p.metrics)assign(item,'metrics',p.metrics);
+        if(name==='Network.loadingFailed'){item.bodyState='unavailable';assign(item,'bodyError',p.errorText||'Request failed')}
         if(name==='Network.loadingFinished'||name==='Network.requestServedFromMemoryCache')getBody(item);
       }
       function dispatch(value) {
@@ -293,10 +329,10 @@ final class AIInspection: ObservableObject {
       // not a replay; old request headers/bodies may no longer be available.
       for(const frame of WI.networkManager.frames||[]){
         const resources=[frame.mainResource,...(frame.resourceCollection?.items||[])];
-        for(const r of resources)if(r){const item=register(r,'cached:'+frame.id+':'+r.url);item.recoveredFromCache=true;getBody(item)}
+        for(const r of resources)if(r){const item=register(r,'cached:'+frame.id+':'+r.url);if(item){item.recoveredFromCache=true;getBody(item)}}
       }
       window.__searchAIInspection={
-        summary(){return {requests:records.size,bodies:Array.from(records.values()).filter(r=>r.bodyState==='available').length,problem}},
+        summary(){return {requests:records.size,bodies:Array.from(records.values()).filter(r=>r.bodyState==='available').length,bytes,budget,dropped,problem}},
         async read(part,id,offset,count){
           let value;
           const values=Array.from(records.values());
@@ -328,7 +364,7 @@ final class AIInspection: ObservableObject {
           return JSON.stringify({startedAt,problem,scope:'This tab only. Bodies are captured from WebKit, not refetched. Past requests and unfinished streams may be unavailable.',
             records:Array.from(records.values()).map(({resource,pending,...r})=>r),console:consoleMessages,sockets:socketEvents,targets:WI.targets.map(t=>({id:t.identifier,type:t.type})),frames:(WI.networkManager.frames||[]).map(f=>({id:f.id,url:f.url,context:f.pageExecutionContext?.id,target:f.pageExecutionContext?.target?.identifier}))});
         },
-        stop(){stopped=true;if(InspectorBackend.dispatch===dispatch)InspectorBackend.dispatch=previous;records.clear();consoleMessages.length=0;socketEvents.length=0;bytes=0}
+        stop(){stopped=true;if(InspectorBackend.dispatch===dispatch)InspectorBackend.dispatch=previous;records.clear();consoleMessages.length=0;socketEvents.length=0;bytes=0;dropped=0}
       };
       return true;
     })()
@@ -338,9 +374,33 @@ final class AIInspection: ObservableObject {
 /// An immutable, exportable snapshot for preview and the initial prompt.
 /// Interactive tools separately read the live capture and execute console code.
 final class AIInspectionSnapshot: @unchecked Sendable {
+    let id = UUID()
     let network: [String: Any]
     let page: [String: Any]
     let index: String
+    private static func background<Value: Sendable>(_ work: @escaping @Sendable () throws -> Value) async throws -> Value {
+        try Task.checkCancellation()
+        let task = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let value = try work()
+            try Task.checkCancellation()
+            return value
+        }
+        return try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
+    }
+    static func decode(networkJSON: String, pageJSON: String) async throws -> AIInspectionSnapshot {
+        try await background { try AIInspectionSnapshot(networkJSON: networkJSON, pageJSON: pageJSON) }
+    }
+    func chunk(part: String, id: String = "", offset: Int = 0, count: Int = 12000) async throws -> String {
+        try await Self.background { self.read(part: part, id: id, offset: offset, count: count) }
+    }
+    func export(to url: URL, actions: [[String: String]]) async throws {
+        try await Self.background {
+            let data = try JSONSerialization.data(withJSONObject: ["page": self.page, "network": self.network, "consoleActions": actions], options: [.prettyPrinted, .sortedKeys])
+            try Task.checkCancellation()
+            try data.write(to: url, options: .atomic)
+        }
+    }
     init(networkJSON: String, pageJSON: String) throws {
         guard let network = try JSONSerialization.jsonObject(with: Data(networkJSON.utf8)) as? [String: Any],
               let page = try JSONSerialization.jsonObject(with: Data(pageJSON.utf8)) as? [String: Any] else { throw AIError.unreadable }
@@ -426,13 +486,9 @@ private struct InspectionPreview: View {
     @State private var consoleResult = ""
     @State private var executing = false
     @State private var exportError: String?
+    @State private var response: [String: Any] = [:]
     private let sections = ["index", "targets", "dom", "state", "console", "sockets", "request", "response", "body", "events"]
-    private var response: [String: Any] {
-        guard let snapshot = assistant.inspectionSnapshot,
-              let data = snapshot.read(part: part, id: requestID, offset: offset, count: 24000).data(using: .utf8),
-              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
-        return value
-    }
+    private var readID: String { "\(assistant.inspectionSnapshot?.id.uuidString ?? ""):\(part):\(requestID):\(offset)" }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -484,6 +540,14 @@ private struct InspectionPreview: View {
         .padding(22).frame(width: 740, height: 540).background(Palette.ground)
         .onChange(of: part) { _, _ in offset = 0 }
         .onChange(of: requestID) { _, _ in offset = 0 }
+        .task(id: readID) {
+            response = [:]
+            guard let snapshot = assistant.inspectionSnapshot,
+                  let text = try? await snapshot.chunk(part: part, id: requestID, offset: offset),
+                  !Task.isCancelled,
+                  let value = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return }
+            response = value
+        }
         .alert("Capture could not be saved", isPresented: Binding(get:{exportError != nil},set:{if !$0 {exportError=nil}})) {
             Button("OK") { exportError = nil }
         } message: { Text(exportError ?? "") }
@@ -494,10 +558,11 @@ private struct InspectionPreview: View {
         panel.nameFieldStringValue = "page-inspection.json"
         panel.begin { result in
             guard result == .OK, let url = panel.url else { return }
-            do {
-                let data = try JSONSerialization.data(withJSONObject: ["page":snapshot.page,"network":snapshot.network,"consoleActions":inspection.actions.map { ["expression":$0.expression,"result":$0.result ?? "Running"] }], options: [.prettyPrinted, .sortedKeys])
-                try data.write(to: url, options: .atomic)
-            } catch { exportError = error.localizedDescription }
+            let actions = inspection.actions.map { ["expression": $0.expression, "result": $0.result ?? "Running"] }
+            Task {
+                do { try await snapshot.export(to: url, actions: actions) }
+                catch { exportError = error.localizedDescription }
+            }
         }
     }
 }

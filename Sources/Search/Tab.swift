@@ -365,6 +365,17 @@ final class Tab: ObservableObject, Identifiable {
     /// A tab with no view (asleep, restored) has only its address to say.
     var restAddress: URL? { built == nil ? address : committed }
 
+    /// A failed destination is for the browser's error UI only. It must never
+    /// become the origin of the document still behind that UI.
+    @Published private(set) var failedAddress: URL?
+    var addressBarAddress: URL? { failure == nil ? (restAddress ?? address) : (failedAddress ?? address ?? restAddress) }
+    var addressBarIsDestination: Bool { failure != nil || (restAddress == nil && address != nil) }
+
+    func navigationFailed(_ error: Error) {
+        failedAddress = NavigationFailure.destination(error, fallback: address)
+        failure = NavigationFailure.message(error, destination: failedAddress)
+    }
+
     func didCommit() {
         popupGesture.clear()
         // What the old page was refused went with it.
@@ -408,8 +419,11 @@ final class Tab: ObservableObject, Identifiable {
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
     /// Set when the page never arrived — no host, no network, a refused
-    /// connection. Shown in place of the page rather than in a dialog.
-    @Published var failure: String?
+    /// connection, a process that kept dying. Shown in place of the page
+    /// rather than in a dialog.
+    @Published var failure: String? {
+        didSet { if failure == nil { dead = false; failedAddress = nil } }
+    }
     /// How far down the page you are, nought to one. The tab's own pill fills
     /// with it. Kept apart from the rest of the tab (see Reading): it changes
     /// all the way down a page, and only the fill has any use for it.
@@ -633,6 +647,10 @@ final class Tab: ObservableObject, Identifiable {
     /// download it and then, on at least some sites, does neither — see
     /// ImageMenu.swift for why this is built rather than patched.
     var onImageMenu: ((Tab, URL) -> Void)?
+    /// WebKit's Copy Image (true) or Download Image (false) chosen over a
+    /// picture that is also a link, done as the image menu does them.
+    var onImageItem: ((Tab, URL, Bool) -> Void)?
+    var onSaveImageAs: ((Tab, URL) -> Void)?
     /// Where the last image right-clicked came from (see ImageMenu.swift).
     var imageFrame: WKFrameInfo? { images.frame }
     /// Call <number> was chosen in the page's menu (see DialMenu.swift).
@@ -802,8 +820,20 @@ final class Tab: ObservableObject, Identifiable {
     /// — the back list, the page, where it was scrolled to — handed to the
     /// view built to wake it, so it opens exactly where this one was left.
     private var memory: Any?
+
+    /// The same, for a tab about to close: what ⇧⌘T hands back, so the tab
+    /// comes back with Back and Forward and its place on the page, not as
+    /// its address typed in again (see Browser.Ghost). Nothing while a page
+    /// is still arriving, as `rehome` has it: the state then still holds the
+    /// page being left, and the tab would come back there.
+    var keepsake: Any? {
+        guard let built else { return memory }
+        return built.isLoading ? nil : built.interactionState
+    }
     /// The last picture of that page, compressed, for the moment it wakes.
     private var picture: Data?
+    /// For the bench.
+    var keptPicture: Data? { picture }
     /// That picture, over the stage while the page is rebuilt underneath it:
     /// coming back to a tab that slept starts from what you left, not white.
     @Published private(set) var cover: NSImage?
@@ -949,6 +979,14 @@ final class Tab: ObservableObject, Identifiable {
         }
         web.translating = { [weak self] in self.map { $0.translator != nil && $0.translation?.failed != true } ?? false }
         web.onTranslate = { [weak self] in self?.toggleTranslation() }
+        web.onImage = { [weak self] url, copy in
+            guard let self else { return }
+            self.onImageItem?(self, url, copy)
+        }
+        web.onSaveImageAs = { [weak self] url in
+            guard let self else { return }
+            self.onSaveImageAs?(self, url)
+        }
         web.onSearch = { [weak self] text in
             guard let self else { return }
             self.onSearch?(self, text)
@@ -1117,6 +1155,11 @@ final class Tab: ObservableObject, Identifiable {
         controller.addUserScript(PopupGestureRelay.userScript)
         controller.addUserScript(
             WKUserScript(source: ScrollRelay.script, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: Web.world)
+        )
+        // At the start, so its pageshow runs ahead of the page's own
+        // (see KeptScroll.swift).
+        controller.addUserScript(
+            WKUserScript(source: KeptScroll.script, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: Web.world)
         )
         controller.addUserScript(
             WKUserScript(source: Veiling.picker, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: Web.world)
@@ -1566,7 +1609,7 @@ final class Tab: ObservableObject, Identifiable {
 
     /// Brought back from the last session: everything the row needs to draw it,
     /// and nothing fetched.
-    func restore(url: URL, title: String, name: String? = nil, tor: Bool = false) {
+    func restore(url: URL, title: String, name: String? = nil, tor: Bool = false, state: Any? = nil) {
         if let own = InternalPage(url: url) {
             self.name = name
             show(own)
@@ -1577,6 +1620,7 @@ final class Tab: ObservableObject, Identifiable {
         self.title = title
         self.name = name
         pending = url
+        memory = state
         adoptIcon()
     }
 
@@ -1746,7 +1790,7 @@ final class Tab: ObservableObject, Identifiable {
         onionTask = Task { [weak self] in
             do {
                 _ = try await Onion.shared.connect()
-                guard !Task.isCancelled, let self, self.onionNavigation == id, !self.proxyPaused else { return }
+                guard !Task.isCancelled, let self, self.onionNavigation == id, !self.proxyPaused, self.failure == nil else { return }
                 Proxy.shared.prepare(self.configuration)
                 let view = self.web
                 // As with ordinary restored pages, let the stage attach the
@@ -1755,7 +1799,7 @@ final class Tab: ObservableObject, Identifiable {
                 for _ in 0..<50 where view.window == nil {
                     try await Task.sleep(for: .milliseconds(20))
                     guard !Task.isCancelled, self.onionNavigation == id,
-                          self.built === view, !self.proxyPaused else { return }
+                          self.built === view, !self.proxyPaused, self.failure == nil else { return }
                 }
                 guard Onion.shared.port != nil else { return }
                 if let state { view.interactionState = state } else { view.load(request) }
@@ -1765,7 +1809,7 @@ final class Tab: ObservableObject, Identifiable {
                 if ["GET", "HEAD"].contains(method) {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak view] in
                         guard let self, let view, self.onionNavigation == id,
-                              self.built === view, !self.proxyPaused, Onion.shared.port != nil,
+                              self.built === view, !self.proxyPaused, self.failure == nil, Onion.shared.port != nil,
                               !view.isLoading, view.url == nil || view.url?.absoluteString == "about:blank" else { return }
                         view.load(request)
                     }
@@ -1794,14 +1838,21 @@ final class Tab: ObservableObject, Identifiable {
     /// The page as it looks right now, compressed. Drawn by the page's own
     /// process, so a view that is off screen — every tab but the one you are
     /// on — can still be pictured. Nil when there is nothing to draw.
+    ///
+    /// Kept at the screen's pixels, and saying so: two to a point on a
+    /// Retina screen. A JPEG that didn't was read back as twice the page in
+    /// points, and a layout that asked the picture for its own size drew it
+    /// at twice the page, cropped to its top left, while the tab woke (#781).
     func snapshot(_ done: @escaping (Data?) -> Void) {
         guard let built else { return done(nil) }
         built.takeSnapshot(with: nil) { image, _ in
-            guard let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            guard let image, image.size.width > 0,
+                  let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
                 return done(nil)
             }
+            let scale = CGFloat(cg.width) / image.size.width
             DispatchQueue.global(qos: .utility).async {
-                let data = Tab.jpeg(cg)
+                let data = Tab.jpeg(cg, scale: scale)
                 DispatchQueue.main.async { done(data) }
             }
         }
@@ -1835,10 +1886,17 @@ final class Tab: ObservableObject, Identifiable {
         built.takeSnapshot(with: configuration) { image, _ in done(image) }
     }
 
-    nonisolated private static func jpeg(_ image: CGImage) -> Data? {
+    /// `scale`: pixels to a point, written as the picture's density (72 a
+    /// point), which is what NSImage reads its size from.
+    nonisolated private static func jpeg(_ image: CGImage, scale: CGFloat) -> Data? {
         let data = NSMutableData()
         guard let out = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(out, image, [kCGImageDestinationLossyCompressionQuality: 0.55] as CFDictionary)
+        let dpi = 72 * (scale > 0 ? scale : 1)
+        CGImageDestinationAddImage(out, image, [
+            kCGImageDestinationLossyCompressionQuality: 0.55,
+            kCGImagePropertyDPIWidth: dpi,
+            kCGImagePropertyDPIHeight: dpi,
+        ] as CFDictionary)
         return CGImageDestinationFinalize(out) ? data as Data : nil
     }
 
@@ -1883,6 +1941,14 @@ final class Tab: ObservableObject, Identifiable {
     /// than showing the white that is left.
     var stale = false
 
+    /// How often this page's process has died lately (see CrashCount).
+    private var crashes = CrashCount()
+
+    /// Set while the failure up is the one recoverFromCrash gave up with:
+    /// there is no process behind the page, so Try again asks for the
+    /// address back rather than reloading what isn't there (see reload).
+    private var dead = false
+
     /// The process behind this page just died while it was the one on
     /// screen. `reload()`/`reloadFromOrigin()` lean on state the dead
     /// process was keeping — asking for the address back instead is the
@@ -1891,10 +1957,24 @@ final class Tab: ObservableObject, Identifiable {
     /// it. Tried twice: right after a process dies, WebKit doesn't always
     /// accept the very next load, which is what a reload that looks like it
     /// did nothing actually was.
-    func recoverFromCrash() {
-        guard let address else { return }
+    ///
+    /// Not for ever, though. A page that takes its process down as it loads
+    /// — too much memory, a WebKit crash, a call WebKit ends the process for
+    /// (see ExtensionShims' `__searchCall`) — came straight back to die
+    /// again, and the tab reloaded itself until Search was quit. Past the
+    /// side panel's rule, the page says so and waits for Try again.
+    /// Answers whether the page was asked for again.
+    @discardableResult
+    func recoverFromCrash(_ end: PageEnd = .unknown, at now: Date = Date()) -> Bool {
+        guard let address else { return false }
+        guard crashes.another(at: now) else {
+            failure = end.message
+            dead = true
+            return false
+        }
         failure = nil
         loadAndVerify(address)
+        return true
     }
 
     /// `web.load`, checked a moment later rather than trusted outright: a
@@ -1920,7 +2000,7 @@ final class Tab: ObservableObject, Identifiable {
         let view = web
         if view.window == nil, tries < 50 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self, weak view] in
-                guard let self, let view, self.built === view, !self.proxyPaused else { return }
+                guard let self, let view, self.built === view, !self.proxyPaused, self.failure == nil else { return }
                 self.loadAndVerify(url, state: state, tries: tries + 1)
             }
             return
@@ -1935,14 +2015,14 @@ final class Tab: ObservableObject, Identifiable {
             view.open(url)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak view] in
-            guard let self, let view, self.built === view, !self.proxyPaused else { return }
+            guard let self, let view, self.built === view, !self.proxyPaused, self.failure == nil else { return }
             guard view.url?.absoluteString != "about:blank" else {
                 view.open(url)
                 return
             }
             view.evaluateJavaScript("document.readyState") { [weak self, weak view] _, error in
                 MainActor.assumeIsolated {
-                    guard let self, let view, self.built === view, !self.proxyPaused,
+                    guard let self, let view, self.built === view, !self.proxyPaused, self.failure == nil,
                           let error = error as NSError? else { return }
                     guard error.domain == WKErrorDomain,
                           error.code == WKError.webContentProcessTerminated.rawValue
@@ -2049,6 +2129,13 @@ final class Tab: ObservableObject, Identifiable {
         // the reload.
         guard !wake() else { return }
         reader = false
+        // Try again on a page that kept crashing: its process is gone, so
+        // the address, checked as recoverFromCrash checks it.
+        if dead, let address {
+            failure = nil
+            loadAndVerify(address)
+            return
+        }
         // A file is read again with the folder it may read (see open).
         if let address, hollow || address.isFileURL {
             web.open(address)
@@ -2122,6 +2209,7 @@ final class Tab: ObservableObject, Identifiable {
         onExplicitNavigation = nil
         onField = nil
         onCredentials = nil
+        if #available(macOS 15.4, *) { Extensions.shared.closedAside(self) }
         discard()
         // The last private tab gone, in every window: what its pages wore
         // goes with it.
@@ -2178,6 +2266,11 @@ final class Tab: ObservableObject, Identifiable {
         Dialogs.invalidateTrust(for: web)
         (delegate as? Browser)?.cancelDisplay(for: web)
         built = nil
+        // Back and Forward said what the view let go of could do. The next
+        // view starts with nothing to go back to, and its observers only hear
+        // a change: left as it was, a pin put down showed Back lit, and Back
+        // did nothing. A tab that slept says it again as its history returns.
+        steps()
         Passkeys.shared.forget(web)
         let controller = web.configuration.userContentController
         aiInspection.stop()
@@ -2203,6 +2296,8 @@ final class Tab: ObservableObject, Identifiable {
         web.canAskAI = nil
         web.translating = nil
         web.onTranslate = nil
+        web.onImage = nil
+        web.onSaveImageAs = nil
         web.onSearch = nil
         web.stopLoading()
         // Detaching a view doesn't end capture while something still holds it.
@@ -2465,6 +2560,26 @@ final class PageView: WKWebView {
             clean.representedObject = url
             menu.insertItem(clean, at: index + 1)
         }
+        // A linked picture keeps WebKit's link commands, while Copy Image
+        // and Download Image use the same handlers as our picture menu.
+        // Consume the address once so a later menu cannot reuse it.
+        if let image = keptImage {
+            keptImage = nil
+            for (id, action) in [("WKMenuItemIdentifierCopyImage", #selector(copyImage(_:))),
+                                 ("WKMenuItemIdentifierDownloadImage", #selector(downloadImage(_:)))] {
+                guard let item = menu.items.first(where: { $0.identifier?.rawValue == id }) else { continue }
+                item.target = self
+                item.action = action
+                item.representedObject = image
+            }
+            if let index = menu.items.firstIndex(where: { $0.identifier?.rawValue == "WKMenuItemIdentifierDownloadImage" }) {
+                let save = NSMenuItem(title: "Save Image As…", action: #selector(saveImageAs(_:)), keyEquivalent: "")
+                save.identifier = NSUserInterfaceItemIdentifier("SearchSaveImageAs")
+                save.target = self
+                save.representedObject = image
+                menu.insertItem(save, at: index + 1)
+            }
+        }
         // The bench's linkmenu: the item it names is chosen as the menu
         // comes up, the way a hand would choose it, and the menu goes.
         if Store.testing, let title = PageView.picking {
@@ -2576,6 +2691,24 @@ final class PageView: WKWebView {
         CleanLink.copy(url)
     }
 
+    /// The picture under the right-click when WebKit keeps its menu.
+    var keptImage: URL?
+    /// Copy Image (true) or Download Image (false), this app's own.
+    var onImage: ((URL, Bool) -> Void)?
+    var onSaveImageAs: ((URL) -> Void)?
+
+    @objc private func copyImage(_ item: NSMenuItem) {
+        if let url = item.representedObject as? URL { onImage?(url, true) }
+    }
+
+    @objc private func downloadImage(_ item: NSMenuItem) {
+        if let url = item.representedObject as? URL { onImage?(url, false) }
+    }
+
+    @objc private func saveImageAs(_ item: NSMenuItem) {
+        if let url = item.representedObject as? URL { onSaveImageAs?(url) }
+    }
+
     /// Open Link in Split View: the same action, the tab it makes marked to
     /// go beside this page, for a second, as the one behind is.
     private var besideSince: Date?
@@ -2641,6 +2774,36 @@ final class PageView: WKWebView {
         }
         onTouch?()
         super.mouseDown(with: event)
+    }
+
+    // MARK: - a paused video filling the screen
+
+    /// VisionKit's analysis overlay consumes clicks on a paused full-screen
+    /// video, including its play button. Hide it there; WebKit removes it when
+    /// playback resumes. Turning off TextRecognitionInVideosEnabled instead
+    /// leaves the web process requesting a disabled endpoint and crashes it.
+    private weak var hiddenAnalysis: NSView?
+
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        // WKWebView adds ordinary subviews before its page is initialized;
+        // fullscreenState is safe to read only for the later analysis view.
+        guard NSStringFromClass(type(of: subview)).hasPrefix("VKCImageAnalysisOverlayView") else { return }
+        adjustVideoAnalysisOverlay(subview, fillingScreen: fullscreenState != .notInFullscreen)
+    }
+
+    /// Keep the state transition separate from AppKit's callback so it can be
+    /// checked without entering a real full-screen video window.
+    func adjustVideoAnalysisOverlay(_ subview: NSView, fillingScreen: Bool) {
+        guard NSStringFromClass(type(of: subview)).hasPrefix("VKCImageAnalysisOverlayView") else { return }
+        if fillingScreen {
+            subview.isHidden = true
+            hiddenAnalysis = subview
+        } else if subview === hiddenAnalysis {
+            // WebKit may reuse this view for an ordinary picture in the page.
+            subview.isHidden = false
+            hiddenAnalysis = nil
+        }
     }
 
     // MARK: - under the column or a peek
@@ -2850,11 +3013,23 @@ final class PageView: WKWebView {
     /// The page's word on whether this swipe is its own. Nil until it says.
     private var free: Bool?
     private var asked: Date?
+    /// A pinched page owns a gesture that began with room to pan that way,
+    /// even if its first wheel listener runs after the page reaches the edge.
+    private var zoomRoom: (left: Double, right: Double)?
+    private var zoomRoomPending = false
+    private var gestureRevision = 0
     /// Already went somewhere, or was refused: nothing more this gesture.
     private var spent = false
     private var armedNow = false
     private var showing = false
     private var going = false
+    /// This gesture went back or forward. The glide that follows the fingers
+    /// lifting arrives after the page has gone, and WebKit hands it to the
+    /// page coming back: it pulled that page sideways past its edge, where it
+    /// stayed, and scrolled it away from where it was being put back (a
+    /// GitHub list came back 181 points to the side and 961 short of where it
+    /// was left). So the glide goes to no page at all.
+    private var went = false
     private var pulls = 0
     /// Armed and held there: in a moment the disc becomes the list of pages
     /// that way, and moving the fingers up or down picks one (as in Dia).
@@ -2965,6 +3140,27 @@ final class PageView: WKWebView {
 
     override func scrollWheel(with event: NSEvent) {
         onTouch?()
+        if event.phase == .mayBegin || event.phase == .began {
+            went = false
+            Swipe.calm(self)
+            gestureRevision += 1
+            zoomRoom = nil
+            zoomRoomPending = magnification > 1 && Swipe.followsTheMac
+            if zoomRoomPending {
+                let revision = gestureRevision
+                evaluateInSearch(Swipe.zoomRoom) { [weak self] answer in
+                    MainActor.assumeIsolated {
+                        guard let self, self.gestureRevision == revision else { return }
+                        self.zoomRoomPending = false
+                        if let room = answer as? [Double], room.count == 2 {
+                            self.zoomRoom = (room[0], room[1])
+                        }
+                        if !self.spent, self.axis == .across { self.tell() }
+                    }
+                }
+            }
+        }
+        if went, event.momentumPhase != [] { return }
         // The page gets every event first and scrolls as it always did. The
         // swipe is only read, never taken — except while its list is open,
         // when up and down are picking a page, not scrolling this one. The
@@ -3067,6 +3263,13 @@ final class PageView: WKWebView {
     private var travel: CGFloat { max(0, back ? sideways : -sideways) }
 
     private func tell() {
+        guard !zoomRoomPending else { return }
+        if axis == .across, let room = zoomRoom, (back ? room.left : room.right) > 1 {
+            free = false
+            spent = true
+            settle(nil)
+            return
+        }
         if free == nil, let asked, Date().timeIntervalSince(asked) > 0.18 {
             // A page that never answers — a PDF, a page that failed to load —
             // still has to be leavable by hand.
@@ -3151,20 +3354,22 @@ final class PageView: WKWebView {
         holding = nil
         let flicked = !spent && free == true && travel >= PageView.flick
             && (asked.map { Date().timeIntervalSince($0) <= PageView.flickTime } ?? false)
-        guard !spent, free == true, armedNow || flicked || stops != nil else {
+        guard !zoomRoomPending, !spent, free == true, armedNow || flicked || stops != nil else {
             settle(nil)
             return
         }
         going = true
+        went = true
         settle(Pull(back: back, travel: travel, armed: true, going: true, stops: stops, picked: picked, leaves: leaves))
         if stops != nil, items.indices.contains(picked) {
-            go(to: items[picked])
+            let item = items[picked]
+            afterTheBounce { [weak self] in self?.go(to: item) }
         } else if leaves {
             leaveSoon()
         } else if back {
-            goBack()
+            afterTheBounce { [weak self] in self?.goBack() }
         } else {
-            goForward()
+            afterTheBounce { [weak self] in self?.goForward() }
         }
         pulls += 1
         let mine = pulls
@@ -3174,6 +3379,44 @@ final class PageView: WKWebView {
             settle(nil)
         }
     }
+
+    /// Pinched in, the sides still bounce (Swipe.calm), and a swipe back
+    /// from the left edge is a pull past it. A step within the same page —
+    /// a #footnote, a #section, an address the page changed — taken while
+    /// that stretch is still out, or on its way back, has WebKit drop the
+    /// scroll position it would restore and leave the stretch where it was:
+    /// the page sat 50 to 60 points past its edge, with a blank strip down
+    /// that side, and at the footnote rather than where you were (#842). So
+    /// the step waits until the page is back inside its edges, which a
+    /// stretch let go of takes about a quarter of a second, and a beat
+    /// more; never longer than a second. At its own size nothing bounces,
+    /// and it goes at once.
+    private func afterTheBounce(_ step: @escaping () -> Void, waited: Int = 0, inside: Bool = false,
+                                revision: Int? = nil, from item: WKBackForwardListItem? = nil) {
+        let revision = revision ?? gestureRevision
+        let item = item ?? backForwardList.currentItem
+        guard gestureRevision == revision, backForwardList.currentItem === item, !isLoading, window != nil else { return }
+        guard magnification > 1, waited < 20 else { step(); return }
+        evaluateJavaScript(PageView.inside, in: nil, in: .defaultClient) { [weak self] result in
+            guard let self, gestureRevision == revision, backForwardList.currentItem === item, !isLoading, window != nil else { return }
+            // A page that can't answer is not held up.
+            let now = (try? result.get()) as? Bool ?? true
+            if now, inside { step(); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.afterTheBounce(step, waited: waited + 1, inside: now, revision: revision, from: item)
+            }
+        }
+    }
+
+    /// Whether what is on screen is inside the page's edges, sideways.
+    private static let inside = """
+    (function () {
+      var v = window.visualViewport, d = document.documentElement;
+      if (!v || !d) return true;
+      var wide = Math.max(d.scrollWidth, d.clientWidth);
+      return v.pageLeft > -0.5 && v.pageLeft + v.width < wide + 0.5;
+    })()
+    """
 
     private func settle(_ pull: Pull?) {
         if pull == nil {
@@ -3292,6 +3535,55 @@ extension WKWebView {
     func evaluateInSearch(_ js: String, then: ((Any?) -> Void)? = nil) {
         evaluateJavaScript(js, in: nil, in: Web.world) { result in
             then?(try? result.get())
+        }
+    }
+}
+
+/// A page's process dying again and again: made again twice a minute at
+/// most, then left as it is. Without a limit, a page that takes its process
+/// down as it loads reloads for ever. Tabs and the side panel's website go
+/// by the same rule.
+struct CrashCount {
+    private var times: [Date] = []
+
+    /// One more death. Answers whether making the page again is still worth it.
+    mutating func another(at now: Date = Date()) -> Bool {
+        times = times.filter { now.timeIntervalSince($0) < 60 } + [now]
+        return times.count <= 2
+    }
+
+    var gaveUp: Bool { times.count > 2 }
+}
+
+/// Why WebKit says a page's process went away: its private
+/// `_WKProcessTerminationReason`, given to
+/// `_webView:webContentProcessDidTerminateWithReason:` (see Dialogs.swift).
+/// `unknown` is a WebKit that gives no reason, through the public callback.
+enum PageEnd: Int {
+    case unknown = -1
+    case memory = 0
+    case processor = 1
+    case asked = 2
+    case crash = 3
+
+    init(webKit reason: Int) { self = PageEnd(rawValue: reason) ?? .crash }
+
+    /// For the log: what to look for there the next time a page gives up.
+    var name: String {
+        switch self {
+        case .unknown: return "no reason given"
+        case .memory: return "memory limit"
+        case .processor: return "CPU limit"
+        case .asked: return "on request"
+        case .crash: return "crash"
+        }
+    }
+
+    /// Over the page, once it has stopped being made again.
+    var message: String {
+        switch self {
+        case .memory: return "This page kept running out of memory."
+        default: return "This page kept crashing."
         }
     }
 }

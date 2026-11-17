@@ -59,7 +59,7 @@ private struct AddressWell: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            if let tab = browser.active, !tab.isBlank {
+            if let tab = browser.active, !tab.isBlank || tab.failure != nil {
                 Said(browser: browser, tab: tab)
             } else {
                 Text("Search or enter address")
@@ -68,6 +68,7 @@ private struct AddressWell: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
+            ImageLookupDoor(browser: browser)
             ScreenshotDoor(browser: browser, controller: browser.screenshot)
             AskAIDoor(browser: browser, compact: true)
             // The bookmark, in the field's own end, as Chrome's star is.
@@ -114,14 +115,22 @@ private struct AddressWell: View {
                     .font(.system(size: 13))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
-            } else if let rest = AtRest.said(tab.restAddress, always: true, tor: tab.usesTor) {
-                ConnectionSign(browser: browser, tab: tab)
-                if !routed, rest.kind == .secure || rest.kind == .onion {
+            } else if let rest = AtRest.said(tab.addressBarAddress, always: true, tor: tab.usesTor) {
+                if tab.addressBarIsDestination {
+                    if routed { ConnectionSign(browser: browser, tab: tab) }
+                    Image(systemName: tab.failure == nil ? "arrow.right" : "exclamationmark.triangle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Palette.muted)
+                        .accessibilityLabel(tab.failure == nil ? "Requested address" : "Page failed to load")
+                } else {
+                    ConnectionSign(browser: browser, tab: tab)
+                }
+                if !tab.addressBarIsDestination, !routed, rest.kind == .secure || rest.kind == .onion {
                     Lock { browser.beginTabEdit(tab) }
                 }
                 HStack(spacing: 0) {
-                    AtRestLine(rest: rest, size: 13, connectionHandled: tab.usesTor)
-                    if let path = Said.path(of: tab.restAddress) {
+                    AtRestLine(rest: rest, size: 13, connectionHandled: tab.usesTor || tab.addressBarIsDestination)
+                    if let path = Said.path(of: tab.addressBarAddress) {
                         Text(path)
                             .font(.system(size: 13))
                             .foregroundStyle(Palette.muted)

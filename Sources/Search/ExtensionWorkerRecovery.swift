@@ -1,7 +1,8 @@
 import WebKit
 
 /// Passive port subscriptions, scoped to the native background they belong to.
-/// Neither this bridge nor its messages can initiate recovery or call APIs.
+/// It also binds port scopes to the exact native view sending the message;
+/// neither operation can initiate recovery or call extension APIs.
 @available(macOS 15.4, *)
 @MainActor
 final class ExtensionWorkerRecovery {
@@ -61,6 +62,7 @@ final class ExtensionWorkerRecovery {
     /// A replacement/removal must not carry this extension's bridge into
     /// future tabs. Automatic same-context recovery deliberately keeps it.
     func unregister(_ id: String) {
+        ExtensionPortBindings.shared.unregister(id)
         if let handler = handlers.removeValue(forKey: id) {
             for controller in controllers.allObjects { handler.detach(controller) }
         }
@@ -168,6 +170,23 @@ final class ExtensionWorkerRecovery {
                   !token.isEmpty, token.count <= 128 else { replyHandler(nil, "Invalid observer"); return }
             guard owner.handlers[id] === self else {
                 replyHandler(nil, "Extension registration was replaced")
+                return
+            }
+            if request["registerPort"] as? Bool == true || request["unregisterPort"] as? Bool == true {
+                guard let context = owner.contexts[id]?.value, context.isLoaded,
+                      let view = message.webView else {
+                    replyHandler(nil, "The extension document is no longer available")
+                    return
+                }
+                if request["unregisterPort"] as? Bool == true {
+                    let scope = request["scope"] as? String ?? ""
+                    let removed = ExtensionPortBindings.shared.unregister(token, scope: scope, in: context, view: view)
+                    replyHandler(["unregistered": removed], nil)
+                } else if let scope = ExtensionPortBindings.shared.register(token, in: context, view: view, owner: .shared) {
+                    replyHandler(["scope": scope], nil)
+                } else {
+                    replyHandler(nil, "The extension cannot access this document")
+                }
                 return
             }
             if request["cancel"] as? Bool == true {
