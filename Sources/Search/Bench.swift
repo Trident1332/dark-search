@@ -1710,6 +1710,65 @@ final class Bench {
                 }
             }
 
+        case "screenshot":
+            guard Store.testing else { answer(["error":"Screenshot probes require a test world"]);return }
+            let capture=browser.screenshot
+            func state() -> [String:Any] {
+                ["selecting":capture.selectionPanel != nil,"capturing":capture.capturing,"editor":capture.editorWindow != nil,
+                 "width":capture.document?.image.width ?? 0,"height":capture.document?.image.height ?? 0,
+                 "areas":capture.document?.areas.count ?? 0,"rendering":capture.document?.rendering ?? false,
+                 "problem":capture.document?.problem ?? ""]
+            }
+            switch request["action"] as? String {
+            case "capture":
+                guard let tab=browser.active else { answer(["error":"No tab"]);return }
+                house(tab)
+                let original=browser.window;browser.window=tab.web.window
+                capture.capture(in:browser);browser.window=original
+            case "drag":
+                func canvas(_ view: NSView) -> ScreenshotCanvas? {
+                    if let canvas=view as? ScreenshotCanvas { return canvas }
+                    return view.subviews.compactMap { canvas($0) }.first
+                }
+                let root=capture.selectionPanel?.contentView ?? capture.editorWindow?.contentView
+                guard let root,let view=canvas(root),let values=request["rect"] as? [Double],values.count==4 else { answer(["error":"Missing selection canvas or pixel rectangle"]);return }
+                root.layoutSubtreeIfNeeded()
+                let frame=view.imageFrame
+                let start=CGPoint(x:frame.minX+values[0]*frame.width/CGFloat(view.image.width),y:frame.minY+values[1]*frame.height/CGFloat(view.image.height))
+                let end=CGPoint(x:start.x+values[2]*frame.width/CGFloat(view.image.width),y:start.y+values[3]*frame.height/CGFloat(view.image.height))
+                for (type,point) in [(NSEvent.EventType.leftMouseDown,start),(.leftMouseDragged,end),(.leftMouseUp,end)] {
+                    guard let event=NSEvent.mouseEvent(with:type,location:view.convert(point,to:nil),modifierFlags:[],timestamp:0,windowNumber:view.window?.windowNumber ?? 0,context:nil,eventNumber:0,clickCount:1,pressure:1) else { continue }
+                    switch type { case .leftMouseDown:view.mouseDown(with:event);case .leftMouseDragged:view.mouseDragged(with:event);default:view.mouseUp(with:event) }
+                }
+            case "undo": capture.document?.undo()
+            case "reset": capture.document?.reset()
+            case "cancel": capture.cancelSelection()
+            case "close": capture.close()
+            case "copy":
+                guard let document=capture.document,let path=request["path"] as? String else { answer(["error":"Missing document or path"]);return }
+                let board=NSPasteboard(name:.init("SearchScreenshotProbe-"+(Store.world ?? "probe")))
+                guard document.copy(to:board),let data=board.data(forType:.png) else { answer(["error":"Copy failed"]);return }
+                do { try data.write(to:URL(fileURLWithPath:path));board.releaseGlobally() } catch { answer(["error":error.localizedDescription]);return }
+            case "save":
+                guard let path=request["path"] as? String else { answer(["error":"Missing path"]);return }
+                var panel:[String:Any]=[:]
+                capture.saveDestinationForTesting=URL(fileURLWithPath:path)
+                capture.savePanelForTesting={ panel=["directory":$0.directoryURL?.path ?? "","name":$0.nameFieldStringValue] }
+                capture.save();capture.saveDestinationForTesting=nil;capture.savePanelForTesting=nil
+                var response=state();response["panel"]=panel;answer(response);return
+            case "picture":
+                guard let root=capture.editorWindow?.contentView,let path=request["path"] as? String else { answer(["error":"Missing editor or path"]);return }
+                DispatchQueue.main.asyncAfter(deadline:.now()+0.3) {
+                    root.layoutSubtreeIfNeeded()
+                    guard let rep=root.bitmapImageRepForCachingDisplay(in:root.bounds) else { answer(["error":"Nothing drawn"]);return }
+                    root.cacheDisplay(in:root.bounds,to:rep)
+                    do { try rep.representation(using:.png,properties:[:])?.write(to:URL(fileURLWithPath:path));answer(state()) }
+                    catch { answer(["error":error.localizedDescription]) }
+                };return
+            default:break
+            }
+            answer(state())
+
         case "settings":
             // Settings as SettingsIndex has it (Tests/settings_layout.py):
             // every row with its section, group and keys; what Find a

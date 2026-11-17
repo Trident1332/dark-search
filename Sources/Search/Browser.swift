@@ -399,6 +399,7 @@ final class Browser: NSObject, ObservableObject {
     @Published var finding = false
     /// The AI panel's conversation about the page, while it is open.
     @Published var assisting: Assistant?
+    let screenshot = ScreenshotController()
     let osint = OSINTSession()
     /// Conversations stay in memory with their tabs while another tab is up.
     var assistantSessions: [Tab.ID: Assistant] = [:]
@@ -3280,6 +3281,7 @@ final class Browser: NSObject, ObservableObject {
 
     /// Its window closed for good, with others open: every page let go.
     func closeAll() {
+        screenshot.close()
         osint.stop()
         tabs.forEach { $0.aiInspection.stop() }
         cancelChosenLogin()
