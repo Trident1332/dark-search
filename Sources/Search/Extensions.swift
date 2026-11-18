@@ -188,6 +188,9 @@ final class Extensions: NSObject, ObservableObject {
         // extension's pages keep what they store where the browser does —
         // and a test run's apart from the real one's.
         views.websiteDataStore = Store.websites
+        // Its workers may keep a CryptoKey before the first tab has made
+        // SiteNotifications the store's delegate (see WebCryptoKey).
+        WebCryptoKey.attach(views.websiteDataStore)
         // Workers fetch through it too, so it takes Settings › Proxy's route
         // with the Personal profile's pages (see Proxy.swift). Taken straight
         // from Store, not through Profiles.store, so the proxy is put on it

@@ -104,8 +104,11 @@ enum Web {
             Proxy.shared.follow(config.preferences, profile: profile)
         }
         // Web notifications go through the store (see Notifications.swift);
-        // a private tab's is left without, and a page there is refused.
-        if !shy { let kept = config.websiteDataStore; MainActor.assumeIsolated { SiteNotifications.shared.attach(kept) } }
+        // a private tab's is left without, and a page there is refused. It
+        // still takes Search's key for the CryptoKeys its pages keep, not the
+        // keychain's (see WebCryptoKey).
+        let kept = config.websiteDataStore
+        MainActor.assumeIsolated { if shy { WebCryptoKey.attach(kept) } else { SiteNotifications.shared.attach(kept) } }
         MainActor.assumeIsolated { Proxy.shared.prepare(config) }
         // A test run's pretend camera and microphone (see ExtensionCapture).
         if #available(macOS 15.4, *), Store.testing { ExtensionCapture.mockDevices(config.preferences) }

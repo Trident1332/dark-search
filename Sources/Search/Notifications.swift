@@ -89,6 +89,13 @@ final class SiteNotifications: NSObject {
         return choices.mapValues { NSNumber(value: $0) } as NSDictionary
     }
 
+    /// The key WebKit locks up the CryptoKeys a page keeps with: Search's own,
+    /// not the keychain's (see WebCryptoKey).
+    @objc(webCryptoMasterKey:)
+    nonisolated func webCryptoMasterKey(_ reply: @escaping (Data?) -> Void) {
+        WebCryptoKey.shared.masterKey(reply)
+    }
+
     /// A service worker's notification.
     @objc(websiteDataStore:showNotification:)
     nonisolated func show(_ store: WKWebsiteDataStore, notification data: NSObject) {

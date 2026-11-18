@@ -742,6 +742,7 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         let configuration = WKWebViewConfiguration()
         // Nothing to keep: the page's state lives in Search's settings.
         configuration.websiteDataStore = .nonPersistent()
+        WebCryptoKey.attach(configuration.websiteDataStore)
         configuration.applicationNameForUserAgent = Web.userAgentName
         // The ring tone and the other side's voice play without a click in
         // the panel: a call started from a right-click never had one there.
