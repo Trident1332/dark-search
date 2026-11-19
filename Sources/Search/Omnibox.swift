@@ -113,7 +113,6 @@ struct Omnibox: View {
             }
             AddressField(browser: browser, tab: tab)
             ImageLookupDoor(browser: browser)
-            AskAIDoor(browser: browser)
         }
             .animation(Motion.quick, value: browser.siteChip)
             .frame(height: 30)
@@ -558,14 +557,8 @@ struct AddressField: NSViewRepresentable {
         }
 
         if coordinator.answered != browser.focusRequest {
-            let firstUpdate = coordinator.answered < 0
             coordinator.answered = browser.focusRequest
-            // A blank tab's field remounts when its cached AI conversation
-            // returns. Its old focus request belongs to the previous mount;
-            // leave the new composer focused until the address is asked for.
-            if !firstUpdate || browser.assisting?.standalone != true || browser.editing {
-                DispatchQueue.main.async { coordinator.focus(field) }
-            }
+            DispatchQueue.main.async { coordinator.focus(field) }
         }
     }
 

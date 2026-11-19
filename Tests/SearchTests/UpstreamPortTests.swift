@@ -96,14 +96,3 @@ final class WindowScriptPortTests: XCTestCase {
         XCTAssertNil(window.scriptProfile)
     }
 }
-
-final class AIRegexPortTests: XCTestCase {
-    func testCachedPatternsPreserveSourceComparisonAndLookalikeDetection() {
-        let read = AIPage.Read(title: "Contact", url: URL(string: "https://example.org"), text: "Email help@example.org or call +1 212 555 0100.", links: ["https://example.org/help"], cut: false)
-        XCTAssertTrue(AIPage.strays(in: "Contact help@example.org at https://example.org/help or +1 212 555 0100.", from: read).isEmpty)
-        let stray = AIPage.strays(in: "Use support@evil.net at https://evil.net or +1 415 555 9999.", from: read)
-        XCTAssertTrue(stray.contains { $0.contains("support@evil.net") })
-        XCTAssertTrue(stray.contains { $0.contains("evil.net") })
-        XCTAssertTrue(stray.contains { $0.filter(\.isNumber).contains("14155559999") })
-    }
-}

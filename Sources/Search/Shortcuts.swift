@@ -205,8 +205,6 @@ struct Command: Identifiable {
         Command("view.dialer", "Show Dialer", .view, KeyCombo("k", shift: true)) { $0.toggleDialer() },
         Command("view.dusk", "Darken This Site", .view, KeyCombo("d", shift: true)) { $0.toggleDusk() },
         Command("view.duskPause", "Pause Darkening", .view, KeyCombo("d", shift: true, option: true)) { $0.pauseDusk() },
-        Command("view.summarize", "Summarize Page", .view, nil) { $0.summarizePage() },
-        Command("view.ask", "Ask About This Page", .view, nil) { $0.askAboutPage() },
         // No key until you give one: Arc's ⇧⌘2 is a shifted digit, which
         // the menus read as a different character on many keyboards.
         Command("view.capture", "Capture", .view, nil) { $0.toggleSnap() },
@@ -549,8 +547,6 @@ extension Command {
     /// to the page.
     static let split: Set<String> = ["tabs.split", "tabs.focusLeftPane", "tabs.focusRightPane", "tabs.focusOtherPane",
                                      "tabs.swapSplit", "tabs.separateSplit"]
-    /// The AI add-on's: with it off, not listed.
-    static let ai: Set<String> = ["view.summarize", "view.ask"]
     /// Dark pages': with them off, not listed, and their keys go on to the page.
     static let dusk: Set<String> = ["view.dusk", "view.duskPause"]
     /// The archive's: with tabs never closing by themselves, not listed.

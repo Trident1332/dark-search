@@ -129,11 +129,9 @@ in [ROADMAP.md](ROADMAP.md).
 - ⌘W on a tab in a group puts it away rather than closing it, as Arc keeps a folder's tabs: its page is let go, its row stays in the group, and a click opens it again at the page it was on. Its cross shows a minus while the page is open; on a row already put away, the cross or Close Tab closes it for good, and ⇧⌘T brings it back into its group. A page of a Split View pair in a group is put away out of its pair. Close Other Tabs, Close Tabs Below, Clear and Close Group close as before (idea 398). Asked for by email
 - Settings' buttons say just what they do, in a word or two: Change, New Profile, Open and Choose lose their trailing dots, Bring Things Over is Transfer, Bring them over is Import, Forget choices is Forget, and Sign out of everything is Sign Out. The File menu keeps Bring Things Over….
 
-### Held back
+### Removed
 
-Not in this version, kept on main for a later one:
-
-- AI on pages, off unless you turn it on in Settings › AI: Summarize Page and Ask About This Page… in the View menu, answered where you choose — a model downloaded to this Mac (Apple Silicon: Qwen3 1.7B, 1.1 GB, checked before every use and run by a small program of Search's own that can't reach the network or your files), Ollama or LM Studio on this Mac, your own key for Anthropic, OpenAI, Google Gemini or OpenRouter, or signing in with your OpenRouter account. The answer comes in a panel beside the page, in plain text, marked as possibly wrong and with where it ran; follow-up questions stay in the panel, and nothing is kept once it closes. Only the page's visible text goes, never a password, a form or another tab; the page's words are given to the model as something to read, not orders, and any web address, email or phone number in the answer that isn't on the page is pointed out. Keys stay in this Mac's keychain and go only to their provider; a provider off this Mac is shown what it will be sent before the first request, and a private tab uses only what runs on this Mac.
+- OSINT and Ask AI are gone, with everything that came with them: the OSINT panel (View › Show OSINT, and OSINT it in a page's right-click menu, with its saved investigations), Ask AI in the address field and the right-click menu, Summarize Page and Ask About This Page in the View menu, Settings › AI, the model downloaded to this Mac and the engine that ran it, and the tools Ask AI worked with (Hopper, Ghidra, REA, Serena, MCP servers, OpenCode). Ask AI's settings are cleared the first time this version runs. Programs it installed under Application Support/Search/Tools are left where they are, for you to remove. Google Lens image lookup, Translate Page and search suggestions stay.
 
 ### Upstream sync — 17 November 2026
 

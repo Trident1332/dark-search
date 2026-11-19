@@ -389,9 +389,10 @@ final class ProxyTests: XCTestCase {
         Proxy.shared.take(route)
         XCTAssertFalse(route.blocks, "Authentication remains protected when Persistent connection is off")
         XCTAssertFalse(Proxy.shared.configuration().allowFailover)
-        let client = AIClient()
+        let session = Proxy.makeSession(configuration: Proxy.session(.ephemeral), delegate: ForwardingProxyDelegate())
+        defer { session.invalidateAndCancel() }
         do {
-            _ = try await client.session.proxyData(from: target)
+            _ = try await session.proxyData(from: target)
             XCTFail("Wrong credentials cannot connect")
         } catch { }
         try await until { Proxy.shared.refused }
@@ -520,52 +521,6 @@ final class ProxyTests: XCTestCase {
         prefs.proxyProfiles = [first.id, second.id]
         Profiles.shared.delete(first.id)
         XCTAssertEqual(prefs.proxyProfiles, [second.id])
-    }
-
-    func testAIRequestsUseCurrentProxyAndRebuildAfterRouteChanges() async throws {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [AIProtocol.self]
-        let client = AIClient(configuration: configuration)
-        let response = AIResponse()
-        AIProtocol.response = response
-        Proxy.shared.take(ProxySetup(on: true))
-        let first = client.session
-        XCTAssertEqual(first.configuration.proxyConfigurations.count, 2)
-        var answer = ""
-        for try await piece in client.stream(.openAI, model: "synthetic", system: "Test", messages: [], key: "synthetic-test-key") { answer += piece }
-        XCTAssertEqual(answer, "local test answer")
-        XCTAssertEqual(response.count, 1)
-        Proxy.shared.take(ProxySetup())
-        let second = client.session
-        XCTAssertFalse(first === second)
-        XCTAssertEqual(second.configuration.proxyConfigurations.count, 1)
-        Proxy.shared.take(ProxySetup(on: true))
-        let third = client.session
-        XCTAssertFalse(second === third)
-        XCTAssertEqual(third.configuration.proxyConfigurations.count, 2)
-    }
-
-    func testChangingProxyCancelsAnAIStreamOnTheOldRoute() async throws {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [AIProtocol.self]
-        let client = AIClient(configuration: configuration)
-        let response = AIResponse(held: true)
-        AIProtocol.response = response
-        Proxy.shared.take(ProxySetup(on: true))
-        let original = client.session
-        let streaming = Task {
-            for try await _ in client.stream(.openAI, model: "synthetic", system: "Test", messages: [], key: "synthetic-test-key") { }
-        }
-        defer { streaming.cancel() }
-        try await until { response.count == 1 }
-        var appearance = Proxy.shared.setup
-        appearance.shows.toggle()
-        Proxy.shared.take(appearance)
-        XCTAssertTrue(client.session === original, "Changing the address-bar mark does not change the route")
-        XCTAssertEqual(response.stopped, 0)
-        Proxy.shared.take(ProxySetup())
-        try await until { response.stopped > 0 }
-        try await streaming.value
     }
 }
 
@@ -711,4 +666,13 @@ private final class AIProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() { Self.response?.receive(self) }
     override func stopLoading() { Self.response?.stop() }
+}
+
+/// A session's own delegate that hands proxy challenges to Proxy, as
+/// DialerRelay's and ExtensionFetch's do.
+private final class ForwardingProxyDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if !Proxy.authenticate(challenge, in: session, completionHandler: completionHandler) { completionHandler(.performDefaultHandling, nil) }
+    }
 }

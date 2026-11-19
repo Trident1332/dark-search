@@ -55,7 +55,7 @@ struct SettingsPanel: View {
     @MainActor static var arcBefore: Preferences.ArcSetup?
 
     enum Page: String, CaseIterable, Identifiable {
-        case general, appearance, tabs, browsing, spaces, passwords, privacy, proxy, dialer, ai, extensions, keyboard, about
+        case general, appearance, tabs, browsing, spaces, passwords, privacy, proxy, dialer, extensions, keyboard, about
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -68,7 +68,6 @@ struct SettingsPanel: View {
             case .privacy: return "Privacy"
             case .proxy: return "Proxy"
             case .dialer: return "Dialer"
-            case .ai: return "AI"
             case .extensions: return "Extensions"
             case .keyboard: return "Keyboard & Mouse"
             case .about: return "About"
@@ -85,7 +84,6 @@ struct SettingsPanel: View {
             case .privacy: return "hand.raised"
             case .proxy: return "network"
             case .dialer: return "phone"
-            case .ai: return "sparkles"
             case .extensions: return "puzzlepiece.extension"
             case .keyboard: return "keyboard"
             case .about: return "info.circle"
@@ -104,7 +102,7 @@ struct SettingsPanel: View {
         /// The rail's three blocks: the browser, your data and tools, About.
         static var blocks: [[Page]] {
             [[.general, .appearance, .tabs, .browsing, .spaces],
-             [.passwords, .privacy, .proxy, .dialer] + (AI.shipped ? [.ai] : []) + [.extensions, .keyboard],
+             [.passwords, .privacy, .proxy, .dialer, .extensions, .keyboard],
              [.about]]
         }
     }
@@ -174,7 +172,7 @@ struct SettingsPanel: View {
     }
 
     private func follow(_ asked: String?) {
-        guard let asked, let wanted = Page.named(asked), wanted != .ai || AI.shipped, wanted != page else { return }
+        guard let asked, let wanted = Page.named(asked), wanted != page else { return }
         page = wanted
     }
 
@@ -466,8 +464,6 @@ struct SettingsPanel: View {
             }
         case .extensions:
             ExtensionsPage(browser: browser)
-        case .ai:
-            if AI.shipped { AISettings(browser: browser, prefs: prefs) }
         default:
             groups(of: page)
         }

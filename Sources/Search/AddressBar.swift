@@ -70,7 +70,6 @@ private struct AddressWell: View {
             Spacer(minLength: 0)
             ImageLookupDoor(browser: browser)
             ScreenshotDoor(browser: browser, controller: browser.screenshot)
-            AskAIDoor(browser: browser, compact: true)
             // The bookmark, in the field's own end, as Chrome's star is.
             BookmarkDoor(browser: browser, arrowEdge: .bottom)
         }

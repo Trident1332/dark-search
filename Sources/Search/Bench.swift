@@ -2048,7 +2048,7 @@ final class Bench {
 
         case "menus":
             // Every menu of the menu bar, by title, after SwiftUI has filled
-            // it — and whether the AI add-on counts as on. Reads only.
+            // it, and the Settings pages there are. Reads only.
             guard Store.testing else { answer(["error": "menus only works on a --test run"]); return }
             var menus: [String: [String]] = [:]
             for item in NSApp.mainMenu?.items ?? [] {
@@ -2056,8 +2056,8 @@ final class Bench {
                 menu.delegate?.menuNeedsUpdate?(menu)
                 menus[item.title] = menu.items.filter { !$0.isSeparatorItem && !$0.isHidden }.map(\.title)
             }
-            answer(["menus": menus, "ai": browser.prefs.ai, "shipped": AI.shipped,
-                    "settingsPages": SettingsPanel.Page.allCases.filter { $0 != .ai || AI.shipped }.map(\.rawValue),
+            answer(["menus": menus,
+                    "settingsPages": SettingsPanel.Page.allCases.map(\.rawValue),
                     "settingsPage": browser.settingsPage.rawValue])
 
         case "textcheck":
@@ -2271,95 +2271,6 @@ final class Bench {
             // seen is checked on a release candidate instead.
             answer(["error": "visible is switched off: it made a window, and no bench verb makes one for now — check this on a release candidate"])
 
-        case "osint":
-            guard Store.testing else { answer(["error":"OSINT probes require a test world"]); return }
-            let session=browser.osint
-            func osintState() -> [String: Any] {
-                var state: [String:Any]=["shown":browser.sidePanel == .osint,"running":session.running,"retrieved":session.visible.count,"searchLinks":session.searchLinks.count,"checked":session.checked,"unavailable":session.unavailable,"problem":session.problem ?? "","saved":session.savedReports.count,"draft":browser.assisting?.draft ?? ""]
-                if let report=session.report,let data=try? JSONEncoder().encode(report),let json=try? JSONSerialization.jsonObject(with:data) { state["report"]=json }
-                state["connections"]=session.connections.count;state["timeline"]=session.timeline.count
-                return state
-            }
-            switch request["action"] as? String {
-            case "open":
-                if let endpoint=request["searx"] as? String { session.searx=endpoint }
-                if let all=request["all"] as? Bool { session.allSites=all }
-                if let region=request["region"] as? String { session.phoneRegion=region }
-                browser.showOSINT(OSINTContext(text:request["query"] as? String ?? "",label:"Probe input",kind:(request["kind"] as? String).flatMap(OSINTKind.init(rawValue:)) ?? .auto))
-            case "image":
-                guard let path=request["path"] as? String else { answer(["error":"Missing image path"]); return }
-                do { browser.showOSINT(); session.image(try Data(contentsOf:URL(fileURLWithPath:path)),name:URL(fileURLWithPath:path).lastPathComponent,source:path) }
-                catch { answer(["error":error.localizedDescription]); return }
-            case "stop": session.stop()
-            case "clear": session.clear()
-            case "save":
-                let id=(request["id"] as? String).flatMap(UUID.init(uuidString:)) ?? session.visible.first?.id
-                Task {
-                    if let id { await session.toggleSaved(id,profile:browser.profileID) }
-                    answer(osintState())
-                }; return
-            case "restore":
-                Task {
-                    await session.loadSaved(browser.profileID)
-                    if let saved=session.savedReports.first { await session.restore(saved) }
-                    answer(osintState())
-                }; return
-            case "askAI": browser.osintToAI()
-            case "picture":
-                guard let path=request["path"] as? String else { answer(["error":"Missing path"]); return }
-                let host=NSHostingView(rootView:OSINTPanel(browser:browser,session:session,drawn:true).frame(width:400,height:850).environment(\.colorScheme,.dark))
-                host.frame=NSRect(origin:.zero,size:host.fittingSize)
-                let window=NSWindow(contentRect:host.frame,styleMask:.borderless,backing:.buffered,defer:false)
-                window.appearance=NSAppearance(named:.darkAqua);window.contentView=host;host.layoutSubtreeIfNeeded()
-                DispatchQueue.main.asyncAfter(deadline:.now()+0.3) {
-                    guard let bitmap=host.bitmapImageRepForCachingDisplay(in:host.bounds) else { answer(["error":"Nothing drawn"]);return }
-                    host.cacheDisplay(in:host.bounds,to:bitmap)
-                    do { try bitmap.representation(using:.png,properties:[:])?.write(to:URL(fileURLWithPath:path));answer(["saved":path]) }
-                    catch { answer(["error":error.localizedDescription]) }
-                    window.contentView=nil
-                }; return
-            default: break
-            }
-            answer(osintState())
-
-        case "aiInspect":
-            guard Store.testing, let tab = find(request, in: browser) ?? browser.active else { answer(["error":"Inspection probe requires a tab"]); return }
-            let capture = tab.aiInspection
-            func state() -> [String: Any] {
-                ["recording":capture.recording,"connecting":capture.connecting,"requests":capture.requestCount,"bodies":capture.bodyCount,
-                 "lastStop":capture.lastStopReason,"problem":capture.problem ?? "","enabled":browser.assisting?.inspectEnabled ?? false,"busy":browser.assisting?.busy ?? false,
-                 "actions":capture.actions.map { ["expression":$0.expression,"result":$0.result ?? ""] }]
-            }
-            switch request["action"] as? String {
-            case "start":
-                Task { await capture.start(in: tab); answer(state()) }; return
-            case "enable":
-                browser.assisting?.setInspection(request["enabled"] as? Bool ?? true)
-            case "snapshot":
-                Task {
-                    do { let snapshot = try await capture.snapshot(); answer(["network":snapshot.network,"page":snapshot.page]) }
-                    catch { answer(["error":error.localizedDescription]) }
-                }; return
-            case "tool":
-                Task { answer(["value":await capture.tool(request["name"] as? String ?? "read_inspection",arguments:request["arguments"] as? [String:Any] ?? [:])]) }; return
-            case "stop": capture.stop()
-            case "picture":
-                guard let assistant = browser.assisting, let path = request["path"] as? String else { answer(["error":"Missing assistant/path"]); return }
-                let host = NSHostingView(rootView:AssistantPanel(browser:browser,assistant:assistant,drawn:true).frame(width:380,height:780).environment(\.colorScheme,.dark))
-                host.frame = NSRect(origin:.zero,size:host.fittingSize)
-                let window = NSWindow(contentRect:host.frame,styleMask:.borderless,backing:.buffered,defer:false)
-                window.appearance = NSAppearance(named:.darkAqua);window.contentView = host;host.layoutSubtreeIfNeeded()
-                DispatchQueue.main.asyncAfter(deadline:.now()+0.4) {
-                    guard let bitmap = host.bitmapImageRepForCachingDisplay(in:host.bounds) else { answer(["error":"Nothing drawn"]);return }
-                    host.cacheDisplay(in:host.bounds,to:bitmap)
-                    do { try bitmap.representation(using:.png,properties:[:])?.write(to:URL(fileURLWithPath:path));answer(["saved":path]) }
-                    catch { answer(["error":error.localizedDescription]) }
-                    window.contentView = nil
-                };return
-            default: break
-            }
-            answer(state())
-
         case "imageLookup":
             guard Store.testing else { answer(["error": "Only available in a probe"]); return }
             let lookup = browser.imageLookup
@@ -2368,7 +2279,6 @@ final class Bench {
                 if let path = request["path"] as? String { lookup.file(URL(fileURLWithPath: path)) }
             case "url": lookup.clear(); lookup.link = request["url"] as? String ?? ""
             case "clear": lookup.clear()
-            case "askAI": browser.askFromAddress()
             case "search":
                 let endpoint = (request["endpoint"] as? String).flatMap(URL.init(string:)) ?? ImageLookupRequest.endpoint
                 guard endpoint == ImageLookupRequest.endpoint || ["127.0.0.1", "localhost", "::1"].contains(endpoint.host() ?? "") else {
@@ -2403,160 +2313,7 @@ final class Bench {
             default: break
             }
             answer(["ready": lookup.canSearch, "loading": lookup.loading, "image": lookup.picture != nil,
-                    "url": lookup.link, "problem": lookup.problem ?? "", "assistant": browser.assisting != nil])
-
-        case "ai":
-            // The AI add-on's requests against a stand-in on this Mac: "mock"
-            // points every provider at it, "key" keeps a made-up key for the
-            // run (in memory), "ask" sends one question and gives back the
-            // whole answer or the error. Only on a SEARCH_PROBE run, and only
-            // ever to the loopback address.
-            guard Store.testing else { answer(["error": "ai only works on a --test run"]); return }
-            switch request["action"] as? String {
-            case "mock":
-                guard let url = (request["url"] as? String).flatMap(URL.init(string:)),
-                      ["127.0.0.1", "localhost", "::1"].contains(url.host() ?? "")
-                else { answer(["error": "ai mock needs an address on this Mac"]); return }
-                AIProvider.mock = url
-                answer(["mock": url.absoluteString])
-            case "key":
-                guard let provider = (request["provider"] as? String).flatMap(AIProvider.init(rawValue:)),
-                      let key = request["key"] as? String
-                else { answer(["error": "ai key PROVIDER KEY"]); return }
-                let saved = AIKeys.save(key, for: provider)
-                answer(["saved": "\(saved)", "hint": AIKeys.hint(for: provider) ?? ""])
-            case "ask":
-                guard let provider = (request["provider"] as? String).flatMap(AIProvider.init(rawValue:)) else {
-                    answer(["error": "ai ask PROVIDER MODEL TEXT"]); return
-                }
-                let model = request["model"] as? String ?? provider.defaultModel
-                let stream = AIClient.shared.stream(provider, model: model, system: "You are a test.",
-                                                    messages: [AIMessage(role: .user, text: request["text"] as? String ?? "")],
-                                                    key: AIKeys.key(for: provider))
-                Task { @MainActor in
-                    var text = "", pieces = 0
-                    do {
-                        for try await piece in stream { text += piece; pieces += 1 }
-                        answer(["text": text, "pieces": pieces])
-                    } catch {
-                        answer(["error": error.localizedDescription, "text": text])
-                    }
-                }
-            case "signin":
-                // OpenRouter's sign-in, against the stand-in: the tab it opens,
-                // and a moment later whether a key is kept.
-                AISignIn.start(in: browser)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                    answer(["kept": AIKeys.hint(for: .openRouter) ?? "", "waiting": AISignIn.waiting, "tabs": browser.tabs.count])
-                }
-            case "engine":
-                // A test run's engine (engine.sh, signed ad-hoc) and a folder
-                // of models shared between test worlds; then the state.
-                if let path = request["path"] as? String {
-                    AIEngine.shared.stop()
-                    AIEngine.testEngine = URL(fileURLWithPath: path)
-                }
-                if let models = request["models"] as? String { AIEngine.testModels = URL(fileURLWithPath: models, isDirectory: true) }
-                AIEngine.shared.refreshState()
-                let running = AIEngine.shared.running
-                answer(["state": "\(AIEngine.shared.state)", "available": AIEngine.shared.available,
-                        "trusted": AIEngine.testEngine.map { AIEngine.trusted($0) } ?? false,
-                        "pid": Int(running.pid), "ready": running.ready])
-            case "use":
-                // The add-on on, answered by this provider (and model).
-                guard let provider = (request["provider"] as? String).flatMap(AIProvider.init(rawValue:)) else {
-                    answer(["error": "ai use PROVIDER [MODEL]"]); return
-                }
-                browser.prefs.ai = true
-                browser.prefs.aiProvider = provider
-                if let model = request["model"] as? String { browser.prefs.setAIModel(model, for: provider) }
-                answer(["provider": provider.rawValue, "model": browser.prefs.aiModel(for: provider)])
-            case "summarize", "question":
-                // The menu's Summarize Page or Ask About This Page… on a tab,
-                // then — for a question — the question typed and sent.
-                guard let tab = find(request, in: browser) else { answer(missing(request)); return }
-                browser.select(tab)
-                if request["action"] as? String == "summarize" { browser.summarizePage() } else { browser.askAboutPage() }
-                if let text = request["text"] as? String {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                        browser.assisting?.draft = text
-                        browser.assisting?.submit()
-                    }
-                }
-                answer(["open": browser.assisting != nil])
-            case "agree":
-                browser.assisting?.agree()
-                answer(["open": browser.assisting != nil])
-            case "submit":
-                guard let assistant = browser.assisting, let text = request["text"] as? String else {
-                    answer(["error": "Open the AI panel, then submit a question"]); return
-                }
-                assistant.draft = text
-                assistant.submit()
-                answer(["open": true])
-            case "model":
-                if let model = request["model"] as? String { browser.chooseAssistantModel(model) }
-                answer(["model": browser.assisting?.model ?? ""])
-            case "stop":
-                browser.assisting?.cancelAnswer()
-                answer(["open": browser.assisting != nil])
-            case "state":
-                guard let assistant = browser.assisting else { answer(["open": false]); return }
-                answer([
-                    "open": true, "reading": assistant.reading, "notice": assistant.notice ?? "", "trouble": assistant.trouble ?? "",
-                    "addressed": assistant.addressed,
-                    "place": assistant.place,
-                    "model": assistant.model, "context": assistant.context?.text ?? "", "selection": assistant.selection ?? "", "draft": assistant.draft,
-                    "turns": assistant.turns.map { ["question": $0.question ?? "", "answer": $0.answer, "done": $0.done,
-                                                     "failed": $0.failed ?? "", "strays": $0.strays,
-                                                     "activityPhase": $0.activity.phase.rawValue,
-                                                     "activityStatus": $0.activity.status(at: Date()),
-                                                     "activitySteps": $0.activity.steps.map { ["title": $0.title, "returned": $0.returned,
-                                                         "number": $0.number, "summary": $0.input.summary,
-                                                         "input": $0.input.command.text, "result": $0.output?.result.text ?? "",
-                                                         "issue": $0.issue] as [String: Any] }] as [String: Any] },
-                ])
-            case "picture":
-                // The panel as it stands, and Settings › AI, drawn off screen
-                // to PNGs — no window.
-                guard let path = request["path"] as? String else { answer(["error": "ai picture PATH"]); return }
-                let priorAppearance = NSApp.appearance
-                if let appearance = request["appearance"] as? String, ["light", "dark"].contains(appearance) {
-                    NSApp.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)
-                }
-                defer { NSApp.appearance = priorAppearance }
-                var made: [String] = []
-                func draw<V: View>(_ view: V, _ file: String) {
-                    let scheme: ColorScheme = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
-                    let renderer = ImageRenderer(content: view.padding(20).background(Palette.wash).environment(\.colorScheme, scheme))
-                    renderer.scale = 2
-                    guard let image = renderer.nsImage, let tiff = image.tiffRepresentation,
-                          let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
-                    let url = URL(fileURLWithPath: path).appendingPathComponent(file)
-                    if (try? png.write(to: url)) != nil { made.append(url.path) }
-                }
-                let width = min(640, max(300, request["width"] as? Double ?? 380))
-                let height = min(900, max(360, request["height"] as? Double ?? 640))
-                if let assistant = browser.assisting { draw(AssistantPanel(browser: browser, assistant: assistant, drawn: true).frame(width: width, height: height), "ai-panel.png") }
-                draw(AISettings(browser: browser, prefs: browser.prefs, drawn: true).frame(width: 440), "ai-settings.png")
-                answer(["made": made])
-            case "read":
-                // What of the page would go to the model, and nothing sent.
-                guard let tab = find(request, in: browser) else { answer(missing(request)); return }
-                Task { @MainActor in
-                    guard let read = await AIPage.read(tab) else { answer(["error": "nothing to read"]); return }
-                    Bench.aiRead = read
-                    answer(["title": read.title, "text": read.text, "links": read.links.count, "cut": read.cut])
-                }
-            case "check":
-                // The last page read, and an answer checked against it.
-                guard let read = Bench.aiRead, let text = request["text"] as? String else {
-                    answer(["error": "ai read a page first, then ai check TEXT"]); return
-                }
-                answer(["strays": AIPage.strays(in: text, from: read)])
-            default:
-                answer(["error": "ai mock URL | key PROVIDER KEY | ask PROVIDER MODEL TEXT | read ID | check TEXT"])
-            }
+                    "url": lookup.link, "problem": lookup.problem ?? ""])
 
         case "notifications":
             // What a test run would have posted, and every site's answer.
@@ -4212,10 +3969,6 @@ final class Bench {
             let web = browser.sidePanel == .dialer ? browser.dialerPage?.web : SidePanelPages.shared.web(in: browser)
             var content: [String: Any] = ["kind": "none"]
             switch browser.sidePanel {
-            case .osint: content = ["kind":"osint","query":browser.osint.report?.context.text ?? "","running":browser.osint.running]
-            case .assistant:
-                content = ["kind": "assistant", "model": browser.assisting?.model ?? "",
-                           "context": browser.assisting?.context?.text ?? ""]
             case .dialer: content = ["kind": "dialer", "status": browser.dialerPage?.status.text ?? "",
                                      "statusKind": browser.dialerPage?.status.kind ?? "", "state": browser.dialerPage?.status.state ?? "",
                                      "ready": browser.dialerPage?.ready ?? false]
@@ -4359,9 +4112,9 @@ final class Bench {
 
         default:
             answer(["error": "unknown command “\(verb)”", "commands": [
-                "tabs", "open", "go", "openmark", "close", "wait", "sleep", "select", "text", "nowplaying", "agent", "kept", "eval", "click", "type", "submit", "shot", "snap", "probe", "key", "textcheck", "resize", "hit", "pointer", "film", "float", "window", "pages", "picture", "pdf", "place", "group", "tospace", "field", "bookmark", "marks", "menu", "keyeq", "fill", "pin", "middle", "windows", "alive", "quit", "towindow", "news", "pull", "magnify", "wheel", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "import-file-start", "import-file-status", "import-file-cancel", "remove-folder", "passwords", "accounts", "find", "answer", "visible", "ai", "notifications", "popups", "suggest", "translate", "profile", "settings",
+                "tabs", "open", "go", "openmark", "close", "wait", "sleep", "select", "text", "nowplaying", "agent", "kept", "eval", "click", "type", "submit", "shot", "snap", "probe", "key", "textcheck", "resize", "hit", "pointer", "film", "float", "window", "pages", "picture", "pdf", "place", "group", "tospace", "field", "bookmark", "marks", "menu", "keyeq", "fill", "pin", "middle", "windows", "alive", "quit", "towindow", "news", "pull", "magnify", "wheel", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "import-file-start", "import-file-status", "import-file-cancel", "remove-folder", "passwords", "accounts", "find", "answer", "visible", "notifications", "popups", "suggest", "translate", "profile", "settings",
 
-                "tabs", "open", "go", "openmark", "close", "wait", "sleep", "select", "text", "nowplaying", "player", "agent", "eval", "click", "type", "submit", "shot", "snap", "probe", "key", "textcheck", "resize", "hit", "pointer", "film", "float", "window", "pages", "picture", "pdf", "place", "group", "tospace", "field", "bookmark", "marks", "menu", "keyeq", "fill", "pin", "middle", "windows", "alive", "quit", "towindow", "news", "pull", "magnify", "wheel", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "import-file-start", "import-file-status", "import-file-cancel", "remove-folder", "passwords", "accounts", "find", "answer", "visible", "ai", "notifications", "popups", "suggest", "translate", "profile", "settings",
+                "tabs", "open", "go", "openmark", "close", "wait", "sleep", "select", "text", "nowplaying", "player", "agent", "eval", "click", "type", "submit", "shot", "snap", "probe", "key", "textcheck", "resize", "hit", "pointer", "film", "float", "window", "pages", "picture", "pdf", "place", "group", "tospace", "field", "bookmark", "marks", "menu", "keyeq", "fill", "pin", "middle", "windows", "alive", "quit", "towindow", "news", "pull", "magnify", "wheel", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "import-file-start", "import-file-status", "import-file-cancel", "remove-folder", "passwords", "accounts", "find", "answer", "visible", "notifications", "popups", "suggest", "translate", "profile", "settings",
             ]])
         }
     }
@@ -5166,8 +4919,6 @@ final class Bench {
         window.contentView?.addSubview(tab.web)
     }
 
-    /// The last page `ai read` read, for `ai check`.
-    static var aiRead: AIPage.Read?
 
     private func makeRoom() -> NSWindow {
         // Off every screen, and never key or main: it exists so that a web

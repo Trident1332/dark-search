@@ -82,7 +82,6 @@ enum AddressCommand: Equatable {
         switch self {
         case .newSpace: return browser.prefs.usesSpaces
         case .menu(let id): return Self.offers(id, in: browser)
-        case .page(let page): return page != .ai || AI.shipped
         default: return true
         }
     }
@@ -140,7 +139,7 @@ enum AddressCommand: Equatable {
     /// Those the menu greys out without a web page in front.
     private static let needsPage: Set<String> = [
         "file.share", "file.savePage", "file.exportPDF", "file.print", "edit.copyCleanLink", "view.reader",
-        "view.summarize", "view.ask", "tabs.duplicate", "tabs.copyAddress", "tabs.copyMarkdown", "bookmarks.add",
+        "tabs.duplicate", "tabs.copyAddress", "tabs.copyMarkdown", "bookmarks.add",
     ]
     /// More words for a few, the ones other browsers use.
     private static let alsoCalled: [String: String] = [
@@ -157,7 +156,6 @@ enum AddressCommand: Equatable {
             guard prefs.splitView else { return false }
             if id != "tabs.split", browser.activeSplit == nil { return false }
         }
-        if Command.ai.contains(id), !prefs.ai { return false }
         if Command.dusk.contains(id), !prefs.darkensPages { return false }
         if Command.archive.contains(id), prefs.tabLife == .never { return false }
         if Command.capture.contains(id), !prefs.capturesPages { return false }

@@ -209,9 +209,6 @@ struct WelcomePanel: View {
                 if PageTranslator.available {
                     Key("⌃-click", "Translate a page into your language, on this Mac — nothing is sent anywhere. Right-click the page › Translate Page.")
                 }
-                if AI.shipped {
-                    Key("⌘,", "AI summaries and questions about a page — off until you turn it on in Settings › AI.")
-                }
             }
         }
     }

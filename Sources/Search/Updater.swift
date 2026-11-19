@@ -487,17 +487,6 @@ final class Updater: ObservableObject {
             minimumSystemVersion: json["minimumSystemVersion"] as? String
         )
         release.dmgSha256 = dmgSha.flatMap { $0.isEmpty ? nil : $0 }
-        // The AI add-on's engine for this Mac, when the feed offers one: as
-        // signed as the release itself (see AIEngine).
-        if let engine = (json["ai"] as? [String: Any])?["engine"] as? [String: Any],
-           let version = (engine["version"] as? Int) ?? Int(engine["version"] as? String ?? ""),
-           let url = link(engine["url"]), url.scheme?.lowercased() == "https",
-           let sha = (engine["sha256"] as? String)?.lowercased(), sha.count == 64,
-           let size = (engine["size"] as? NSNumber)?.int64Value, size > 0, size < 64 << 20 {
-            let offer = AIEngine.Offer(version: version, url: url, sha256: sha, size: size)
-            AIEngine.shared.offered = offer
-            AIEngine.shared.refreshState()
-        }
         return release
     }
 
@@ -531,9 +520,6 @@ final class Updater: ObservableObject {
         return data
     }
 
-    /// Office Commun's team, which signs their AI engine (AIEngine). This
-    /// fork's releases aren't theirs: see `signer`.
-    nonisolated static let team = "7BYKA895MC"
     nonisolated static let feedIdentifier = "com.officecommun.search.appcast"
 
     /// The certificate that signs this fork's releases, and with them its
@@ -741,21 +727,6 @@ private enum Swap {
         return requirement
     }
 
-    /// The requirement every Developer ID app from this team meets, the one
-    /// `codesign -d -r-` prints for a shipped Search: Apple's anchor, the
-    /// Developer ID intermediate (…6.2.6) and a Developer ID Application
-    /// leaf (…6.1.13), with this team in it, for this bundle id. Only the
-    /// AI engine, which is Office Commun's, is still checked against it.
-    static func developerID(team: String, identifier: String?) -> SecRequirement? {
-        let text = "anchor apple generic" + (identifier.map { " and identifier \"\($0)\"" } ?? "")
-            + " and certificate 1[field.1.2.840.113635.100.6.2.6]"
-            + " and certificate leaf[field.1.2.840.113635.100.6.1.13]"
-            + " and certificate leaf[subject.OU] = \"\(team)\""
-        var requirement: SecRequirement?
-        guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess else { return nil }
-        return requirement
-    }
-
     /// The certificate a bundle was signed with, as `signer` spells it: the
     /// SHA-1 of the leaf, in hex — nil for an ad-hoc signature, or none.
     private static func signer(of bundle: URL) -> String? {
@@ -804,10 +775,3 @@ private enum Swap {
     }
 }
 
-extension Updater {
-    /// Developer ID for this team, and the identifier when given: the same
-    /// requirement a release is checked against, for the AI engine too.
-    nonisolated static func developerID(team: String, identifier: String?) -> SecRequirement? {
-        Swap.developerID(team: team, identifier: identifier)
-    }
-}

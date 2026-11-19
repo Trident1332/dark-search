@@ -829,44 +829,6 @@ final class Preferences: ObservableObject {
     /// Whether the shared pins are in the rows: asked for, and with Spaces
     /// on. Off, they wait in pins.json for the switch to come back.
     var showsSharedPins: Bool { sharesPins && usesSpaces }
-    /// The AI add-on: summaries of the page and questions about it (see
-    /// AIAssist). Off unless asked for; nothing is sent until you ask.
-    @Published var ai: Bool {
-        didSet {
-            // Never on in a build without it (AI.shipped); a test run's
-            // bench may still turn it on to exercise the code.
-            if ai, !AI.shipped, !Store.testing { ai = false; return }
-            store.set(ai, forKey: "ai")
-        }
-    }
-    /// Where its answers come from. None until you choose.
-    @Published var aiProvider: AIProvider? {
-        didSet { store.set(aiProvider?.rawValue, forKey: "ai.provider") }
-    }
-    /// The model asked for at each provider, where it isn't the default.
-    @Published private(set) var aiModels: [String: String] {
-        didSet { store.set(aiModels, forKey: "ai.models") }
-    }
-
-    func aiModel(for provider: AIProvider) -> String {
-        let chosen = (aiModels[provider.rawValue] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return chosen.isEmpty ? provider.defaultModel : chosen
-    }
-
-    /// A model's name, and nothing that isn't one: no spaces, no key pasted
-    /// into the wrong field (which would go out in a request).
-    func setAIModel(_ model: String, for provider: AIProvider) {
-        let name = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        if provider == .openCode {
-            guard name.isEmpty || (try? OpenCodeAI.catalogue().contains(where: { $0.id == name })) == true else { return }
-            aiModels[provider.rawValue] = name
-            return
-        }
-        let looksLikeKey = ["sk-", "AIza", "AQ.", "gsk_", "hf_"].contains { name.hasPrefix($0) } || name.count > 100
-        guard name.isEmpty || (!looksLikeKey && name.range(of: #"^[A-Za-z0-9._:/@\-]+$"#, options: .regularExpression) != nil)
-        else { return }
-        aiModels[provider.rawValue] = name
-    }
 
     /// Two pages share one place in the tab row.
     /// Always on since the Settings rework (Drice, 24 Oct 2026): it only
@@ -1242,9 +1204,6 @@ final class Preferences: ObservableObject {
         let peek = store.object(forKey: "pins.peek") as? Bool
         let keepsSite = home == nil && peek == nil ? true : (home ?? false) || (peek ?? false)
         pinsGoHome = keepsSite
-        ai = AI.shipped && store.bool(forKey: "ai")
-        aiProvider = store.string(forKey: "ai.provider").flatMap(AIProvider.init(rawValue:))
-        aiModels = store.dictionary(forKey: "ai.models") as? [String: String] ?? [:]
         commandBar = store.bool(forKey: "commandbar")
         floatingNewTab = store.bool(forKey: "newtab.floating")
         launcher = store.bool(forKey: "launcher.on")
@@ -1321,6 +1280,12 @@ final class Preferences: ObservableObject {
         pageZoom = store.object(forKey: "pageZoom") as? Double ?? 1
         // Left behind by an assistant this browser no longer has.
         for key in ["mind.model", "mind.effort", "mind.acting", "mind.width", "mind.open"] {
+            store.removeObject(forKey: key)
+        }
+        // And by Ask AI, taken out with OSINT: its switch, provider, models
+        // and the notices each provider was shown.
+        for key in store.dictionaryRepresentation().keys
+        where key == "ai" || key == "ai.provider" || key == "ai.models" || key.hasPrefix("ai.told.") {
             store.removeObject(forKey: key)
         }
         proxyOn = store.bool(forKey: "proxy.on")

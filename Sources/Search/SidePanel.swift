@@ -36,9 +36,6 @@ enum SidePanelContent: Equatable {
     case downloads
     /// The dialer (Dialer.swift): the window's own page, kept with it.
     case dialer
-    /// A conversation about the explicitly captured page or selected quote.
-    case assistant
-    case osint
 }
 
 /// The sites offered in View › Side Panel, as they are typed: a short list,
@@ -93,7 +90,6 @@ extension Browser {
         else { return .notHere }
         let content = SidePanelContent.page(extensionID: context.uniqueIdentifier, url: url, tab: tab)
         guard SidePanelPages.shared.load(url, from: context, in: self) else { return .noPanel }
-        if sidePanel == .assistant { closeAssistant() }
         if case .dialer = sidePanel { dialerPage?.setVisible(false) }
         if let tab { SidePanelPages.shared.bind(content, to: tab, in: self) }
         sidePanel = content
@@ -131,7 +127,6 @@ extension Browser {
             closeSidePanel()
             return true
         }
-        if sidePanel == .assistant { closeAssistant() }
         if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
         if case .dialer = sidePanel { dialerPage?.setVisible(false) }
         SidePanelPages.shared.loadSite(url, space: spaceID, in: self)
@@ -190,7 +185,6 @@ extension Browser {
     /// The window went to another space: the site comes again, signed in as
     /// that space is.
     func sitePanelFollowsSpace() {
-        if sidePanel == .assistant { closeAssistant(); return }
         guard case .site(let first, let space) = sidePanel, space != spaceID else { return }
         let url = SidePanelPages.shared.siteArrived(in: self) ?? first
         SidePanelPages.shared.loadSite(url, space: spaceID, in: self)
@@ -200,8 +194,6 @@ extension Browser {
     /// Closed: an extension's page is let go, as Chrome does. The dialer's
     /// stays, signed in, but a call in progress ends with the panel.
     func closeSidePanel() {
-        if sidePanel == .osint { osint.stop() }
-        if sidePanel == .assistant { closeAssistant() }
         if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
         if case .dialer = sidePanel { dialerPage?.setVisible(false) }
         SidePanelPages.shared.drop(in: self)
@@ -312,7 +304,7 @@ final class SidePanelPages: NSObject {
                 if #available(macOS 15.4, *), let context = Extensions.shared.contexts[id] {
                     _ = load(url, from: context, in: browser)
                 }
-            case .dialer, .assistant, .osint, .downloads:
+            case .dialer, .downloads:
                 // Its page takes no route of the proxy's: nothing to make again.
                 break
             }
@@ -698,12 +690,6 @@ struct SidePanelView: View {
             }
         case .dialer:
             DialerPanelView(browser: browser)
-        case .osint:
-            OSINTPanel(browser:browser,session:browser.osint)
-        case .assistant:
-            if let assistant = browser.assisting {
-                AssistantPanel(browser: browser, assistant: assistant).id(assistant.id)
-            }
         case .downloads:
             // As tall as the panel, as its list is in a tab.
             DownloadsPanel(browser: browser, loot: browser.loot, compact: true,

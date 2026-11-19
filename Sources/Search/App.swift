@@ -180,7 +180,6 @@ struct SearchApp: App {
                     Button(browser.dialerShown ? "Close Dialer" : "Show Dialer") { browser.toggleDialer() }
                         .shortcut("view.dialer")
                 }
-                Button("Show OSINT") { browser.showOSINT() }
                 // Websites in the side panel, only once they are on
                 // (Settings › General).
                 if browser.prefs.sitesInPanel {
@@ -210,16 +209,6 @@ struct SearchApp: App {
                         set: { _ in browser.pauseDusk() }
                     ))
                     .shortcut("view.duskPause")
-                }
-                // The AI add-on's, only once it is on (Settings › AI).
-                if browser.prefs.ai {
-                    Divider()
-                    Button("Summarize Page") { browser.summarizePage() }
-                        .shortcut("view.summarize")
-                        .disabled(!(browser.active?.isWeb ?? false))
-                    Button("Ask About This Page") { browser.askAboutPage() }
-                        .shortcut("view.ask")
-                        .disabled(!(browser.active?.isWeb ?? false))
                 }
                 Divider()
                 // Only once it is on (Settings › Browsing › Pages).
@@ -909,11 +898,7 @@ struct ContentView: View {
             .onChange(of: browser.fieldShowing) { _, showing in
                 if showing {
                     DispatchQueue.main.async {
-                        // A cached blank-tab conversation brings its own
-                        // composer back. Merely showing the search beside it
-                        // must not take the keyboard away from that editor.
-                        guard browser.fieldShowing,
-                              browser.assisting?.standalone != true || browser.editing else { return }
+                        guard browser.fieldShowing else { return }
                         browser.askFocus()
                     }
                 } else {
@@ -1573,10 +1558,6 @@ struct ContentView: View {
                 browser.dropChoice()
                 return true
             }
-            if browser.assisting != nil {
-                browser.closeAssistant()
-                return true
-            }
             if browser.veiling {
                 browser.toggleHiding()
                 return true
@@ -1678,8 +1659,6 @@ struct ContentView: View {
         if event.keyCode == 48, !flags.contains(.command), !flags.contains(.option), !flags.contains(.control) {
             if browser.editingTab != nil { return true }
             // "red" then Tab: Reddit, in the field (SiteSearch.swift).
-            // A blank tab keeps its address field beside Ask AI; the panel's
-            // editor still owns Tab while it has the keyboard.
             if browser.fieldShowing, let window, event.window === window,
                ContentView.inAddressField(window) {
                 if !flags.contains(.shift), browser.lockSiteOffer() { return true }
@@ -1708,7 +1687,6 @@ struct ContentView: View {
             if let command = ShortcutStore.shared.customCommand(on: combo) {
                 if command.section == .spaces, !browser.prefs.usesSpaces { return false }
                 if Command.split.contains(command.id), !browser.prefs.splitView { return false }
-                if Command.ai.contains(command.id), !browser.prefs.ai { return false }
                 if Command.dusk.contains(command.id), !browser.prefs.darkensPages { return false }
                 if Command.archive.contains(command.id), browser.prefs.tabLife == .never { return false }
                 if Command.capture.contains(command.id), !browser.prefs.capturesPages { return false }

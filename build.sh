@@ -121,14 +121,6 @@ BINARY="$(swift build "${SWIFTFLAGS[@]}" --show-bin-path)/Search"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/$EXECUTABLE"
-# Ask AI's native-analysis launcher is separate code, signed below before the
-# app. It spawns only an inherited-sandbox Hopper child and addresses that PID.
-mkdir -p "$APP/Contents/Helpers"
-xcrun swiftc -Osize -target "$ARCH-apple-macosx$MINIMUM" \
-  Integrations/AskAI/HopperOfflineLauncher.swift \
-  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
-  -Xlinker "$PWD/Integrations/AskAI/HopperHelperInfo.plist" \
-  -o "$APP/Contents/Helpers/search-hopper-offline-launcher"
 # The binary says which SDK it was built with, and AppKit draws the app the
 # way that SDK's macOS drew it: built with the macOS 27 SDK, a Mac on 27 gets
 # 27's window buttons and controls; said to be built with an older one, it
@@ -221,7 +213,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHumanReadableCopyright</key><string>© Carter Doesn't Sleep</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppleScriptEnabled</key><true/>
-  <key>NSAppleEventsUsageDescription</key><string>Ask AI uses your existing Hopper installation to analyze only the file you select. Analysis runs locally with network access blocked.</string>
   <key>OSAScriptingDefinition</key><string>Search.sdef</string>
   <!-- Owning http and https is what sends a link clicked in Mail here.
        Appearing in Desktop & Dock → Default web browser also needs the
@@ -333,15 +324,11 @@ if [ -f "Search.provisionprofile" ]; then
 fi
 # The separately signed Tor engine carries its own minimal runtime and
 # licenses. Verify the pinned vendor archive before extracting any code.
-# Sign nested code first; --deep on the outer app would replace the helper's
-# signing options, breaking local identities without an Apple Team ID.
+# Sign nested code first; --deep on the outer app would replace its signing
+# options, breaking local identities without an Apple Team ID.
 python3 scripts/bundle-tor.py --arch "$ARCH" \
   --output "$APP/Contents/Resources/Tor" --identity "${IDENTITY:--}"
 if [ -n "$IDENTITY" ]; then
-  codesign --force --timestamp --options runtime \
-    --identifier com.officecommun.search.hopper-helper \
-    --entitlements Integrations/AskAI/HopperHelper.entitlements \
-    --sign "$IDENTITY" "$APP/Contents/Helpers/search-hopper-offline-launcher"
   codesign --force --timestamp --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$IDENTITY" "$APP"
@@ -350,9 +337,6 @@ else
   # A build that cannot sign at all is not a build: `|| true` here let one
   # through as though it had finished, leaving a bundle that would not open.
   # set -e stops it now, with codesign's own words above.
-  codesign --force --options runtime --identifier com.officecommun.search.hopper-helper \
-    --entitlements Integrations/AskAI/HopperHelper.entitlements \
-    --sign - "$APP/Contents/Helpers/search-hopper-offline-launcher"
   codesign --force --entitlements "$ENTITLEMENTS" --sign - "$APP"
   [ "$STEP" != "app" ] && echo "no Developer ID certificate found — the DMG will only open on this Mac" >&2
 fi
@@ -422,27 +406,6 @@ if [ -f NOTES.md ]; then
   NOTES="$(awk 'NF { printf "%s%s", (n++ ? " " : ""), $0; next } n { exit }' NOTES.md \
     | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 fi
-# The AI add-on's engine (engine.sh), when this release offers one: Apple
-# Silicon only for now. SEARCH_AI_ENGINE_VERSION names it — a number that
-# only goes up, as Search never takes a lower one — and the signed,
-# notarised binary in build/engine/ goes beside the other files, under ai/,
-# with its hash and size in the feed. The feed's own signature is what
-# vouches for them; Search then checks the engine's signature itself.
-AIBLOCK=""
-write_engine() {
-  local ENGINE="build/engine/search-ai-engine-arm64"
-  [ "$ARCH" = "arm64" ] && [ -n "${SEARCH_AI_ENGINE_VERSION:-}" ] || return 0
-  [[ "$SEARCH_AI_ENGINE_VERSION" =~ ^[0-9]+$ ]] || { echo "SEARCH_AI_ENGINE_VERSION is a whole number" >&2; exit 1; }
-  [ -f "$ENGINE" ] || { echo "$ENGINE is missing — ./engine.sh arm64 makes it" >&2; exit 1; }
-  codesign --verify --strict -R='anchor apple generic and identifier "com.officecommun.search.ai-engine" and certificate leaf[subject.OU] = "7BYKA895MC"' "$ENGINE" \
-    || { echo "$ENGINE isn't signed with the Developer ID as com.officecommun.search.ai-engine" >&2; exit 1; }
-  local FILE="search-ai-engine-arm64-$SEARCH_AI_ENGINE_VERSION"
-  mkdir -p "$OUT/ai"
-  cp "$ENGINE" "$OUT/ai/$FILE"
-  AIBLOCK=",
-  \"ai\": {\"engine\": {\"version\": $SEARCH_AI_ENGINE_VERSION, \"url\": \"$BASE/ai/$FILE\", \"sha256\": \"$(shasum -a 256 "$ENGINE" | cut -d' ' -f1)\", \"size\": $(stat -f%z "$ENGINE")}}"
-  echo "engine: $OUT/ai/$FILE"
-}
 write_appcast() {
   local DMGSHA
   DMGSHA="$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
@@ -451,7 +414,6 @@ write_appcast() {
   rm -f "$OUT/Search.zip" "$OUT/Search.dmg"
   ln "$ZIP" "$OUT/Search.zip"
   ln "$DMG" "$OUT/Search.dmg"
-  write_engine
   # These aliases keep their exact names on both GitHub and the website.
   # GitHub replaces spaces in uploaded names, so the branded local names
   # cannot be used as URL paths in a release feed.
@@ -464,7 +426,7 @@ write_appcast() {
   "sha256": "$SHA",
   "dmgSha256": "$DMGSHA",
   "notes": "$NOTES",
-  "minimumSystemVersion": "$MINIMUM"$AIBLOCK
+  "minimumSystemVersion": "$MINIMUM"
 }
 JSON
   echo "wrote: $OUT/appcast.json ($VERSION, $ARCH, build $BUILD)"

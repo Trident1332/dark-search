@@ -70,8 +70,8 @@ final class AddressCommandTests: XCTestCase {
         _ = NSApplication.shared
         let browser = Browser(record: WindowRecord())
         let prefs = browser.prefs
-        let saved = (prefs.commandBar, prefs.splitView, prefs.ai, prefs.bookmarksBar)
-        defer { (prefs.commandBar, prefs.splitView, prefs.ai, prefs.bookmarksBar) = saved }
+        let saved = (prefs.commandBar, prefs.splitView, prefs.bookmarksBar)
+        defer { (prefs.commandBar, prefs.splitView, prefs.bookmarksBar) = saved }
         prefs.commandBar = true
 
         // By the words of the name, in any order, from their start.
@@ -97,8 +97,7 @@ final class AddressCommandTests: XCTestCase {
         prefs.splitView = true
         XCTAssertTrue(AddressCommand.listed("split", in: browser).contains(.menu("tabs.split")))
         XCTAssertFalse(AddressCommand.listed("swap pages", in: browser).contains(.menu("tabs.swapSplit")), "no pair on screen")
-        prefs.ai = false
-        XCTAssertTrue(AddressCommand.listed("summarize", in: browser).isEmpty)
+        XCTAssertTrue(AddressCommand.listed("summarize", in: browser).isEmpty, "Summarize Page is gone with Ask AI")
         let captures = prefs.capturesPages
         prefs.capturesPages = false
         XCTAssertFalse(AddressCommand.listed("capture", in: browser).contains(.menu("view.capture")), "Capture pages off")

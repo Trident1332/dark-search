@@ -76,7 +76,6 @@ final class Browser: NSObject, ObservableObject {
                 DispatchQueue.main.async { held.forEach { $0.present() } }
             }
             guard oldValue != activeID else { return }
-            assistantFollowsActiveTab()
             cancelChosenLogin()
             invalidateAccountField()
             cameFrom = (oldValue, ProcessInfo.processInfo.systemUptime)
@@ -493,13 +492,8 @@ final class Browser: NSObject, ObservableObject {
     // MARK: - looking for something on the page
 
     @Published var finding = false
-    /// The AI panel's conversation about the page, while it is open.
-    @Published var assisting: Assistant?
     let imageLookup = ImageLookup()
     let screenshot = ScreenshotController()
-    let osint = OSINTSession()
-    /// Conversations stay in memory with their tabs while another tab is up.
-    var assistantSessions: [Tab.ID: Assistant] = [:]
     /// The side panel, beside the page (see SidePanel.swift): up or
     /// not, and what is in it.
     @Published var sidePanelShown = false
@@ -509,10 +503,7 @@ final class Browser: NSObject, ObservableObject {
     var dialerPage: DialerPage?
     /// The Settings page it opens on next.
     var settingsPage: SettingsPanel.Page {
-        get {
-            let page = SettingsPanel.Page.named( Store.settings.string(forKey: "settings.page") ?? "") ?? .general
-            return page == .ai && !AI.shipped ? .general : page
-        }
+        get { SettingsPanel.Page.named(Store.settings.string(forKey: "settings.page") ?? "") ?? .general }
         set { Store.settings.set(newValue.rawValue, forKey: "settings.page") }
     }
     /// What is looked for and what the page answered, kept apart in
@@ -3859,11 +3850,8 @@ final class Browser: NSObject, ObservableObject {
     func closeAll() {
         retired = true
         screenshot.close()
-        osint.stop()
-        tabs.forEach { $0.aiInspection.stop() }
         cancelChosenLogin()
         invalidateAccountField()
-        closeAllAssistants()
         dropDialer()
         cancelDisplay()
         cancelCapture()
@@ -4708,9 +4696,7 @@ final class Browser: NSObject, ObservableObject {
     /// ⌘W, or the cross on the tab. Closing the last one leaves a blank tab
     /// behind; closing that blank tab closes the window.
     func close(_ tab: Tab) {
-        tab.aiInspection.stop()
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-        closeAssistant(for: tab.id)
         cancelChosenLogin(in: tab.id)
         invalidateAccountField(in: tab.id)
         // Its peek, hidden or not, goes with it.
@@ -5345,9 +5331,7 @@ final class Browser: NSObject, ObservableObject {
 
     /// Out of this row, not closed: it is on its way to another window.
     private func detach(_ tab: Tab) {
-        tab.aiInspection.stop()
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-        closeAssistant(for: tab.id)
         // Its peek, hidden or not, doesn't follow it to another window.
         if peekFrom == tab.id { closePeek() }
         if let web = tab.built { cancelDisplay(for: web) }
@@ -5931,9 +5915,7 @@ final class Browser: NSObject, ObservableObject {
     /// the site: to the eye, the page went there. The other way round too:
     /// an extension sending a website's tab to one of its own pages.
     func replace(_ tab: Tab, going url: URL) {
-        tab.aiInspection.stop()
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-        closeAssistant(for: tab.id)
         // A private tab stays private, and keeps its own sign-ins when it
         // had them; an extension's page it showed was in that extension's
         // store, so going back to the web takes a new private one.
@@ -6794,7 +6776,6 @@ final class Browser: NSObject, ObservableObject {
             self?.downloadImage(at: url, from: web, askWhere: true)
         }
         tab.onCall = { [weak self] _, number in self?.call(number) }
-        tab.onAskAI = { [weak self] tab, selection in self?.askAboutPage(from: tab, selection: selection) }
         tab.searchName = { [weak self] in self.map { $0.prefs.engine.name(custom: $0.prefs.customEngine) } }
         tab.onSearch = { [weak self] tab, text in
             guard let self, let url = self.searchURL(for: text) else { return }
@@ -6820,7 +6801,6 @@ final class Browser: NSObject, ObservableObject {
         tab.onSignIn = { [weak self] tab in self?.continueChosenLogin(in: tab) }
         tab.onExplicitNavigation = { [weak self] tab in
             self?.cancelChosenLogin(in: tab.id)
-            if self?.assistantSessions[tab.id]?.followsPageNavigation != true { self?.closeAssistant(for: tab.id) }
         }
         tab.onSignInName = { [weak self] tab, user in
             guard let self, let choice = chosenLogin ?? loginFill, choice.tab == tab.id else { return }
@@ -6882,9 +6862,6 @@ final class Browser: NSObject, ObservableObject {
                 guard let self else { return }
                 if let tab {
                     invalidateAccountField(in: tab.id)
-                    if let assistant = assistantSessions[tab.id], !assistant.followsPageNavigation, assistant.sourceURL != address {
-                        closeAssistant(for: tab.id)
-                    }
                     if let choice = chosenLogin ?? loginFill, choice.tab == tab.id, LoginOrigin(address) != choice.origin {
                         cancelChosenLogin(in: tab.id)
                     }
@@ -7739,8 +7716,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // An extension's OAuth sign-in coming back: the address is the
         // answer, handed to the extension, and never loaded.
         if ExtensionAuth.intercept(url, browser: self, from: webView)
-            || ExtensionAuth.handOver(url, mainFrame: action.targetFrame?.isMainFrame == true, browser: self, from: webView)
-            || AISignIn.intercept(url, mainFrame: action.targetFrame?.isMainFrame == true, in: tab(for: webView), browser: self) {
+            || ExtensionAuth.handOver(url, mainFrame: action.targetFrame?.isMainFrame == true, browser: self, from: webView) {
             decisionHandler(.cancel)
             return
         }
@@ -8634,10 +8610,6 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         Dialogs.invalidateTrust(for: webView)
         if let tab = anyTab(for: webView) {
             invalidateAccountField(in: tab.id)
-            tab.aiInspection.navigated(to: webView.url)
-            if assistantSessions[tab.id]?.followsPageNavigation != true || ((tab.shy || tab.usesTor || !tab.store.isPersistent) && assistantSessions[tab.id]?.provider.isLocal != true) || !["http", "https"].contains(webView.url?.scheme?.lowercased() ?? "") {
-                closeAssistant(for: tab.id)
-            }
         }
         if websitePopup { cancelCapture() }
         popupTab(for: webView)?.popupGesture.clear()
