@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // Settings › Proxy, the parts that aren't a switch: the server's fields,
@@ -12,7 +13,7 @@ import SwiftUI
 /// route: the flat flag of where sites see you from once the proxy is
 /// reached (Flag.swift), a green lock while the place isn't known, with
 /// where sites see you on hover; the network mark until then; amber while
-/// the proxy isn't answering. A click opens Settings › Proxy.
+/// the proxy isn't answering. A click opens its menu (ProxyMenu).
 struct ProxySign: View {
     @ObservedObject var browser: Browser
     @ObservedObject var tab: Tab
@@ -47,18 +48,10 @@ struct ProxySign: View {
 
     var body: some View {
         if shown {
-            Menu {
-                ForEach(prefs.savedProxies) { connection in
-                    Button { prefs.selectProxy(connection.id,connect:true) } label: {
-                        if proxy.setup.on,prefs.selectedProxyID==connection.id { Label(connection.title,systemImage:"checkmark") }
-                        else { Text(connection.title) }
-                    }
-                }
-                if !prefs.savedProxies.isEmpty { Divider() }
-                Button("Turn off proxy") { prefs.proxyOn=false }.disabled(!prefs.proxyOn)
-                Divider()
-                Button("Proxy settings…") { _ = browser.show(InternalPage(.settings, SettingsPanel.Page.proxy.rawValue)) }
-            } label: {
+            // A plain button, its menu an NSMenu of its own: as a SwiftUI
+            // Menu's label the mark went into an AppKit pop-up button, which
+            // draws no Canvas, so the flag (Flag.swift) never showed.
+            Button { ProxyMenu.show(for: browser) } label: {
                 Group {
                     if tab.usesTor {
                         Text("Tor").font(.system(size: 9, weight: .medium))
@@ -79,7 +72,7 @@ struct ProxySign: View {
                                 in: RoundedRectangle(cornerRadius: 4, style: .continuous))
                     .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .buttonStyle(.plain)
             .onHover { hovering = $0 }
             .help(words)
             .accessibilityLabel(words)
@@ -88,6 +81,50 @@ struct ProxySign: View {
             .animation(Motion.settle, value: connected)
             .transition(.scale(scale: 0.5).combined(with: .opacity))
         }
+    }
+}
+
+/// The sign's menu: the saved connections, the one in use ticked, Turn off
+/// proxy, and Proxy settings…, at the pointer as the profile badge's is.
+@MainActor
+enum ProxyMenu {
+    private final class Action: NSObject {
+        let run: () -> Void
+        init(_ run: @escaping () -> Void) { self.run = run }
+        @objc func fire() { run() }
+    }
+    private static var actions: [Action] = []
+
+    private static func item(_ title: String, checked: Bool = false, enabled: Bool = true,
+                             _ run: @escaping () -> Void) -> NSMenuItem {
+        let action = Action(run)
+        actions.append(action)
+        let item = NSMenuItem(title: title, action: #selector(Action.fire), keyEquivalent: "")
+        item.target = action
+        item.state = checked ? .on : .off
+        item.isEnabled = enabled
+        return item
+    }
+
+    static func show(for browser: Browser) {
+        actions = []
+        let prefs = Shared.prefs
+        let on = Proxy.shared.setup.on
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for connection in prefs.savedProxies {
+            let id = connection.id
+            menu.addItem(item(connection.title, checked: on && prefs.selectedProxyID == id) {
+                Shared.prefs.selectProxy(id, connect: true)
+            })
+        }
+        if !prefs.savedProxies.isEmpty { menu.addItem(.separator()) }
+        menu.addItem(item("Turn off proxy", enabled: prefs.proxyOn) { Shared.prefs.proxyOn = false })
+        menu.addItem(.separator())
+        menu.addItem(item("Proxy settings…") { [weak browser] in
+            _ = browser?.show(InternalPage(.settings, SettingsPanel.Page.proxy.rawValue))
+        })
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 }
 
