@@ -49,6 +49,18 @@ final class FetchEntry: ObservableObject, Identifiable {
     static func replayable(_ request: URLRequest) -> Bool {
         ["GET", "HEAD"].contains((request.httpMethod ?? "GET").uppercased())
             && request.httpBody == nil && request.httpBodyStream == nil
+            && !pageMade(request)
+    }
+
+    /// A file the page made itself, in memory, behind a blob: address: an
+    /// editor's Export, a picture drawn on a canvas. There is no server to
+    /// ask again and nothing to resume from, and the page may let go of it
+    /// the moment it has handed it over: asked a second time, WebKit says
+    /// "WebKitBlobResource error 1" and writes nothing. So it is neither
+    /// paused nor tried again from its row; the page is where another comes
+    /// from.
+    static func pageMade(_ request: URLRequest) -> Bool {
+        request.url?.scheme?.lowercased() == "blob"
     }
 
     // These are deliberately in-memory only. The store carries the cookies
@@ -169,7 +181,8 @@ final class FetchEntry: ObservableObject, Identifiable {
         } else {
             // WKDownload explicitly returns nil when its server cannot
             // produce resume data. Retry stays, where it may.
-            errorDescription = "The server doesn't let this download pause."
+            errorDescription = request.map(Self.pageMade) == true
+                ? Self.pageMadeGone : "The server doesn't let this download pause."
             state = .failed
         }
     }
@@ -226,7 +239,12 @@ final class FetchEntry: ObservableObject, Identifiable {
         totalBytes = 0
     }
 
-    private static func reason(for error: Error) -> String {
+    /// WebKit's own word for a blob: it could not read, when the page had
+    /// already let go of it.
+    static let pageMadeGone = "The page no longer has this file. Save it from the page again."
+
+    static func reason(for error: Error) -> String {
+        if (error as NSError).domain == "WebKitBlobResource" { return pageMadeGone }
         let text = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? "The download failed for an unknown reason." : text
     }
@@ -276,6 +294,9 @@ final class Fetches: ObservableObject {
             entry.failed(URLError(.cancelled), resumeData: entry.resumeData)
         }
         for item in Array(running.values) where item.stopAction == nil {
+            // A page's own file never went through the proxy, and stopped
+            // it could not be started again (see FetchEntry.pageMade).
+            if item.entry?.request.map(FetchEntry.pageMade) == true { continue }
             guard let entry = item.entry,
                   let operation = beginStop(entry, action: item.listed ? .pause : .cancel) else { continue }
             operation.download.cancel { [weak self] resumeData in

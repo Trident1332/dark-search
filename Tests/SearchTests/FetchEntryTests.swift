@@ -54,6 +54,30 @@ final class FetchEntryTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(Fetches().beginResume(entry)?.resumeData), Data([1, 2, 3]))
     }
 
+    /// An editor's Export: a blob: address, which the page may already have
+    /// let go of. Asked again it only fails, so its row offers neither.
+    func testAPagesOwnFileIsNeitherPausedNorTriedAgain() async throws {
+        let webView = makeWebView()
+        let request = URLRequest(url: URL(string: "blob:http://localhost:5173/6a1f6c0e-0d8b-4c0e-9a51-2f6d1c1b7e11")!)
+        let entry = FetchEntry(name: "Mailify.png", request: request, webView: webView)
+        XCTAssertFalse(entry.canPause)
+
+        entry.failed(NSError(domain: "WebKitBlobResource", code: 1), resumeData: nil)
+        XCTAssertEqual(entry.state, .failed)
+        XCTAssertEqual(entry.errorDescription, FetchEntry.pageMadeGone)
+        XCTAssertFalse(entry.canRetry)
+        XCTAssertFalse(entry.canResume)
+        XCTAssertNil(Fetches().beginRetry(entry, destination: { URL(fileURLWithPath: "/tmp/Mailify.png") }))
+
+        // Any other reason is said as it is, and a server's file is as before.
+        entry.failed(NSError(domain: NSCocoaErrorDomain, code: NSFileWriteOutOfSpaceError), resumeData: nil)
+        XCTAssertNotEqual(entry.errorDescription, FetchEntry.pageMadeGone)
+        let served = FetchEntry(name: "a.png", request: URLRequest(url: URL(string: "https://example.test/a.png")!), webView: webView)
+        XCTAssertTrue(served.canPause)
+        served.failed(NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut), resumeData: nil)
+        XCTAssertTrue(served.canRetry)
+    }
+
     func testPauseWithoutResumeDataBecomesRetryableWithVisibleReason() async throws {
         let webView = makeWebView()
         let request = URLRequest(url: URL(string: "https://example.test/archive.zip")!)
