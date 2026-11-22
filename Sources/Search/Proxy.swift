@@ -710,7 +710,7 @@ final class Proxy: ObservableObject {
                     acceptingRevision = revision
                 }
             }
-            let stopped = await contentTransition?.value ?? true
+            let stopped = await contentStopped()
             guard !Task.isCancelled, revision == acceptingRevision else { return }
             guard stopped || !setup.persistent else {
                 connectionFailed("Dark Search could not stop the previous browser processes. Restart Dark Search to reconnect")
@@ -774,6 +774,12 @@ final class Proxy: ObservableObject {
     private func suspendContent() {
         guard !changingContent else { return }
         changingContent = true
+        stopContent()
+    }
+
+    /// Every page closed and its processes asked to end; `contentTransition`
+    /// says whether they did.
+    private func stopContent() {
         var pools = [Web.pool] + ProxyTimeZone.pools + Array(usedPools.values)
         for tab in Tab.proxyTabs.allObjects {
             if let view = tab.built { pools.append(view.configuration.processPool) }
@@ -785,6 +791,23 @@ final class Proxy: ObservableObject {
         }
         // Do not terminate the network process: that destroys private stores.
         contentTransition = Task { await ProxyTimeZone.restartWorkers(in: pools) }
+    }
+
+    /// Whether the pages of the last route are gone, before the new one
+    /// opens. A stop that didn't take is asked for once more here: as the
+    /// app starts, with a window's tabs and the extensions all coming up at
+    /// once, a process can appear after the last look. Kept as it was, that
+    /// one answer failed every later check, the one every fifteen seconds
+    /// and Try again alike, and only turning the proxy off and on began
+    /// another.
+    private func contentStopped() async -> Bool {
+        guard let first = contentTransition else { return true }
+        if await first.value { return true }
+        guard changingContent, contentTransition == first else {
+            return await contentTransition?.value ?? true
+        }
+        stopContent()
+        return await contentTransition?.value ?? true
     }
 
     private func resumeContent() {
@@ -806,7 +829,7 @@ final class Proxy: ObservableObject {
         let expected = revision
         Task { [weak self] in
             guard let self else { return }
-            let stopped = await self.contentTransition?.value ?? true
+            let stopped = await self.contentStopped()
             guard self.revision == expected else { return }
             if self.setup.persistent {
                 guard WKPreferences().responds(to: NSSelectorFromString("_setPeerConnectionEnabled:")) else {
