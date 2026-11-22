@@ -605,6 +605,46 @@ final class DialerIntegrationTests: XCTestCase {
         try await until { page.ready && page.status.text == "Not configured" }
     }
 
+    func testRouteStoppedForAnUnreadableLoginIsPreparedAgainOnceItReads() async throws {
+        final class Login: @unchecked Sendable { var readable = false }
+        let login = Login()
+        ConnectionPasswords.useBackendForTesting(.init(
+            read: { _ in
+                guard login.readable else { throw ConnectionVault.Failure.protectionUnavailable }
+                return .value("made-up-seat-password")
+            }, save: { _, _ in }, forget: { _ in }), enabled: true)
+        defer { ConnectionPasswords.useBackendForTesting(nil) }
+        let prefs = Shared.prefs
+        prefs.proxyHost = "127.0.0.1"
+        prefs.proxyPort = "9"
+        prefs.proxyBlocks = false
+        prefs.proxyOn = true
+        prefs.dialerWSS = "wss://phone.example.invalid:7443"
+        prefs.dialerDomain = "phone.example.invalid"
+        prefs.dialerUser = "1001"
+        prefs.dialerOn = true
+        let browser = browser()
+        XCTAssertTrue(browser.showDialer())
+        let page = try XCTUnwrap(browser.dialerPage)
+        try await until { page.routeAwaitsLogin && page.status.text == DialerPage.loginUnreadable }
+
+        // Still locked: nothing is rebuilt, and the wait goes on.
+        let stuck = page.web
+        page.loginMayBeReadable()
+        XCTAssertTrue(page.web === stuck)
+        XCTAssertTrue(page.routeAwaitsLogin)
+
+        login.readable = true
+        page.loginMayBeReadable()
+        XCTAssertFalse(page.web === stuck)
+        XCTAssertFalse(page.routeAwaitsLogin)
+        // Port 9 answers nothing, so the route ends on the proxy's failure, not the login's.
+        try await until { page.status.kind == "err" && page.status.text != DialerPage.loginUnreadable }
+        XCTAssertFalse(page.routeAwaitsLogin)
+        page.loginMayBeReadable()
+        XCTAssertFalse(page.routeAwaitsLogin)
+    }
+
     func testEvenAnOptionalProxyTransitionImmediatelyRetiresTheDirectPage() async throws {
         let (browser, page) = try await readyDialer()
         Shared.prefs.proxyHost = "127.0.0.1"

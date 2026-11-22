@@ -46,6 +46,7 @@ in [ROADMAP.md](ROADMAP.md).
 
 ### Fixed
 
+- The dialer connects again on its own after the Mac wakes locked. With a proxy on, a call route prepared before the Mac was unlocked couldn't read the saved phone-server login and stayed stopped until Search was restarted; it is now prepared again when the screen unlocks or Search comes to the front, and its message says to unlock the Mac or enter the password again, where it used to ask for an access nothing in Settings could give.
 - A tab's loading wheel no longer turns for ever on a page that loaded out of sight — a tab opened behind, a window covered or on another desktop. WebKit holds such a page's load for autoplaying videos it leaves half loaded (Discord's front page among them) and went on calling it loading; the tab now counts it as loaded once the document is in and nothing more has arrived for eight seconds, which also lets it sleep and fetch its icon.
 - Copy Image reads network chunks with the existing 50 MB bound, cookie-free sessions, authenticated proxy routing and Tor isolation, avoiding byte-by-byte accumulation.
 - Repeated page-process crashes stop after two automatic recoveries per minute and show a fresh Try again action; deferred recovery respects the failure barrier.

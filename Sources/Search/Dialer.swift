@@ -727,6 +727,12 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     private var routeTask: Task<Void, Never>?
     private var routeRenewal: Task<Void, Never>?
     private var relayTunnel: DialerProxyTunnel?
+    /// The route stopped because the saved login couldn't be read, as it
+    /// can't while the Mac is locked. It is tried again once it can be.
+    private(set) var routeAwaitsLogin = false
+    private var loginObservers: [(center: NotificationCenter, token: NSObjectProtocol)] = []
+
+    static let loginUnreadable = "The saved phone-server login couldn't be read. Unlock your Mac, or enter the password again in Dialer settings"
 
     init(browser: Browser) {
         self.browser = browser
@@ -734,6 +740,41 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
         super.init()
         attachWeb()
         Dialer.shared.track(self)
+        watchForLogin()
+        prepareCallRoute()
+        load()
+    }
+
+    /// The login is sealed to an unlocked Mac and is read without asking, so
+    /// a route prepared at wake, before the password is typed, finds nothing.
+    /// Unlocking the screen and coming back to Search are when it can be read.
+    private func watchForLogin() {
+        let unlocked = DistributedNotificationCenter.default()
+        loginObservers.append((unlocked, unlocked.addObserver(
+            forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.loginMayBeReadable()
+                    // The key can follow the screen by a moment.
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(for: .seconds(2))
+                        self?.loginMayBeReadable()
+                    }
+                }
+            }))
+        let app = NotificationCenter.default
+        loginObservers.append((app, app.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.loginMayBeReadable() }
+            }))
+    }
+
+    /// Prepares the route again, only if it stopped for the login and the
+    /// login reads now: a password that is really gone leaves the page as it is.
+    func loginMayBeReadable() {
+        guard routeAwaitsLogin, !released, status.state == "idle", Proxy.shared.setup.routes else { return }
+        let setup = Dialer.shared.setup
+        guard setup.complete, let password = DialerPassword.read(setup), !password.isEmpty else { return }
+        replaceWeb()
         prepareCallRoute()
         load()
     }
@@ -787,6 +828,7 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     private func prepareCallRoute() {
         routeGeneration += 1
         let generation = routeGeneration
+        routeAwaitsLogin = false
         routeTask?.cancel()
         routeRenewal?.cancel()
         relayTunnel?.close()
@@ -810,7 +852,7 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
             do {
                 let endpoint = try DialerRelayEndpoint(wss: setup.trimmedWSS)
                 guard let password = DialerPassword.read(setup), !password.isEmpty else {
-                    throw DialerRelayError.message("Allow access to your saved phone-server login in Dialer settings")
+                    throw DialerRelayError.message(Self.loginUnreadable)
                 }
                 let ticket = try await DialerRelayRequest.fetch(endpoint: endpoint, user: setup.trimmedUser,
                                                                password: password, proxy: proxy)
@@ -841,6 +883,7 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
                 let message = (error as? DialerRelayError)?.localizedDescription
                     ?? "The protected call route couldn't connect. Check Proxy settings and try the dialer again."
                 self.failCallRoute(message)
+                self.routeAwaitsLogin = message == Self.loginUnreadable
             }
         }
     }
@@ -931,6 +974,8 @@ final class DialerPage: NSObject, ObservableObject, WKNavigationDelegate, WKUIDe
     private func finishRelease() {
         guard !closed else { return }
         closed = true
+        loginObservers.forEach { $0.center.removeObserver($0.token) }
+        loginObservers.removeAll()
         ProxyTimeZone.close(web)
         web.configuration.userContentController.removeScriptMessageHandler(forName: DialerPage.handler, contentWorld: .page)
         web.navigationDelegate = nil
