@@ -927,6 +927,10 @@ final class Preferences: ObservableObject {
     @Published var proxyHidesCalls: Bool {
         didSet { store.set(proxyHidesCalls, forKey: "proxy.calls"); routeProxy() }
     }
+    /// A dialer extension's phone server, reached without the proxy.
+    @Published var proxyPhoneLine: String {
+        didSet { store.set(proxyPhoneLine, forKey: "proxy.phoneLine"); routeProxy() }
+    }
     @Published var proxyMatchesTimeZone: Bool {
         didSet { store.set(proxyMatchesTimeZone, forKey: "proxy.timeZone"); routeProxy() }
     }
@@ -934,61 +938,6 @@ final class Preferences: ObservableObject {
     @Published var onionEnabled: Bool {
         didSet { store.set(onionEnabled, forKey: "onion.on"); Onion.shared.take(enabled: onionEnabled) }
     }
-
-    // MARK: - Settings › Dialer (see Dialer.swift)
-
-    /// Phone numbers on pages can be called, from the side panel. Off
-    /// unless asked for.
-    @Published var dialerOn: Bool {
-        didSet { store.set(dialerOn, forKey: "dialer.on"); routeDialer() }
-    }
-    /// The phone server's WebSocket address and SIP domain, as typed.
-    @Published var dialerWSS: String {
-        didSet { store.set(dialerWSS, forKey: "dialer.wss"); routeDialer() }
-    }
-    @Published var dialerDomain: String {
-        didSet { store.set(dialerDomain, forKey: "dialer.domain"); routeDialer() }
-    }
-    /// The seat alone: the password is the keychain's (DialerPassword).
-    @Published var dialerUser: String {
-        didSet { store.set(dialerUser, forKey: "dialer.user"); routeDialer() }
-    }
-    /// The country numbers written without a code belong to.
-    @Published var dialerRegion: String {
-        didSet { store.set(dialerRegion, forKey: "dialer.region"); routeDialer() }
-    }
-    /// A number handed over is called at once.
-    @Published var dialerAutodial: Bool {
-        didSet { store.set(dialerAutodial, forKey: "dialer.autodial"); routeDialer() }
-    }
-    /// Exact origins whose pages may use the dialer.
-    @Published var dialerSites: [String] {
-        didSet {
-            let normalized = DialerOrigin.normalized(dialerSites)
-            if dialerSites != normalized { dialerSites = normalized; return }
-            store.set(dialerSites, forKey: "dialer.sites")
-            routeDialer()
-        }
-    }
-
-    @Published var dialerNumeroUS: String {
-        didSet { store.set(dialerNumeroUS, forKey: "dialer.numero.us"); routeDialer() }
-    }
-    @Published var dialerNumeroCA: String {
-        didSet { store.set(dialerNumeroCA, forKey: "dialer.numero.ca"); routeDialer() }
-    }
-    @Published var dialerTelicallUK: String {
-        didSet { store.set(dialerTelicallUK, forKey: "dialer.telicall.uk"); routeDialer() }
-    }
-
-    /// The settings as the dialer takes them.
-    var dialerSetup: DialerSetup {
-        DialerSetup(on: dialerOn, wss: dialerWSS, domain: dialerDomain, user: dialerUser,
-                    region: dialerRegion, autodial: dialerAutodial, sites: dialerSites,
-                    numeroUS: dialerNumeroUS, numeroCA: dialerNumeroCA, telicallUK: dialerTelicallUK)
-    }
-
-    private func routeDialer() { Dialer.shared.take(dialerSetup) }
 
     /// The port as a number: 1 to 65535, or nil for anything else typed.
     var proxyPortNumber: UInt16? {
@@ -1000,7 +949,7 @@ final class Preferences: ObservableObject {
     /// The settings as Proxy takes them.
     var proxySetup: ProxySetup {
         ProxySetup(on: proxyOn, kind: proxyKind, host: proxyHost, port: proxyPortNumber,
-                   signsIn: proxySignsIn, user: proxyUser, bypass: proxyBypass, profiles: proxyProfiles,
+                   signsIn: proxySignsIn, user: proxyUser, bypass: proxyBypass, phoneLine: proxyPhoneLine, profiles: proxyProfiles,
                    blocks: proxyBlocks, shows: proxyShows, hidesCalls: proxyHidesCalls,
                    matchesTimeZone: proxyMatchesTimeZone)
     }
@@ -1299,19 +1248,9 @@ final class Preferences: ObservableObject {
         proxyBlocks = store.object(forKey: "proxy.blocks") as? Bool ?? true
         proxyShows = store.object(forKey: "proxy.shows") as? Bool ?? true
         proxyHidesCalls = store.object(forKey: "proxy.calls") as? Bool ?? true
+        proxyPhoneLine = store.string(forKey: "proxy.phoneLine") ?? ""
         proxyMatchesTimeZone = store.object(forKey: "proxy.timeZone") as? Bool ?? true
         onionEnabled = store.object(forKey: "onion.on") as? Bool ?? true
-        dialerOn = store.bool(forKey: "dialer.on")
-        dialerWSS = store.string(forKey: "dialer.wss") ?? ""
-        dialerDomain = store.string(forKey: "dialer.domain") ?? ""
-        dialerUser = store.string(forKey: "dialer.user") ?? ""
-        dialerRegion = store.string(forKey: "dialer.region") ?? "GB"
-        dialerAutodial = store.object(forKey: "dialer.autodial") as? Bool ?? true
-        dialerSites = DialerOrigin.normalized(store.stringArray(forKey: "dialer.sites") ?? Dialer.defaultSites)
-        dialerNumeroUS = store.string(forKey: "dialer.numero.us") ?? ""
-        dialerNumeroCA = store.string(forKey: "dialer.numero.ca") ?? ""
-        dialerTelicallUK = store.string(forKey: "dialer.telicall.uk") ?? ""
-        store.set(dialerSites, forKey: "dialer.sites")
         let legacy=SavedProxy(name:"Current proxy",setup:proxySetup,port:proxyPort)
         savedProxyLibrary=SavedProxyLibrary.load(store.data(forKey:SavedProxyLibrary.key),legacy:legacy)
         if let id=selectedProxyID,let selected=savedProxies.first(where: { $0.id==id }) {
@@ -1328,7 +1267,31 @@ final class Preferences: ObservableObject {
         Proxy.shared.take(proxySetup)
         Proxy.shared.apply(to: Store.websites, profile: Profile.personalID)
         Onion.shared.take(enabled: onionEnabled)
-        Dialer.shared.take(dialerSetup)
+        forgetDialer()
+    }
+
+    /// The dialer is gone (23 Nov 2026). Its settings and call history, and the seat's
+    /// password, are private things with nothing left to use them, so they
+    /// go the first time a build without the dialer starts.
+    private func forgetDialer() {
+        // Every line of it, the page's own included: its Recents were kept
+        // here too, as dialer.page.history.
+        let keys = store.dictionaryRepresentation().keys.filter { $0.hasPrefix("dialer.") }
+        guard !keys.isEmpty else { return }
+        let user = (store.string(forKey: "dialer.user") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let domain = (store.string(forKey: "dialer.domain") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        keys.forEach(store.removeObject(forKey:))
+        guard !Store.testing else { return }
+        let service = Store.world.map { "Search Dialer (\($0))" } ?? "Search Dialer"
+        if !user.isEmpty {
+            ConnectionPasswords.forget(ConnectionPasswords.identity(kind: "dialer", components: [service, user, domain.lowercased()]))
+        }
+        // Off the main thread: the keychain can take its time, and launch
+        // doesn't wait for it.
+        DispatchQueue.global(qos: .utility).async {
+            _ = KeychainAccess.delete([kSecClass as String: kSecClassGenericPassword,
+                                       kSecAttrService as String: service] as CFDictionary)
+        }
     }
 
     /// The folder the settings file is in, watched for as long as the app

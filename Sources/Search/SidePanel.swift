@@ -34,8 +34,6 @@ enum SidePanelContent: Equatable {
     /// Downloads, for whoever chose it in Settings › Downloads › Open
     /// Downloads: the same list as its tab, beside every page.
     case downloads
-    /// The dialer (Dialer.swift): the window's own page, kept with it.
-    case dialer
 }
 
 /// The sites offered in View › Side Panel, as they are typed: a short list,
@@ -90,7 +88,6 @@ extension Browser {
         else { return .notHere }
         let content = SidePanelContent.page(extensionID: context.uniqueIdentifier, url: url, tab: tab)
         guard SidePanelPages.shared.load(url, from: context, in: self) else { return .noPanel }
-        if case .dialer = sidePanel { dialerPage?.setVisible(false) }
         if let tab { SidePanelPages.shared.bind(content, to: tab, in: self) }
         sidePanel = content
         sidePanelShown = true
@@ -128,7 +125,6 @@ extension Browser {
             return true
         }
         if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
-        if case .dialer = sidePanel { dialerPage?.setVisible(false) }
         SidePanelPages.shared.loadSite(url, space: spaceID, in: self)
         sidePanel = .site(url: url, space: spaceID)
         sidePanelShown = true
@@ -191,11 +187,9 @@ extension Browser {
         sidePanel = .site(url: url, space: spaceID)
     }
 
-    /// Closed: an extension's page is let go, as Chrome does. The dialer's
-    /// stays, signed in, but a call in progress ends with the panel.
+    /// Closed: an extension's page is let go, as Chrome does.
     func closeSidePanel() {
         if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
-        if case .dialer = sidePanel { dialerPage?.setVisible(false) }
         SidePanelPages.shared.drop(in: self)
         sidePanelShown = false
         sidePanel = nil
@@ -304,7 +298,7 @@ final class SidePanelPages: NSObject {
                 if #available(macOS 15.4, *), let context = Extensions.shared.contexts[id] {
                     _ = load(url, from: context, in: browser)
                 }
-            case .dialer, .downloads:
+            case .downloads:
                 // Its page takes no route of the proxy's: nothing to make again.
                 break
             }
@@ -349,9 +343,14 @@ final class SidePanelPages: NSObject {
         if let page = pages[key], page.web.url == url { return true }
         drop(in: browser)
         guard let configuration = context.webViewConfiguration else { return false }
+        // Preferences of its own, so what is set here reaches no other page
+        // of the extension's configuration.
+        if let own = configuration.preferences.copy() as? WKPreferences { configuration.preferences = own }
         // No window opens from the panel without a click.
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
-        Proxy.shared.prepare(configuration)
+        // An extension's own page: a dialer here may call the phone line
+        // Settings › Proxy names, with the proxy on (see Proxy.follow).
+        Proxy.shared.prepare(configuration, own: true)
         let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 380, height: 600), configuration: configuration)
         Proxy.shared.track(web)
         let delegate = PanelDelegate(browser: browser, base: context.baseURL, first: url)
@@ -688,8 +687,6 @@ struct SidePanelView: View {
                 Rectangle().fill(Palette.hairline).frame(height: 1)
                 PanelPage(web: SidePanelPages.shared.web(in: browser))
             }
-        case .dialer:
-            DialerPanelView(browser: browser)
         case .downloads:
             // As tall as the panel, as its list is in a tab.
             DownloadsPanel(browser: browser, loot: browser.loot, compact: true,

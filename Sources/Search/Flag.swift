@@ -148,8 +148,7 @@ struct FlatFlag: View {
         }
 
         /// The official leaf's corners, hoist side, from the tip down to the stem, in units
-        /// where the leaf is 15.1 tall; the fly side mirrors them. The dialer's Number menu
-        /// draws the same outline (Resources/Dialer/search.css).
+        /// where the leaf is 15.1 tall; the fly side mirrors them.
         private static let leafHoist: [(x: CGFloat, y: CGFloat)] = [
             (0, 0), (-1.2, 2.3), (-1.82, 2.6), (-2.69, 2.15), (-2.04, 5.6), (-2.55, 5.95), (-4.07, 4.26),
             (-4.32, 5.12), (-4.65, 5.33), (-6.56, 4.92), (-6.06, 6.75), (-6.17, 7.43), (-6.85, 7.74),

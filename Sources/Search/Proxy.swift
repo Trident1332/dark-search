@@ -67,6 +67,10 @@ struct ProxySetup: Equatable {
     /// Sites reached directly, as if there were no proxy: a site, or a
     /// whole domain with its subdomains. The Mac itself always is.
     var bypass: [String] = []
+    /// A phone server a dialer extension calls through, reached over the
+    /// Mac's own connection whatever else is set: a provider can refuse a
+    /// call that arrives from a proxy's address. Empty: none.
+    var phoneLine = ""
     /// Empty: every profile. Otherwise only these profiles' pages take the
     /// route; the others stay on the Mac's settings.
     var profiles: Set<UUID> = []
@@ -75,8 +79,7 @@ struct ProxySetup: Equatable {
     var blocks = true
     /// A mark beside the address while pages take the route.
     var shows = true
-    /// Website peer connections are off while the proxy is on. The bundled
-    /// dialer has its own mandatory proxy route and relay-only media policy.
+    /// Website peer connections are off while the proxy is on.
     var hidesCalls = true
     /// Use the exit location's IANA time zone in WebKit processes.
     var matchesTimeZone = true
@@ -109,13 +112,16 @@ struct ProxySetup: Equatable {
     var excluded: [String] {
         var seen: Set<String> = []
         var out: [String] = []
-        for raw in ["localhost", "127.0.0.1", "::1"] + (persistent ? [] : bypass) {
+        for raw in ["localhost", "127.0.0.1", "::1"] + (persistent ? [] : bypass) + [phoneLine] {
             let site = ProxySetup.domain(raw)
             guard !site.isEmpty, seen.insert(site).inserted else { continue }
             out.append(site)
         }
         return out
     }
+
+    /// A phone line is named: an extension's own pages may call through it.
+    var callsDirectly: Bool { !ProxySetup.domain(phoneLine).isEmpty }
 
     /// One line of the bypass list, as a domain: lowercase, no scheme, path,
     /// port or leading star, so "https://*.Example.com/x" is "example.com".
@@ -208,6 +214,8 @@ final class Proxy: ObservableObject {
         weak var value: WKPreferences?
         var profile: UUID
         var tor = false
+        /// An extension's own page, which may call the phone line.
+        var own = false
     }
 
     /// The route for what the browser fetches outside WebKit, read from any
@@ -330,7 +338,7 @@ final class Proxy: ObservableObject {
         }
         for (id, rule) in preferenceRules {
             guard let preferences = rule.value else { preferenceRules[id] = nil; continue }
-            follow(preferences, profile: rule.profile, tor: rule.tor)
+            follow(preferences, profile: rule.profile, tor: rule.tor, own: rule.own)
         }
         SiteLocation.shared.proxyChanged()
         Onion.shared.proxyChanged()
@@ -385,10 +393,16 @@ final class Proxy: ObservableObject {
     /// A page's preferences follow the calls switch: peer connections off
     /// while its pages take the route and the switch is on. Through a name
     /// outside the public framework, as Safari's own switches are; a WebKit
-    /// without it leaves calls on.
-    func follow(_ preferences: WKPreferences, profile: UUID, tor: Bool = false) {
-        preferenceRules[ObjectIdentifier(preferences)] = PreferenceRule(value: preferences, profile: profile, tor: tor)
-        let calls = !tor && !(setup.applies(to: profile) && (setup.blocks || setup.hidesCalls))
+    /// without it leaves calls on. `own`: an extension's own page, where
+    /// calls stay on while a phone line is named (Settings › Proxy): its
+    /// dialer's sound goes over the Mac's connection, as its line does.
+    /// Nil keeps what the preferences were handed over as.
+    func follow(_ preferences: WKPreferences, profile: UUID, tor: Bool = false, own: Bool? = nil) {
+        let id = ObjectIdentifier(preferences)
+        let own = own ?? preferenceRules[id].flatMap { $0.value === preferences ? $0.own : nil } ?? false
+        preferenceRules[id] = PreferenceRule(value: preferences, profile: profile, tor: tor, own: own)
+        let hidden = setup.applies(to: profile) && (setup.blocks || setup.hidesCalls) && !(own && setup.callsDirectly)
+        let calls = !tor && !hidden
         let set = NSSelectorFromString("_setPeerConnectionEnabled:")
         guard preferences.responds(to: set) else { return }
         typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
@@ -397,8 +411,8 @@ final class Proxy: ObservableObject {
 
     /// The same, for a page whose store says whose it is. A store never
     /// handed over — a page made some other way — counts as Personal's.
-    func follow(_ preferences: WKPreferences, store: WKWebsiteDataStore) {
-        follow(preferences, profile: profile(of: store) ?? Profile.personalID, tor: Onion.shared.owns(store))
+    func follow(_ preferences: WKPreferences, store: WKWebsiteDataStore, own: Bool? = nil) {
+        follow(preferences, profile: profile(of: store) ?? Profile.personalID, tor: Onion.shared.owns(store), own: own)
     }
 
     private func followWorkers(in store: WKWebsiteDataStore) {
@@ -756,8 +770,8 @@ final class Proxy: ObservableObject {
         usedPools[ObjectIdentifier(pool)] = pool
     }
 
-    func prepare(_ configuration: WKWebViewConfiguration) {
-        follow(configuration.preferences, store: configuration.websiteDataStore)
+    func prepare(_ configuration: WKWebViewConfiguration, own: Bool? = nil) {
+        follow(configuration.preferences, store: configuration.websiteDataStore, own: own)
         configuration.processPool = processPool(for: configuration.websiteDataStore)
         Onion.shared.prepare(configuration)
         let pool = configuration.processPool

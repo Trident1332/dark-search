@@ -97,9 +97,6 @@ enum SettingsIndex {
         .init(id: "proxyprivacy", page: .proxy, title: "Privacy", icon: "hand.raised"),
         .init(id: "tor", page: .proxy, title: "Tor", icon: "network.badge.shield.half.filled"),
 
-        .init(id: "dialer", page: .dialer, title: "Calls", icon: "phone"),
-        .init(id: "dialerline", page: .dialer, title: "Phone line", icon: "server.rack"),
-        .init(id: "dialersites", page: .dialer, title: "Click-to-call", icon: "globe"),
 
         .init(id: "mouse", page: .keyboard, title: "Mouse and trackpad", icon: "computermouse"),
         .init(id: "anywhere", page: .keyboard, title: "From any app", icon: "macwindow.on.rectangle"),
@@ -484,44 +481,16 @@ enum SettingsIndex {
               keys: ["proxy.shows"], words: ["address bar", "indicator", "mark", "location"], parent: "proxy.on"),
         .init(id: "proxy.calls", group: "proxyprivacy", icon: "video",
               title: "Keep video calls from revealing your address", detail: "Block websites from making direct video calls while the proxy is on",
-              more: "Website calls can send WebRTC traffic outside the browser proxy. With this on, pages can't start a peer connection while the proxy is on. Dark Search's built-in Dialer uses its own protected relay and can still make calls. Persistent connection requires website call protection; otherwise you can turn it off to allow direct website calls.",
+              more: "Website calls can send WebRTC traffic outside the browser proxy. With this on, pages can't start a peer connection while the proxy is on. Persistent connection requires website call protection; otherwise you can turn it off to allow direct website calls.",
               keys: ["proxy.calls"], words: ["webrtc", "leak", "ip", "video call", "peer"], parent: "proxy.on"),
+        .init(id: "proxy.phone", group: "proxyprivacy", icon: "phone.arrow.up.right",
+              title: "Phone line outside the proxy", detail: "A dialer extension's phone server, reached over this Mac's own connection",
+              more: "Name the server a dialer extension signs in to, sip.example.com. Dark Search then reaches that server directly, Persistent connection or not, and the extension's panel may carry a call's sound over this Mac's connection too. The phone server and whoever the call reaches see this Mac's address, not the proxy's. Websites still can't make direct calls. Leave it empty to keep everything on the proxy.",
+              keys: ["proxy.phoneLine"], words: ["phone", "dialer", "call", "sip", "webrtc", "direct", "bypass", "extension", "ottocaller", "softphone"], kind: .wide, parent: "proxy.on"),
         .init(id: "proxy.timeZone", group: "proxyprivacy", icon: "clock",
               title: "Match the proxy's time zone", detail: "Pages use the time zone reported by the proxy's location",
               more: "Date and Intl use the proxy location's time zone. UTC timestamps stay unchanged. Existing pages and workers restart when the time zone changes. Your Mac's time zone is never changed.",
               keys: ["proxy.timeZone"], words: ["time zone", "timezone", "date", "intl", "utc", "clock", "location", "restart", "worker"], parent: "proxy.on"),
-        // Dialer
-        .init(id: "dialer.on", group: "dialer", icon: "phone",
-              title: "Call phone numbers from Dark Search", detail: "Right-click a number on a page to call it, and a keypad in the side panel",
-              more: "Otto's dialer, built in: a softphone that signs in to your FreeSWITCH phone server over a WebSocket and carries the call's sound through WebRTC, shown in the side panel. A tel: link opens there too, and approved websites can start a call. With a proxy on, signaling and audio require the protected route through your phone server's relay, including with Persistent connection on. A failed route stops calls. Tor tabs must be closed before calling. Incoming calls wait for you to press Answer.",
-              keys: ["dialer.on"], words: ["dialer", "phone", "call", "softphone", "sip", "freeswitch", "otto", "ottocaller", "keypad", "tel", "voip"]),
-        .init(id: "dialer.open", group: "dialer", icon: "sidebar.right",
-              title: "The dialer", detail: "In the side panel, beside the page. ⇧⌘K, or View › Show Dialer",
-              words: ["panel", "keypad", "open", "show"], parent: "dialer.on"),
-        .init(id: "dialer.autodial", group: "dialer", icon: "phone.arrow.up.right",
-              title: "Call as soon as a number arrives", detail: "Off, the number is loaded into the keypad and you press Call",
-              keys: ["dialer.autodial"], words: ["autodial", "automatic", "right-click", "confirm"], parent: "dialer.on"),
-        .init(id: "dialer.region", group: "dialer", icon: "globe.europe.africa",
-              title: "Default country", detail: "For numbers written without a country code",
-              keys: ["dialer.region"], words: ["country", "region", "code", "international", "national"], parent: "dialer.on"),
-        .init(id: "dialer.server", group: "dialerline", icon: "server.rack",
-              title: "Phone server", detail: "Your FreeSWITCH's WebSocket address, and its SIP domain",
-              more: "The WebSocket the dialer signs in through, wss://sip.example.com:7443, and the domain the seat is registered under. Whoever runs the phone line has both; otto's Settings › Dialer shows them too.",
-              keys: ["dialer.wss", "dialer.domain"], words: ["websocket", "wss", "domain", "sip", "server", "address"], kind: .wide, parent: "dialer.on"),
-        .init(id: "dialer.seat", group: "dialerline", icon: "person.badge.key",
-              title: "Seat", detail: "The extension to sign in as. Its password stays in your keychain",
-              keys: ["dialer.user"], words: ["extension", "seat", "user", "password", "keychain", "1001"], kind: .wide, parent: "dialer.on"),
-        .init(id: "dialer.numbers", group: "dialerline", icon: "phone",
-              title: "Your phone numbers", detail: "US and Canada use Numero; UK uses Telicall",
-              more: "Enter the numbers assigned to your provider accounts, with the same numbers configured on your phone server. Choose the outgoing line in the dialer's Number menu. The US and Canadian Numero lines can share one account; the UK number belongs to Telicall. Default country formats destination numbers. Numero's separate US and Canada routes must be available before those lines can call.",
-              keys: ["dialer.numero.us", "dialer.numero.ca", "dialer.telicall.uk"], words: ["numero", "telicall", "us", "canada", "uk", "united kingdom", "britain", "caller id", "outgoing", "number", "line"], kind: .wide, parent: "dialer.on"),
-        .init(id: "dialer.status", group: "dialerline", icon: "circle.dotted",
-              title: "Status", detail: "Opens with the dialer",
-              words: ["registered", "connected", "status", "signed in"], parent: "dialer.on"),
-        .init(id: "dialer.sites", group: "dialersites", icon: "globe",
-              title: "Sites that may use the dialer", detail: "Approved origins can call, configure the line and take logs. Saved passwords stay private",
-              more: "Each grant names one scheme, host and port, such as https://otto.example.com or http://localhost:3000. Public sites require HTTPS. Local servers need an explicit origin grant; other ports stay separate. Approved sites can supply a new password but cannot read the saved one. Private and Tor tabs cannot use this bridge.",
-              keys: ["dialer.sites"], words: ["otto", "sites", "origins", "click to call", "leads", "bridge"], parent: "dialer.on"),
 
         .init(id: "onion.on", group: "tor", icon: "network.badge.shield.half.filled",
               title: "Open onion websites", detail: "Onion tabs use Tor; other tabs keep their existing connection",
@@ -659,12 +628,10 @@ enum SettingsIndex {
         case "links.peek.stays": return prefs.peeksLinks || prefs.pinsPeek
         case "launcher.key": return prefs.launcher
         case "onion.connection": return prefs.onionEnabled
-        case "dialer.open", "dialer.autodial", "dialer.region", "dialer.server", "dialer.seat", "dialer.numbers", "dialer.status", "dialer.sites":
-            return prefs.dialerOn
         case "proxy.profiles": return prefs.proxyOn && !prefs.proxyBlocks && Profiles.shared.several
         case "proxy.bypass": return prefs.proxyOn && !prefs.proxyBlocks
         case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test",
-             "proxy.blocks", "proxy.shows", "proxy.calls", "proxy.timeZone":
+             "proxy.blocks", "proxy.shows", "proxy.calls", "proxy.phone", "proxy.timeZone":
             return prefs.proxyOn
         default: return true
         }
@@ -679,12 +646,10 @@ enum SettingsIndex {
         case "sidebar.roomy": return "Only with titles in the column"
         case "tabs.address": return "Only with the tabs down the side: across the top, the address bar says it"
         case "onion.connection": return "Only with Open onion websites on"
-        case "dialer.open", "dialer.autodial", "dialer.region", "dialer.server", "dialer.seat", "dialer.numbers", "dialer.status", "dialer.sites":
-            return "Only with the dialer on"
         case "proxy.profiles": return "Only with a proxy on, Persistent connection off and more than one profile"
         case "proxy.bypass": return "Only with a proxy on and Persistent connection off"
         case "proxy.kind", "proxy.server", "proxy.signIn", "proxy.test",
-             "proxy.blocks", "proxy.shows", "proxy.calls", "proxy.timeZone":
+             "proxy.blocks", "proxy.shows", "proxy.calls", "proxy.phone", "proxy.timeZone":
             return "Only with a proxy on"
         case "sidebar.foldIcons": return "Only with the column down a side and not hidden until the edge"
         case "profiles.oneWindow": return "Only with more than one profile"
@@ -866,10 +831,8 @@ extension SettingsIndex {
             "proxy.blocks": prefs.proxyBlocks,
             "proxy.calls": (prefs.proxyOn && prefs.proxyBlocks) || prefs.proxyHidesCalls,
             "proxy.timeZone": prefs.proxyMatchesTimeZone,
+            "proxy.phoneLine": prefs.proxyPhoneLine,
             "onion.on": prefs.onionEnabled,
-            "dialer.on": prefs.dialerOn,
-            "dialer.autodial": prefs.dialerAutodial,
-            "dialer.region": prefs.dialerRegion,
             "always": [
                 "splitView": prefs.splitView, "tabs.groups": prefs.usesTabGroups,
                 "panel.sites": prefs.sitesInPanel, "translate": PageTranslator.enabled,
@@ -913,36 +876,12 @@ extension SettingsIndex {
         case "proxy.timeZone":
             guard let on = value as? Bool else { return false }
             prefs.proxyMatchesTimeZone = on
+        case "proxy.phoneLine":
+            guard let text = value as? String else { return false }
+            prefs.proxyPhoneLine = ProxySetup.domain(text)
         case "onion.on":
             guard let on = value as? Bool else { return false }
             prefs.onionEnabled = on
-        case "dialer.on":
-            guard let on = value as? Bool else { return false }
-            prefs.dialerOn = on
-        case "dialer.autodial":
-            guard let on = value as? Bool else { return false }
-            prefs.dialerAutodial = on
-        case "dialer.region":
-            guard let region = value as? String, region.count == 2 else { return false }
-            prefs.dialerRegion = region.uppercased()
-        case "dialer.wss":
-            guard let text = value as? String else { return false }
-            prefs.dialerWSS = text
-        case "dialer.domain":
-            guard let text = value as? String else { return false }
-            prefs.dialerDomain = text
-        case "dialer.user":
-            guard let text = value as? String else { return false }
-            prefs.dialerUser = text
-        case "dialer.numero.us":
-            guard let text = value as? String else { return false }
-            prefs.dialerNumeroUS = text
-        case "dialer.numero.ca":
-            guard let text = value as? String else { return false }
-            prefs.dialerNumeroCA = text
-        case "dialer.telicall.uk":
-            guard let text = value as? String else { return false }
-            prefs.dialerTelicallUK = text
         default:
             return false
         }

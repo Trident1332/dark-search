@@ -669,7 +669,7 @@ private final class AIProtocol: URLProtocol {
 }
 
 /// A session's own delegate that hands proxy challenges to Proxy, as
-/// DialerRelay's and ExtensionFetch's do.
+/// ExtensionFetch's does.
 private final class ForwardingProxyDelegate: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {

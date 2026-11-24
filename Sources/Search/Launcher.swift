@@ -578,7 +578,12 @@ private struct LauncherField: NSViewRepresentable {
         if want != coordinator.synced {
             coordinator.synced = want
             field.stringValue = want
-            coordinator.select(from: launcher.typed.count, in: field)
+            // A row walked to that doesn't begin with what was typed, found
+            // by its title say, has no ending to select: the caret goes
+            // after it, or the next key cut it at the length of the typing.
+            let typed = launcher.typed
+            let begins = want.lowercased().hasPrefix(typed.lowercased())
+            coordinator.select(from: begins ? typed.utf16.count : (want as NSString).length, in: field)
         }
         if coordinator.answered != launcher.focusRequest {
             coordinator.answered = launcher.focusRequest
@@ -620,6 +625,12 @@ private struct LauncherField: NSViewRepresentable {
         func controlTextDidChange(_ note: Notification) {
             guard let field = note.object as? NSTextField else { return }
             let text = field.stringValue
+            // The ending alone taken away, by ⌘X or any key not listed
+            // below, leaves what was typed as it was: a deletion too.
+            if text == launcher.typed, synced != text { deleting = true }
+            // Text still being composed, Pinyin or kana, is not finished
+            // typing: an ending written into it would take its place.
+            if (field.currentEditor() as? NSTextView)?.hasMarkedText() == true { deleting = true }
             launcher.type(text)
             guard !deleting, let ending = launcher.ending else {
                 if deleting { launcher.stopCompleting() }
@@ -630,13 +641,15 @@ private struct LauncherField: NSViewRepresentable {
             deleting = false
             field.stringValue = text + ending
             synced = field.stringValue
-            select(from: text.count, in: field)
+            select(from: text.utf16.count, in: field)
         }
 
         /// The part after the caret, selected, so the next key replaces it.
         func select(from start: Int, in field: NSTextField) {
             guard let editor = field.currentEditor() as? NSTextView else { return }
-            let length = field.stringValue.count
+            // Counted as the text view counts, or an emoji before the
+            // ending put the selection one short.
+            let length = (field.stringValue as NSString).length
             guard start <= length else { return }
             editor.selectedRange = NSRange(location: start, length: length - start)
             editor.scrollRangeToVisible(NSRange(location: 0, length: 0))
@@ -670,8 +683,15 @@ private struct LauncherField: NSViewRepresentable {
                 return true
             case #selector(NSResponder.deleteBackward(_:)),
                  #selector(NSResponder.deleteForward(_:)),
-                 #selector(NSResponder.deleteWordForward(_:)):
+                 #selector(NSResponder.deleteWordForward(_:)),
+                 #selector(NSResponder.deleteToBeginningOfLine(_:)),
+                 #selector(NSResponder.deleteToEndOfLine(_:)),
+                 #selector(NSResponder.deleteToBeginningOfParagraph(_:)),
+                 #selector(NSResponder.deleteToEndOfParagraph(_:)):
                 deleting = true
+                // A delete with nothing to take changes nothing, and left
+                // set this cost the next letter typed its ending.
+                DispatchQueue.main.async { [weak self] in self?.deleting = false }
                 return false
             default:
                 return false

@@ -104,9 +104,6 @@ struct BrowserMenu: View {
         if browser.prefs.sitesInPanel {
             Button(browser.sidePanelShown ? "Close Side Panel" : "Show Side Panel") { run { browser.toggleSitePanel() } }
         }
-        if browser.prefs.dialerOn {
-            Button(browser.dialerShown ? "Close Dialer" : "Show Dialer") { run { browser.toggleDialer() } }
-        }
         Divider()
         Button("Bring Things Over…") { run { browser.bringingIn = "" } }
         Divider()

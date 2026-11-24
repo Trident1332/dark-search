@@ -32,7 +32,6 @@ Carter Doesn't Sleep maintains this fork with its own identity and releases. The
 - **Light, dark, or the Mac's own.** The frame and the pages follow.
 - **Bookmarks, history, downloads** — each a panel, each searchable, each one keystroke away.
 - **Chrome extensions, without Chrome.** Paste a Chrome Web Store link in Settings › Extensions, or open the extension's page in Dark Search and press Add. It runs on WebKit's own extension engine — the one Safari uses — and where Chrome has APIs WebKit doesn't (bookmarks, history, downloads, side panel, offscreen documents, fonts, notifications, speech, OAuth sign-in), Dark Search fills them in itself. They live behind the puzzle button; pin the ones you use often. Building your own? Load its folder as an unpacked extension and press Reload after each change, as in Chrome's developer mode. macOS 15.4 or later.
-- **Call a number on a page.** Turn on Settings › Dialer, point it at your FreeSWITCH phone line, and a right-click on a phone number — selected, or just under the pointer — offers to call it. `tel:` links call too, and `⇧⌘K` opens the dialer in the side panel with a keypad and your recent calls. It is Otto's dialer, built in: a softphone over a WebSocket, the sound through WebRTC, the seat's password in your keychain. Pages on the sites you list, otto's leads table among them, can start a call themselves and take the call log back.
 - **Updates itself, quietly.** Once a day it checks for a newer build, downloads it, verifies it is signed with this fork's pinned release key, and swaps it in for the next launch. Nothing restarts on its own.
 
 ## What it doesn't do
@@ -67,7 +66,7 @@ Apps you allow in System Settings › Privacy & Security › Automation can read
 |---|---|
 | `⌘L` address · `⌘K` switch tab · `⌘T` new tab · `⌘W` close · `⇧⌘T` reopen | `⌘[` `⌘]` back, forward · `⇧⌘[` `⇧⌘]` previous, next tab · `⌘1`–`⌘9` jump |
 | `⇧⌘S` tabs down the left or across the top · `⌘S` fold the sidebar away · `⇧⌘B` bookmark this page | `⇧⌘R` reading mode · `⇧⌘P` float the video · `⇧⌘H` hide something · `⇧⌘U` what is hidden here |
-| `⌘F` find · `⌘D` duplicate tab · `⇧⌘C` copy address · `⇧⌘V` paste and go | `⌘Y` history · `⇧⌘J` downloads · `⌘,` settings · `⌥⌘L` passwords · `⇧⌘K` dialer |
+| `⌘F` find · `⌘D` duplicate tab · `⇧⌘C` copy address · `⇧⌘V` paste and go | `⌘Y` history · `⇧⌘J` downloads · `⌘,` settings · `⌥⌘L` passwords |
 
 Space keys (Control+1–9 by default) and the modifier used to peek at a link can be changed in Settings › Shortcuts while those features are enabled.
 

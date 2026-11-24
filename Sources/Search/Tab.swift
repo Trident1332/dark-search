@@ -31,7 +31,7 @@ enum Web {
     @MainActor static func release(_ controller: WKUserContentController) {
         for name in [ScrollRelay.name, VeilRelay.name, FormRelay.name, ImageRelay.name, MediaKeys.name,
                      StoreRelay.name, PasskeyRelay.name, MiddleRelay.name, IconRelay.name, PopupGestureRelay.name, DuskRelay.name,
-                     TranslateRelay.name, DialRelay.name, DialerSiteRelay.name] {
+                     TranslateRelay.name] {
             controller.removeScriptMessageHandler(forName: name, contentWorld: world)
             controller.removeScriptMessageHandler(forName: name, contentWorld: .page)
         }
@@ -385,6 +385,18 @@ final class Tab: ObservableObject, Identifiable {
     var addressBarAddress: URL? { failure == nil ? (restAddress ?? address) : (failedAddress ?? address ?? restAddress) }
     var addressBarIsDestination: Bool { failure != nil || (restAddress == nil && address != nil) }
 
+    /// A load that never became a page — stopped, turned into a download —
+    /// leaves the page that was there, and `go` had already blanked its
+    /// title. Asked a turn later, once WebKit has said whether it is still
+    /// loading: a second address typed over the first keeps its blank.
+    func titleBack() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.title.isEmpty, let view = self.built, !view.isLoading,
+                  let was = view.title, !was.isEmpty else { return }
+            self.title = was
+        }
+    }
+
     func navigationFailed(_ error: Error) {
         failedAddress = NavigationFailure.destination(error, fallback: address)
         failure = NavigationFailure.message(error, destination: failedAddress)
@@ -448,11 +460,11 @@ final class Tab: ObservableObject, Identifiable {
             settling?.cancel()
             settling = nil
             settled = false
-            loading = false
+            if loading { loading = false }
             return
         }
         guard !settled else { return }
-        loading = true
+        if !loading { loading = true }
         settleLater()
     }
 
@@ -462,7 +474,9 @@ final class Tab: ObservableObject, Identifiable {
         guard built?.isLoading == true else { return }
         if back { settled = false }
         guard !settled else { return }
-        loading = true
+        // Asked first: this runs at every step of a load, and saying true
+        // again redrew everything that watches the tab each time.
+        if !loading { loading = true }
         settleLater()
     }
 
@@ -540,8 +554,12 @@ final class Tab: ObservableObject, Identifiable {
         let token = loadGeneration
         let page = view.url
         view.callAsyncJavaScript(Reader.twin, arguments: [:], in: nil, in: Web.world) { [weak self, weak view] result in
-            guard let self, let view, self.loadGeneration == token, self.built === view, self.seekingTwin else { return }
+            guard let self, let view, self.built === view, self.seekingTwin else { return }
+            // Before asking whether the page is still the one: a reload or
+            // Back while the twin was on its way left this set, and the
+            // reader never answered again in this tab.
             self.seekingTwin = false
+            guard self.loadGeneration == token else { return }
             // Gone somewhere else while the twin was on its way: it belongs
             // to a page that isn't there any more, and so does the guess.
             guard view.url == page else { return }
@@ -748,8 +766,6 @@ final class Tab: ObservableObject, Identifiable {
     var onSaveImageAs: ((Tab, URL) -> Void)?
     /// Where the last image right-clicked came from (see ImageMenu.swift).
     var imageFrame: WKFrameInfo? { images.frame }
-    /// Call <number> was chosen in the page's menu (see DialMenu.swift).
-    var onCall: ((Tab, String) -> Void)?
     var searchName: (() -> String?)?
     var onSearch: ((Tab, String) -> Void)?
     /// "Add to Search" was pressed on the Chrome Web Store page this tab shows.
@@ -775,10 +791,6 @@ final class Tab: ObservableObject, Identifiable {
     private let veils_ = VeilRelay()
     private let forms = FormRelay()
     private let images = ImageRelay()
-    /// What a right-click lands on, for Call <number> (DialMenu.swift), and
-    /// otto's click-to-call on the sites Settings › Dialer lists.
-    private let dial = DialRelay()
-    private let siteDial = DialerSiteRelay()
     private let media = MediaKeys()
     /// Counting down once the page's sound stops, to give the media keys
     /// back (see MediaKeys.swift). One at most.
@@ -1052,11 +1064,6 @@ final class Tab: ObservableObject, Identifiable {
         web.onMenuClosed = { [weak self] in self?.popupGesture.menuClosed() }
         web.onKeys = { [weak self] in if let self { self.onKeys?(self) } }
         web.searchName = { [weak self] in self?.searchName?() }
-        web.dialNumber = { [weak self] in self?.dial.take() }
-        web.onCall = { [weak self] number in
-            guard let self else { return }
-            self.onCall?(self, number)
-        }
         web.translating = { [weak self] in self.map { $0.translator != nil && $0.translation?.failed != true } ?? false }
         web.onTranslate = { [weak self] in self?.toggleTranslation() }
         web.onImage = { [weak self] url, copy in
@@ -1107,8 +1114,6 @@ final class Tab: ObservableObject, Identifiable {
         controller.add(relay, contentWorld: Web.world, name: ScrollRelay.name)
         controller.add(veils_, contentWorld: Web.world, name: VeilRelay.name)
         controller.add(images, contentWorld: Web.world, name: ImageRelay.name)
-        controller.add(dial, contentWorld: Web.world, name: DialRelay.name)
-        controller.addScriptMessageHandler(siteDial, contentWorld: Web.world, name: DialerSiteRelay.name)
         controller.add(media, contentWorld: Web.world, name: MediaKeys.name)
         controller.add(shop, contentWorld: Web.world, name: StoreRelay.name)
         controller.add(iconChanges, contentWorld: Web.world, name: IconRelay.name)
@@ -1198,8 +1203,6 @@ final class Tab: ObservableObject, Identifiable {
         veils_.tab = self
         forms.tab = self
         images.tab = self
-        dial.tab = self
-        siteDial.tab = self
         media.tab = self
         shop.tab = self
         iconChanges.tab = self
@@ -1273,11 +1276,6 @@ final class Tab: ObservableObject, Identifiable {
             add(ImageRelay.keepMenu, .atDocumentStart, mainFrameOnly: false, in: Web.world)
         }
         add(ImageRelay.watch, .atDocumentStart, mainFrameOnly: false, in: Web.world)
-        // Every frame: what a right-click lands on, for Call <number>
-        // (DialMenu.swift). The main frame, on a site Settings › Dialer
-        // lists: otto's click-to-call, only while the dialer is on.
-        add(DialRelay.watch, .atDocumentStart, mainFrameOnly: false, in: Web.world)
-        add(dialerBridgeSource(), .atDocumentStart, mainFrameOnly: true, in: Web.world)
         // Every frame, in Search's world: a paused video gives the media keys
         // back (see MediaKeys.swift).
         add(MediaKeys.watch, .atDocumentStart, mainFrameOnly: false, in: Web.world)
@@ -1340,39 +1338,6 @@ final class Tab: ObservableObject, Identifiable {
         guard !controller.userScripts.elementsEqual(scripts, by: ===) else { return }
         controller.removeAllUserScripts()
         scripts.forEach(controller.addUserScript)
-    }
-
-    /// Updated grants apply to the document already open and to later
-    /// documents in the same view. A reload alone never rebuilds its scripts.
-    static func refreshDialerBridge() {
-        for tab in proxyTabs.allObjects { tab.refreshDialerBridge() }
-    }
-
-    func refreshDialerBridge() {
-        guard let web = built else { return }
-        let controller = web.configuration.userContentController
-        let kept = controller.userScripts.filter {
-            !$0.source.contains(DialerSiteRelay.scriptMarker)
-                && !$0.source.contains("window.__searchDialerSite")
-        }
-        controller.removeAllUserScripts()
-        kept.forEach(controller.addUserScript)
-        let script = dialerBridgeScript()
-        controller.addUserScript(script)
-        web.evaluateJavaScript(script.source, in: nil, in: Web.world) { _ in }
-    }
-
-    private func dialerBridgeScript() -> WKUserScript {
-        WKUserScript(source: dialerBridgeSource(), injectionTime: .atDocumentStart,
-                     forMainFrameOnly: true, in: Web.world)
-    }
-
-    /// The bridge's source alone: `arm` keeps one script per source (see
-    /// Armed), so an unchanged bridge is not sent to the page again.
-    private func dialerBridgeSource() -> String {
-        let setup = Dialer.shared.setup
-        let grants = setup.on && !shy && !usesTor ? setup.sites : []
-        return DialerSiteRelay.script(hosts: grants)
     }
 
     /// The same stylesheet, for the page that is already up.
@@ -2462,6 +2427,9 @@ final class Tab: ObservableObject, Identifiable {
         settling?.cancel()
         settling = nil
         settled = false
+        // Nobody is left to say the load ended: a pin put to rest mid-load
+        // turned its wheel until it was woken.
+        if loading { loading = false }
         ears.stop()
         noisy = false
         quiet?.invalidate()
@@ -2494,8 +2462,6 @@ final class Tab: ObservableObject, Identifiable {
         web.onTouch = nil
         web.onKeys = nil
         web.searchName = nil
-        web.dialNumber = nil
-        web.onCall = nil
         web.translating = nil
         web.onTranslate = nil
         web.onImage = nil
@@ -2721,9 +2687,6 @@ final class PageView: WKWebView {
         for item in menu.items where item.identifier?.rawValue == "WKMenuItemIdentifierOpenLink" {
             menu.removeItem(item)
         }
-        // Call <number>, first, when the right-click landed on one and the
-        // dialer is on (see DialMenu.swift).
-        addCallItem(to: menu)
         // WebKit names it for a window, but a new window's page arrives here
         // as a new tab (Browser's createWebViewWith), so it says so. The tab
         // stays behind this one, as in Safari and Chrome, and as a ⌘-click's
@@ -2852,10 +2815,6 @@ final class PageView: WKWebView {
     /// The item the bench's linkmenu will choose in the next menu.
     static var picking: String?
     var searchName: (() -> String?)?
-    /// The phone number the last right-click landed on, and Call <number>
-    /// chosen (see DialMenu.swift).
-    var dialNumber: (() -> String?)?
-    var onCall: ((String) -> Void)?
     var onSearch: ((String) -> Void)?
     private var selection: String?
 

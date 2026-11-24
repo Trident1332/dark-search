@@ -107,4 +107,17 @@ final class FileDestinationTests: XCTestCase {
         try FileManager.default.removeItem(at: file)
         XCTAssertEqual(browser.destination(for: file.path), browser.searchURL(for: file.path))
     }
+
+    func testGoogleSearchIsPlacedInTheProxysCountryAndNothingElseIs() throws {
+        let google = try XCTUnwrap(URL(string: "https://www.google.com/search?q=skims%20support"))
+        XCTAssertEqual(Engine.placed(google, in: "US").absoluteString, "https://www.google.com/search?q=skims%20support&gl=us")
+        XCTAssertEqual(Engine.placed(google, in: nil), google)
+        XCTAssertEqual(Engine.placed(google, in: "ZZ"), google)
+        let already = try XCTUnwrap(URL(string: "https://www.google.com/search?q=a&gl=de"))
+        XCTAssertEqual(Engine.placed(already, in: "US"), already)
+        let other = try XCTUnwrap(URL(string: "https://duckduckgo.com/?q=a"))
+        XCTAssertEqual(Engine.placed(other, in: "US"), other)
+        let elsewhere = try XCTUnwrap(URL(string: "https://www.google.com/maps?q=a"))
+        XCTAssertEqual(Engine.placed(elsewhere, in: "US"), elsewhere)
+    }
 }

@@ -35,7 +35,6 @@ final class ConnectionPasswordIntegrationTests: XCTestCase {
         Proxy.shared.take(ProxySetup())
         try await until { !Proxy.shared.changingContent }
         ProxyPassword.useKeychainForTesting(nil)
-        DialerPassword.useKeychainForTesting(nil)
         ConnectionPasswords.useBackendForTesting(nil, enabled: false)
         vault = nil; legacy = nil
         try await super.tearDown()
@@ -44,14 +43,10 @@ final class ConnectionPasswordIntegrationTests: XCTestCase {
     private func relaunch() {
         ConnectionPasswords.useBackendForTesting(vault.backend, enabled: true)
         ProxyPassword.useKeychainForTesting(legacy.copy)
-        DialerPassword.useKeychainForTesting(legacy.copy)
     }
 
     private func proxy(_ kind: ProxyKind = .http) -> ProxySetup {
         ProxySetup(kind: kind, host: "integration-proxy.invalid", port: 8080, signsIn: true, user: "synthetic-user")
-    }
-    private func dialer() -> DialerSetup {
-        DialerSetup(wss: "wss://integration-dialer.invalid", domain: "integration-dialer.invalid", user: "synthetic-seat")
     }
     private func until(_ condition: @escaping @MainActor () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(5)
@@ -75,25 +70,6 @@ final class ConnectionPasswordIntegrationTests: XCTestCase {
         relaunch()
         XCTAssertNil(ProxyPassword.read(setup))
         XCTAssertFalse(ProxyPassword.kept(setup))
-        XCTAssertEqual(legacy.queryCount, 0)
-    }
-
-    func testDialerReadsPresenceSaveForgetAndRelaunchNeverConsultLegacy() {
-        let setup = dialer()
-        for _ in 0..<10 {
-            XCTAssertNil(DialerPassword.read(setup))
-            XCTAssertNil(DialerPassword.read(setup, allowCredentialPrompt: true))
-            XCTAssertFalse(DialerPassword.kept(setup))
-        }
-        XCTAssertTrue(DialerPassword.save("synthetic-vault-seat", for: setup))
-        XCTAssertEqual(DialerPassword.read(setup), "synthetic-vault-seat")
-        XCTAssertTrue(DialerPassword.kept(setup))
-        relaunch()
-        XCTAssertEqual(DialerPassword.read(setup, allowCredentialPrompt: true), "synthetic-vault-seat")
-        XCTAssertTrue(DialerPassword.forget(setup))
-        relaunch()
-        XCTAssertNil(DialerPassword.read(setup))
-        XCTAssertFalse(DialerPassword.kept(setup))
         XCTAssertEqual(legacy.queryCount, 0)
     }
 
@@ -239,38 +215,12 @@ final class ConnectionPasswordIntegrationTests: XCTestCase {
         XCTAssertEqual(legacy.queryCount, 0)
     }
 
-    func testDialerVaultErrorNeverFallsBackToLegacy() {
-        let setup = dialer()
-        vault.failReads(for: DialerPassword.vaultIdentity(setup))
-        XCTAssertNil(DialerPassword.read(setup))
-        XCTAssertNil(DialerPassword.read(setup, allowCredentialPrompt: true))
-        XCTAssertFalse(DialerPassword.kept(setup))
-        XCTAssertEqual(legacy.queryCount, 0)
-    }
-
-    func testDeletedDialerCannotAdvertiseOrImportItsAvailableLegacyCopy() {
-        let setup = dialer()
-        XCTAssertTrue(DialerPassword.forget(setup))
-        relaunch()
-        XCTAssertEqual(vault.entry(DialerPassword.vaultIdentity(setup)), .deleted)
-        XCTAssertFalse(DialerPassword.legacyImportAvailable(setup))
-        XCTAssertFalse(DialerPassword.importLegacy(setup))
-        XCTAssertNil(DialerPassword.read(setup, allowCredentialPrompt: true))
-        XCTAssertEqual(legacy.queryCount, 0)
-    }
-
     func testCanonicalIdentityRetainsExactAccountAndConnectionNamespace() {
         var p = proxy(), sameProxy = p
         sameProxy.host = "  INTEGRATION-PROXY.INVALID  "
         XCTAssertEqual(ProxyPassword.vaultIdentity(p), ProxyPassword.vaultIdentity(sameProxy))
         p.user = "SYNTHETIC-USER"
         XCTAssertNotEqual(ProxyPassword.vaultIdentity(p), ProxyPassword.vaultIdentity(sameProxy))
-        var d = dialer(), sameDialer = d
-        sameDialer.domain = " INTEGRATION-DIALER.INVALID "
-        XCTAssertEqual(DialerPassword.vaultIdentity(d), DialerPassword.vaultIdentity(sameDialer))
-        d.user = "SYNTHETIC-SEAT"
-        XCTAssertNotEqual(DialerPassword.vaultIdentity(d), DialerPassword.vaultIdentity(sameDialer))
-        XCTAssertNotEqual(ProxyPassword.vaultIdentity(p), DialerPassword.vaultIdentity(d))
     }
 
     func testVaultOnlyProxySaveCannotPopulateLegacyModeCache() {
@@ -280,15 +230,6 @@ final class ConnectionPasswordIntegrationTests: XCTestCase {
         ConnectionPasswords.setUsesVault(false)
         XCTAssertEqual(ProxyPassword.read(setup), IntegrationLegacyStore.password)
         XCTAssertEqual(legacy.queryCount, 1, "Changing storage homes must consult that home's own credential")
-    }
-
-    func testVaultOnlyDialerSaveCannotPopulateLegacyModeCache() {
-        let setup = dialer()
-        XCTAssertTrue(DialerPassword.save("synthetic-vault-only", for: setup))
-        XCTAssertEqual(legacy.queryCount, 0)
-        ConnectionPasswords.setUsesVault(false)
-        XCTAssertEqual(DialerPassword.read(setup), IntegrationLegacyStore.password)
-        XCTAssertEqual(legacy.queryCount, 1)
     }
 }
 

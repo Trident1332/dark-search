@@ -82,10 +82,16 @@ enum IconTiles {
 }
 
 /// One tab as a tile of the column of icons.
-struct IconTile: View {
+///
+/// As a row of the column (SideRow), it doesn't watch the Browser: the
+/// little of it a tile shows is read as the column makes the tile, and a
+/// tile is drawn again only when that, its tab or the settings change (==).
+/// Watching the whole Browser, every tile was drawn again for anything that
+/// changed in the window.
+struct IconTile: View, Equatable {
     @Environment(\.greys) private var greys
     @Environment(\.tabShortcutNumbers) private var shortcutNumbers
-    @ObservedObject var browser: Browser
+    let browser: Browser
     @ObservedObject var prefs: Preferences
     @ObservedObject var tab: Tab
     let live: Bool
@@ -94,6 +100,38 @@ struct IconTile: View {
     var interactive = true
     /// Half of a pair: the pair's tile draws the ground and the edge.
     var half = false
+    /// Picked with ⌘ or ⇧.
+    private let selected: Bool
+    /// Picked along with others: its press leaves the pick be.
+    private let pickedAmongOthers: Bool
+    /// The peek opened from it, while it is up.
+    private let peek: Tab?
+    /// Its cross is a minus: closing it puts its page away (Browser.putsAway).
+    private let putsAway: Bool
+
+    init(browser: Browser, prefs: Preferences, tab: Tab, live: Bool, pill: Namespace.ID,
+         close: @escaping () -> Void, interactive: Bool = true, half: Bool = false) {
+        self.browser = browser
+        self.prefs = prefs
+        self.tab = tab
+        self.live = live
+        self.pill = pill
+        self.close = close
+        self.interactive = interactive
+        self.half = half
+        selected = browser.selectedTabIDs.contains(tab.id)
+        pickedAmongOthers = browser.isPickedAmongOthers(tab)
+        peek = browser.peekFrom == tab.id ? browser.peekTab : nil
+        putsAway = browser.putsAway(tab)
+    }
+
+    /// The close action is left out: it closes the same tab every time.
+    static func == (a: IconTile, b: IconTile) -> Bool {
+        a.browser === b.browser && a.prefs === b.prefs && a.tab === b.tab && a.live == b.live
+            && a.pill == b.pill && a.interactive == b.interactive && a.half == b.half
+            && a.selected == b.selected && a.pickedAmongOthers == b.pickedAmongOthers
+            && a.peek === b.peek && a.putsAway == b.putsAway
+    }
 
     @State private var hovering = false
     @State private var selectedOnPress = false
@@ -111,7 +149,7 @@ struct IconTile: View {
         ZStack {
             if closable && hovering {
                 // Put away rather than closed, in a group (Browser.closeTab).
-                Image(systemName: browser.putsAway(tab) ? "minus" : "xmark")
+                Image(systemName: putsAway ? "minus" : "xmark")
                     .font(.system(size: 8, weight: .semibold))
                     .foregroundStyle(Palette.muted)
                     .frame(width: 15, height: 15)
@@ -146,7 +184,7 @@ struct IconTile: View {
                     .overlay(Circle().strokeBorder(Palette.ground, lineWidth: 1))
                     .padding(4)
                     .allowsHitTesting(false)
-            } else if browser.peekFrom == tab.id, let page = browser.peekTab {
+            } else if let page = peek {
                 PeekBadge(page: page, size: 12).padding(1)
             }
         }
@@ -155,7 +193,7 @@ struct IconTile: View {
         }
         .background { if !half { ground.animation(Motion.quick, value: live) } }
         .overlay {
-            if browser.selectedTabIDs.contains(tab.id) {
+            if selected {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .strokeBorder(Palette.ink.opacity(0.35), lineWidth: 1)
                     .allowsHitTesting(false)
@@ -163,7 +201,7 @@ struct IconTile: View {
         }
         .modifier(Give(pressed: pressed && prefs.tabsGive))
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .modifier(TabPress(enabled: interactive && !browser.isPickedAmongOthers(tab), active: live, selected: $selectedOnPress, pressing: $pressed) {
+        .modifier(TabPress(enabled: interactive && !pickedAmongOthers, active: live, selected: $selectedOnPress, pressing: $pressed) {
             browser.clearTabSelection()
             browser.select(tab)
         })
@@ -220,7 +258,7 @@ struct IconTile: View {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(greys.pinLive)
                 .matchedGeometryEffect(id: "live", in: pill)
-        } else if browser.selectedTabIDs.contains(tab.id) {
+        } else if selected {
             RoundedRectangle(cornerRadius: 9, style: .continuous).fill(greys.wash)
         } else if hovering {
             RoundedRectangle(cornerRadius: 9, style: .continuous).fill(greys.hover)

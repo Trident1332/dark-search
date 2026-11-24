@@ -366,7 +366,6 @@ enum Browsers {
 
     static func closing(_ window: NSWindow) {
         guard !quitting, let browser = browser(for: window) else { return }
-        browser.dropDialer()
         browser.cancelFileImport()
         browser.cancelDisplay()
         // A popup goes, and isn't one ⇧⌘T brings back.
@@ -421,8 +420,11 @@ enum Browsers {
         if Front.shared.browser === browser {
             Front.shared.set(all.last { $0.isOpen && !$0.isPopup } ?? all.last { !$0.isPopup })
         }
-        if browser.inScene { SceneSlot.shared.refresh() }
+        // The heir first: the scene's next browser, made while nobody held
+        // the files, claimed them and opened the closed window's tabs again
+        // out of sight, beside the heir writing the same files.
         if owned, let heir = all.first(where: { $0.profileID == browser.profileID && !$0.isPopup }) { heir.takeFiles() }
+        if browser.inScene { SceneSlot.shared.refresh() }
         if wasPrimary, let next = primary { next.becomePrimary() }
         save(now: true)
     }

@@ -347,7 +347,12 @@ final class Browser: NSObject, ObservableObject {
 
     func searchURL(for text: String) -> URL? {
         guard !OnionAddress.hasIntent(text) else { return nil }
-        return Engine.url(for: text, template: prefs.engine.template(custom: prefs.customEngine))
+        guard let url = Engine.url(for: text, template: prefs.engine.template(custom: prefs.customEngine)) else { return nil }
+        // Through the proxy, asked as from the proxy's country (see
+        // Engine.placed). A Tor tab goes another way and is left alone.
+        let proxy = Proxy.shared
+        guard proxy.setup.on, proxy.place != nil, active?.usesTor != true else { return url }
+        return Engine.placed(url, in: proxy.countryCode)
     }
 
     func destination(for typed: String) -> URL? {
@@ -498,9 +503,6 @@ final class Browser: NSObject, ObservableObject {
     /// not, and what is in it.
     @Published var sidePanelShown = false
     @Published var sidePanel: SidePanelContent?
-    /// The dialer's page in this window, once the dialer has been opened
-    /// here, kept while the dialer is on (see Dialer.swift).
-    var dialerPage: DialerPage?
     /// The Settings page it opens on next.
     var settingsPage: SettingsPanel.Page {
         get { SettingsPanel.Page.named(Store.settings.string(forKey: "settings.page") ?? "") ?? .general }
@@ -561,7 +563,10 @@ final class Browser: NSObject, ObservableObject {
     private var findSpec: FindSpec?
     /// Goes up whenever what is looked for, or the page it is looked for on,
     /// changes: an answer for an older one is dropped.
-    private var findGeneration: UInt64 = 0
+    /// One count for every window: a page carried to another window keeps
+    /// the last number it was asked with, and a window counting from its
+    /// own zero was answered "stale" there until the page was reloaded.
+    private static var findGeneration: UInt64 = 0
     /// One question to the page at a time. Letters typed while it answers
     /// wait here, and only the last of them is asked next: on a long page
     /// every letter would otherwise queue a whole search of its own.
@@ -633,7 +638,7 @@ final class Browser: NSObject, ObservableObject {
         let web = tab.web
         let spec = FindSpec(tab: tab.id, query: needle, matchCase: matchCase, wholeWords: wholeWords)
         if findSpec != spec || findWeb !== web {
-            findGeneration &+= 1
+            Browser.findGeneration &+= 1
             findSpec = spec
             findWeb = web
             findFresh = true
@@ -651,7 +656,7 @@ final class Browser: NSObject, ObservableObject {
               findFresh || findSteps != 0 else { return }
         findAsked &+= 1
         let asking = findAsked
-        let generation = findGeneration
+        let generation = Browser.findGeneration
         let steps = findSteps
         findAsking = asking
         findFresh = false
@@ -673,7 +678,7 @@ final class Browser: NSObject, ObservableObject {
             // Something newer took over while the page was answering.
             guard self.findAsking == asking else { return }
             self.findAsking = nil
-            if !result.stale, self.findGeneration == generation, self.findSpec == spec,
+            if !result.stale, Browser.findGeneration == generation, self.findSpec == spec,
                self.activeID == spec.tab, self.active?.built === web {
                 self.findResult = result
                 self.missed = result.available && !result.found
@@ -685,7 +690,7 @@ final class Browser: NSObject, ObservableObject {
 
     /// Nothing asked or waiting any more; whatever answer is out is dropped.
     private func forgetFind() {
-        findGeneration &+= 1
+        Browser.findGeneration &+= 1
         findSpec = nil
         findWeb = nil
         findAsking = nil
@@ -694,7 +699,7 @@ final class Browser: NSObject, ObservableObject {
     }
 
     private func clearFind(on web: WKWebView) {
-        let generation = findGeneration
+        let generation = Browser.findGeneration
         Task { [pageFind] in _ = await pageFind.clear(on: web, generation: generation) }
     }
 
@@ -2678,6 +2683,12 @@ final class Browser: NSObject, ObservableObject {
     private var lastClear: (batch: UUID, blank: Tab.ID?)?
 
     private var bag = Set<AnyCancellable>()
+    /// What this window listens to on each of its tabs (see prepare).
+    private struct Watched {
+        weak var tab: Tab?
+        var bag: Set<AnyCancellable>
+    }
+    private var watched: [Tab.ID: Watched] = [:]
     /// The minute-by-minute look for tabs to put to sleep, and the ear for
     /// macOS saying memory is short. See Sleep.swift.
     var dozing: Timer?
@@ -3762,9 +3773,10 @@ final class Browser: NSObject, ObservableObject {
             }
             row.groups = groups
             parked[space] = row
-            if groups != (saved.groups ?? []) {
-                saved.groups = groups
-                writeRow(space, saved, now: true)
+            // Written as every other change to a row out of sight is: only
+            // its groups were, and the tabs brought over went at quit.
+            if !new.isEmpty || groups != (saved.groups ?? []) {
+                writeSession(now: true, space: space, row: row)
             }
             return new.count
         }
@@ -3849,10 +3861,15 @@ final class Browser: NSObject, ObservableObject {
     /// Its window closed for good, with others open: every page let go.
     func closeAll() {
         retired = true
+        // The window's look at its idle tabs ends with it: each window
+        // closed left its timer turning for as long as the app ran.
+        dozing?.invalidate()
+        dozing = nil
+        pressure?.cancel()
+        pressure = nil
         screenshot.close()
         cancelChosenLogin()
         invalidateAccountField()
-        dropDialer()
         cancelDisplay()
         cancelCapture()
         for questions in heldDialogs.values { questions.forEach { $0.dismiss() } }
@@ -4273,7 +4290,8 @@ final class Browser: NSObject, ObservableObject {
         // The third and fourth after them, in the column's order, each
         // beside the last page of the split (a pin as its page's copy).
         for tab in picked.dropFirst(2) {
-            guard let made = split(for: right) ?? split(for: left),
+            // Two pins make a split of their copies: the one in front then.
+            guard let made = split(for: right) ?? split(for: left) ?? (left.pin != nil && right.pin != nil ? activeSplit : nil),
                   let last = tabs.first(where: { $0.id == made.right }) else { break }
             pair(tab, with: last, onLeft: false)
         }
@@ -4548,6 +4566,8 @@ final class Browser: NSObject, ObservableObject {
         tabs[index] = page
         page.go(to: url)
         if activeID == tab.id { activeID = page.id; editing = false }
+        // As replace(_:going:) does: the page it held goes on running else.
+        tab.close()
     }
 
     func select(_ tab: Tab, floatPrevious: Bool = true, unfoldGroup: Bool = true) {
@@ -4660,6 +4680,7 @@ final class Browser: NSObject, ObservableObject {
         dropQuestions(for: tab.id)
         if floating == tab.id { land(covering: false) }
         tab.rest()
+        if pictured == tab.id { pictured = nil }
         if activeID == tab.id { leave(tab) }
         writeSession(now: true)
     }
@@ -4720,14 +4741,17 @@ final class Browser: NSObject, ObservableObject {
             // their site, as Arc's pins are: the pin wakes on the page it was
             // pinned at, not wherever its links had taken it.
             tab.rest(at: prefs.pinsGoHome || prefs.pinsPeek ? tab.home : nil)
-            leave(tab)
+            if pictured == tab.id { pictured = nil }
+            // Only off the pin in front: one put down from its cross while
+            // you were elsewhere took you to whichever tab was touched last.
+            if activeID == tab.id { leave(tab) }
             writeSession(now: true)
             return
         }
 
         if tabs.count == 1 {
             if tab.isBlank {
-                NSApp.keyWindow?.performClose(nil)
+                (window ?? NSApp.keyWindow)?.performClose(nil)
             } else {
                 let fresh = Tab(configuration: Web.configuration(space: spaceID))
                 remember(tab, at: 0)
@@ -4767,7 +4791,7 @@ final class Browser: NSObject, ObservableObject {
                     editing = false
                     focusRequest += 1
                 } else {
-                    NSApp.keyWindow?.performClose(nil)
+                    (window ?? NSApp.keyWindow)?.performClose(nil)
                 }
                 return
             }
@@ -4787,6 +4811,9 @@ final class Browser: NSObject, ObservableObject {
         tab.close()
         tabs.remove(at: index)
         removeEmptyGroup(tab.groupID)
+        // Its video in the system's picture went with it: left set, nothing
+        // else floated from this window until another video took its place.
+        if pictured == tab.id { pictured = nil }
         if activeID == tab.id {
             // The neighbour on the right, or the last one if there is no
             // right — through select(), same as everywhere else you land on
@@ -4802,7 +4829,11 @@ final class Browser: NSObject, ObservableObject {
             // came from too, while that is still the tab you were on before
             // it: it was opened at the end of the row, and its neighbour
             // there is a tab you weren't reading.
-            let back = tabBefore(tab)
+            // Not back onto a pin or a grouped tab put down a moment ago:
+            // it was left on purpose, and going back would wake it.
+            let back = tabBefore(tab).flatMap { was in
+                was.asleep && (was.pin != nil || (prefs.usesTabGroups && group(of: was) != nil)) ? nil : was
+            }
             let before = prefs.closeGoesBack || tab.page != nil ? back
                 : back.flatMap { $0.id == tab.opener ? $0 : nil }
             select(partner ?? before ?? tabs[min(index, tabs.count - 1)])
@@ -4816,8 +4847,12 @@ final class Browser: NSObject, ObservableObject {
         select(keep)
         // The list is read once: closing walks the row and can add to it.
         let kept = split(for: keep)?.tabs ?? [keep.id]
-        for tab in tabs.filter({ !kept.contains($0.id) }) {
-            close(tab)
+        // Remembered as one, as Close Tabs Below is: tab by tab, only the
+        // last twelve could come back, and one ⇧⌘T at a time.
+        closingTogether(.tabs) { _ in
+            for tab in tabs.filter({ !kept.contains($0.id) }) {
+                close(tab)
+            }
         }
         select(keep)
     }
@@ -5338,6 +5373,9 @@ final class Browser: NSObject, ObservableObject {
         let partner = split(for: tab).flatMap { pair in tabs.first { $0.id == pair.partner(of: tab.id) } }
         leaveSplit(tab)
         if floating == tab.id { land() }
+        if pictured == tab.id { pictured = nil }
+        // The other window listens to it from here on (see prepare).
+        watched[tab.id] = nil
         if editingTab == tab.id { cancelTabEdit() }
         if activeID == tab.id {
             if let partner {
@@ -6775,7 +6813,6 @@ final class Browser: NSObject, ObservableObject {
             guard let web = tab.built else { return }
             self?.downloadImage(at: url, from: web, askWhere: true)
         }
-        tab.onCall = { [weak self] _, number in self?.call(number) }
         tab.searchName = { [weak self] in self.map { $0.prefs.engine.name(custom: $0.prefs.customEngine) } }
         tab.onSearch = { [weak self] tab, text in
             guard let self, let url = self.searchURL(for: text) else { return }
@@ -6842,6 +6879,14 @@ final class Browser: NSObject, ObservableObject {
             announce("\(percent)%")
         }
 
+        // What follows listens for as long as the tab is this window's, and
+        // no longer: kept with the window's own, every tab ever opened left
+        // its four behind, and one carried to another window was still
+        // heard here.
+        watched = watched.filter { $0.value.tab != nil }
+        var listening = Set<AnyCancellable>()
+        defer { watched[tab.id] = Watched(tab: tab, bag: listening) }
+
         // What plays, and what the player paused, for the player at the foot
         // of the sidebar (Player.swift).
         Publishers.CombineLatest(tab.$noisy.removeDuplicates(), tab.$stilled.removeDuplicates())
@@ -6850,7 +6895,7 @@ final class Browser: NSObject, ObservableObject {
                 guard let self, let tab else { return }
                 heard(tab, noisy: noisy, stilled: stilled)
             }
-            .store(in: &bag)
+            .store(in: &listening)
 
         // A page's title lands a beat after the page itself, and a history
         // entry that only ever holds an address is half a memory.
@@ -6868,12 +6913,12 @@ final class Browser: NSObject, ObservableObject {
                 }
                 rememberSession()
             }
-            .store(in: &bag)
+            .store(in: &listening)
 
         tab.$muted
             .dropFirst()
             .sink { [weak self] _ in self?.rememberSession() }
-            .store(in: &bag)
+            .store(in: &listening)
 
         tab.$title
             .dropFirst()
@@ -6883,7 +6928,7 @@ final class Browser: NSObject, ObservableObject {
                 guard let tab, !tab.shy, !tab.usesTor, tab.translator == nil, let url = tab.address else { return }
                 self?.history.retitle(url, title)
             }
-            .store(in: &bag)
+            .store(in: &listening)
     }
 
     /// Put the cursor back in the field, from wherever asked.
@@ -7392,6 +7437,9 @@ final class Browser: NSObject, ObservableObject {
             return
         }
         typed = words ?? shownAddress
+        // The page's own address is not something being typed: completed,
+        // it could become a longer one from History, and Return went there.
+        if words == nil { stopCompleting() }
         editing = true
         focusRequest += 1
     }
@@ -7670,7 +7718,11 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
             let owner = anyTab(for: webView)
             if owner?.usesTor == true, !OnionNetwork.permits(url), url.scheme?.lowercased() != "about" {
                 decisionHandler(.cancel)
-                owner?.failure = "This address is blocked in Tor tabs to protect the connection"
+                // A frame inside the page is refused quietly: said over the
+                // whole page, it covered a page that had loaded.
+                if action.targetFrame?.isMainFrame ?? true {
+                    owner?.failure = "This address is blocked in Tor tabs to protect the connection"
+                }
                 return
             }
             // A new-window request goes through popup policy and gets its
@@ -7811,8 +7863,11 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         }
 
         // The next document gets this site's stylesheet of hidden things,
-        // decided here because here is the last moment before it loads.
-        if action.targetFrame?.isMainFrame ?? true, let tab = tab(for: webView) {
+        // decided here because here is the last moment before it loads. A
+        // nil target is a link opening a new window: this tab stays on its
+        // page, and armed for the other site it lost its own blocker choice,
+        // its darkened frames and the frames that were playing.
+        if action.targetFrame?.isMainFrame == true, let tab = tab(for: webView) {
             let host = curtain.host(of: url)
             tab.arm(hiding: curtain.css(on: host), to: url)
             // And the blocker, on or off for where it is going.
@@ -7916,13 +7971,6 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         // judged, as for any other frame.
         guard action.targetFrame?.isMainFrame ?? false || clicked || ownSite else {
             if Store.testing { Browser.handedOff.append("\(scheme): ignored") }
-            return
-        }
-        // A phone number clicked, with the dialer on: Search's own call,
-        // not FaceTime's (see Dialer.swift).
-        if clicked, ["tel", "callto"].contains(scheme), prefs.dialerOn, let number = Dialer.number(ofTel: url.absoluteString) {
-            if Store.testing { Browser.handedOff.append("\(scheme): dialer") }
-            call(number)
             return
         }
         guard let app = NSWorkspace.shared.urlForApplication(toOpen: url) else {
@@ -8589,6 +8637,16 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
     /// blank page the flow ended on: nothing to look at, and nothing for
     /// reload to fetch, because there is no longer an address to fetch.
     func webViewDidClose(_ webView: WKWebView) {
+        // Neither a small window nor a peek is in the row, and a sign-in
+        // that ended there stayed up on its blank page.
+        if let little = LittleWindow.all.first(where: { $0.tab.built === webView }) {
+            little.close()
+            return
+        }
+        if peekTab?.built === webView {
+            closePeek()
+            return
+        }
         guard let tab = tab(for: webView) else { return }
         // A popup window is the one page it opened: when that
         // page closes itself (a sign-in, once done), the
@@ -8616,6 +8674,7 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
         guard let tab = tab(for: webView) else {
             // A small window's page came: what failed before it is over.
             littleTab(for: webView)?.failure = nil
+            if let peekTab, peekTab.built === webView { peekTab.failure = nil }
             // A peek or a small window opens at the size the site has, or
             // the one in Settings, as a tab does: neither is in the row,
             // and both opened at 100% (#691).
@@ -8724,19 +8783,21 @@ extension Browser: WKNavigationDelegate, WKUIDelegate {
     }
 
     private func fail(_ webView: WKWebView, _ error: Error) {
-        let tab = tab(for: webView) ?? littleTab(for: webView)
+        // A peek is no more in the row than a small window is: its failure
+        // went unsaid, and it showed its skeleton for good.
+        let tab = tab(for: webView) ?? littleTab(for: webView) ?? (peekTab?.built === webView ? peekTab : nil)
         tab?.uncover()
         let nsError = error as NSError
         let code = nsError.code
         // Cancelled is not a failure: it's what a redirect, a stopped load, or
         // a second Return in quick succession looks like from here.
-        guard code != NSURLErrorCancelled else { return }
+        guard code != NSURLErrorCancelled else { tab?.titleBack(); return }
         // Nor is a page that turned into a download: WebKit ends that
         // navigation with "frame load interrupted" (102) while the file goes
         // on arriving. Answered as a failure, it covered the page with "The
         // page didn't load" over a download that had worked — clicked again,
         // it downloaded again.
-        guard !(nsError.domain == "WebKitErrorDomain" && code == 102) else { return }
+        guard !(nsError.domain == "WebKitErrorDomain" && code == 102) else { tab?.titleBack(); return }
         // Nor is a video or sound file opened as a page: WebKit's own player
         // takes it over and ends the load with "plug-in handled load" (204),
         // as in Safari, while the video plays. Answered as a failure, it

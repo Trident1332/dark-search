@@ -601,6 +601,9 @@ struct SpaceDot: View {
         .onHover { hovering = $0 }
         .animation(Motion.quick, value: browser.space.colour)
         .help("\(browser.space.name) — ⌃1–⌃9, or two fingers \(browser.prefs.sidebar ? "sideways" : "up or down") over the tabs, to switch")
+        // Drawn from what it holds from the start: empty until the first
+        // switch, that one changed the icon with nothing turning over.
+        .onAppear { if shown == nil { shown = (key, symbol) } }
         .onChange(of: key) { _, now in
             let symbol = symbol
             DispatchQueue.main.async {

@@ -33,7 +33,7 @@ final class WebCryptoKey: NSObject, @unchecked Sendable {
     private var kept: Data?
     private var waiting: [(Data?) -> Void] = []
 
-    /// A store left without a delegate — a private tab's, the dialer's — is
+    /// A store left without a delegate — a private tab's — is
     /// given this one, which answers for the key alone. SiteNotifications,
     /// the delegate of every other tab's store, answers the same, and takes
     /// over a store this one had.

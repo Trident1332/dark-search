@@ -224,6 +224,34 @@ final class ProxyPersistenceTests: XCTestCase {
         XCTAssertEqual(store.proxyConfigurations.count, 1, "Only the onion-specific guard remains")
     }
 
+    func testPhoneLineIsReachedDirectlyAndOnlyAnExtensionsOwnPageMayCall() throws {
+        let proxy = Proxy.shared
+        var setup = route(9)
+        setup.phoneLine = "wss://SIP.phone-line.invalid:7443"
+        proxy.take(setup)
+        XCTAssertTrue(setup.persistent)
+        XCTAssertTrue(setup.excluded.contains("sip.phone-line.invalid"), "the phone server skips even a persistent route")
+        XCTAssertFalse(route(9).excluded.contains("sip.phone-line.invalid"))
+        let getter = NSSelectorFromString("_peerConnectionEnabled")
+        let site = WKPreferences(), own = WKPreferences()
+        guard site.responds(to: getter) else { throw XCTSkip("This WebKit has no peer-connection switch") }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
+        let enabled: (WKPreferences) -> Bool = { unsafeBitCast($0.method(for: getter), to: Getter.self)($0, getter) }
+        proxy.follow(site, profile: Profile.personalID)
+        proxy.follow(own, profile: Profile.personalID, own: true)
+        XCTAssertFalse(enabled(site), "a website still can't call")
+        XCTAssertTrue(enabled(own), "the extension's own page can")
+        // The route rebuilt: each keeps what it was handed over as.
+        setup.phoneLine = "sip.other-line.invalid"
+        proxy.take(setup)
+        XCTAssertFalse(enabled(site))
+        XCTAssertTrue(enabled(own))
+        // No phone line: the extension's page is as any other.
+        setup.phoneLine = ""
+        proxy.take(setup)
+        XCTAssertFalse(enabled(own))
+    }
+
     func testScopedProfileKeepsPeerProtectionWhenRouteIsRebuilt() throws {
         let proxy = Proxy.shared
         let profile = UUID()

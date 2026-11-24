@@ -633,6 +633,24 @@ enum ExtensionShims {
             if (reply && reply.error) throw new Error(reply.error);
             return reply ? reply.value : undefined;
           });
+      // navigator.permissions.query for the microphone or camera, in the
+      // extension's own pages: what Search remembers for this extension.
+      // WebKit answers "prompt" whatever was allowed, and a dialer that
+      // opens its "allow the microphone" tab on anything but "granted"
+      // opened one after another, a hundred in a row, each allowed at once.
+      const permissions = root.navigator && root.navigator.permissions;
+      if (permissions && typeof permissions.query === "function") {
+        const query = permissions.query.bind(permissions);
+        put(permissions, "query", (asked) => {
+          const name = asked && asked.name;
+          if (name !== "microphone" && name !== "camera") return query(asked);
+          return Promise.all([query(asked), native("capture.state", [name]).catch(() => null)]).then(([status, state]) => {
+            if (state !== "granted" && state !== "denied") return status;
+            try { Object.defineProperty(status, "state", { value: state, configurable: true }); } catch (e) {}
+            return status;
+          });
+        });
+      }
       // Chrome's APIs take a callback last, or return a promise without one.
       const call = (api) => (...args) => {
         const callback = args.length && typeof args[args.length - 1] === "function" ? args.pop() : null;
@@ -4818,6 +4836,20 @@ enum ExtensionShims {
             Trim.rulesBuilt()
             return nil
 
+        // MARK: the microphone and camera, as remembered (see the shim)
+        case "capture.state":
+            let kind: CaptureChoices.Kind
+            switch first as? String {
+            case "microphone": kind = .microphone
+            case "camera": kind = .camera
+            default: return nil
+            }
+            // The key askedForCapture keeps an extension's answer under.
+            switch CaptureChoices.mediaDecision(kind, origin: "\(Extensions.scheme)://\(id.lowercased())") {
+            case true?: return "granted"
+            case false?: return "denied"
+            case nil: return "prompt"
+            }
         // MARK: its own pages, for clients.matchAll() (see the shim)
         case "clients.pages":
             var pages: [[String: Any]] = []

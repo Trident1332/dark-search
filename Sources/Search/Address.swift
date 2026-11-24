@@ -25,7 +25,9 @@ enum Address {
         guard !text.isEmpty, !text.contains(" ") else { return nil }
 
         // Written with a scheme, it is taken at its word.
-        if let split = text.range(of: "://") {
+        // Only at the front, though: example.com/login?next=https://… has
+        // one further on, and went to the search engine for it.
+        if let split = text.range(of: "://"), isScheme(text[..<split.lowerBound]) {
             let scheme = text[..<split.lowerBound].lowercased()
             guard ours.contains(scheme) else { return nil }
             guard let url = URL(string: text) else { return nil }
@@ -46,7 +48,14 @@ enum Address {
         guard !head.contains("@") else { return nil }   // an email address
         // This Mac by its IPv6 address, [::1]:3000, is a place too.
         if head.hasPrefix("[::1]") { return URL(string: "http://" + text) }
-        let host = head.split(separator: ":").first.map(String.init) ?? String(head)
+        // And any other machine by its own: [fe80::1]:8080.
+        if head.hasPrefix("["), let close = head.firstIndex(of: "]") {
+            let inside = head[head.index(after: head.startIndex)..<close]
+            guard inside.contains(":"), inside.allSatisfy({ $0.isHexDigit || $0 == ":" || $0 == "." }) else { return nil }
+            return URL(string: "http://" + text)
+        }
+        // Compared in small letters: LOCALHOST:3000 is this Mac too.
+        let host = (head.split(separator: ":").first.map(String.init) ?? String(head)).lowercased()
         guard !OnionAddress.isOnionHost(host) else { return nil }
         guard looksLikeHost(host) else { return nil }
 
@@ -86,6 +95,12 @@ enum Address {
         return parts.url
     }
 
+    /// A letter, then letters, digits, +, - or . — what a scheme may be.
+    private static func isScheme(_ text: Substring) -> Bool {
+        guard let first = text.first, first.isASCII, first.isLetter else { return false }
+        return text.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "+-.".contains($0)) }
+    }
+
     private static func looksLikeHost(_ host: String) -> Bool {
         if host == "localhost" { return true }
 
@@ -105,6 +120,9 @@ enum Address {
         // The last label carries the weight: a dotted thing ending in letters is
         // a domain, a dotted thing ending in digits is a version number.
         let tld = labels[labels.count - 1]
+        // Or in the letters-and-digits form of one in another script,
+        // xn--p1ai for .рф.
+        if tld.hasPrefix("xn--"), tld.count > 4 { return true }
         return tld.count >= 2 && tld.allSatisfy { $0.isLetter }
     }
 

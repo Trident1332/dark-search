@@ -545,7 +545,12 @@ struct AddressField: NSViewRepresentable {
         if want != coordinator.synced {
             coordinator.synced = want
             field.stringValue = want
-            coordinator.select(from: browser.typed.count, in: field)
+            // A row walked to that doesn't begin with what was typed, found
+            // by its title say, has no ending to select: the caret goes
+            // after it, or the next key cut it at the length of the typing.
+            let typed = browser.typed
+            let begins = want.lowercased().hasPrefix(typed.lowercased())
+            coordinator.select(from: begins ? typed.utf16.count : (want as NSString).length, in: field)
         }
 
         let words = Self.placeholderWords(for: browser)
@@ -659,6 +664,12 @@ struct AddressField: NSViewRepresentable {
         func controlTextDidChange(_ note: Notification) {
             guard let field = note.object as? NSTextField else { return }
             let text = field.stringValue
+            // The ending alone taken away, by ⌘X or any key not listed
+            // below, leaves what was typed as it was: a deletion too.
+            if text == browser.typed, synced != text { deleting = true }
+            // Text still being composed, Pinyin or kana, is not finished
+            // typing: an ending written into it would take its place.
+            if (field.currentEditor() as? NSTextView)?.hasMarkedText() == true { deleting = true }
 
             browser.typed = text
             guard !deleting, let ending = browser.ending else {
@@ -671,7 +682,7 @@ struct AddressField: NSViewRepresentable {
 
             field.stringValue = text + ending
             synced = field.stringValue
-            select(from: text.count, in: field)
+            select(from: text.utf16.count, in: field)
         }
 
         /// The part after the caret, shown as selected, so the next keystroke
@@ -682,7 +693,9 @@ struct AddressField: NSViewRepresentable {
                 .backgroundColor: NSColor(Palette.ink.opacity(0.12)),
                 .foregroundColor: Palette.NS.ink,
             ]
-            let length = field.stringValue.count
+            // Counted as the text view counts, or an emoji before the
+            // ending put the selection one short.
+            let length = (field.stringValue as NSString).length
             guard start <= length else { return }
             editor.selectedRange = NSRange(location: start, length: length - start)
             // The start in view, not the end: selecting a long completion
@@ -726,8 +739,15 @@ struct AddressField: NSViewRepresentable {
                 return true
             case #selector(NSResponder.deleteBackward(_:)),
                  #selector(NSResponder.deleteForward(_:)),
-                 #selector(NSResponder.deleteWordForward(_:)):
+                 #selector(NSResponder.deleteWordForward(_:)),
+                 #selector(NSResponder.deleteToBeginningOfLine(_:)),
+                 #selector(NSResponder.deleteToEndOfLine(_:)),
+                 #selector(NSResponder.deleteToBeginningOfParagraph(_:)),
+                 #selector(NSResponder.deleteToEndOfParagraph(_:)):
                 deleting = true
+                // A delete with nothing to take changes nothing, and left
+                // set this cost the next letter typed its ending.
+                DispatchQueue.main.async { [weak self] in self?.deleting = false }
                 return false
             default:
                 return false

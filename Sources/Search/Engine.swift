@@ -72,6 +72,23 @@ enum Engine: String, CaseIterable, Identifiable {
         return URL(string: base.replacingOccurrences(of: mark, with: escaped), encodingInvalidCharacters: false)
     }
 
+    /// A Google search as someone in `country` asks it. Through a proxy,
+    /// Google places you by its own reading of the proxy's address, which
+    /// can be another country altogether: the shops of that country and
+    /// its pages came first, the site you meant further down. `gl` is
+    /// Google's own word for "results as from here"; it says nothing the
+    /// proxy's address doesn't. Any other engine's address is left as it is.
+    static func placed(_ url: URL, in country: String?) -> URL {
+        guard let code = ProxyCountry.normalized(country),
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let host = parts.host?.lowercased(), host == "google.com" || host == "www.google.com",
+              parts.path == "/search",
+              parts.percentEncodedQueryItems?.contains(where: { $0.name == "gl" }) != true
+        else { return url }
+        parts.percentEncodedQueryItems = (parts.percentEncodedQueryItems ?? []) + [URLQueryItem(name: "gl", value: code.lowercased())]
+        return parts.url ?? url
+    }
+
     private static let mark = "SEARCHWORDSGOHERE"
 
     private static let unreserved = CharacterSet(
